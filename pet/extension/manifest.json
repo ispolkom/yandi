@@ -1,0 +1,67 @@
+{
+  "manifest_version": 2,
+  "name": "YANDI Council Bridge",
+  "version": "3.0",
+  "description": "Verify any text with YANDI: local AI + web search + multi-model consensus",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "council-bridge@yandi.local",
+      "strict_min_version": "91.0"
+    }
+  },
+  "permissions": [
+    "tabs",
+    "contextMenus",
+    "activeTab",
+    "<all_urls>",
+    "http://127.0.0.1:9010/*",
+    "*://claude.ai/*",
+    "*://chatgpt.com/*",
+    "*://chat.deepseek.com/*",
+    "*://www.kimi.com/*",
+    "*://kimi.com/*",
+  ],
+  "browser_action": {
+    "default_title": "YANDI",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": true
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content_verify.js"],
+      "run_at": "document_idle",
+      "exclude_matches": [
+        "*://claude.ai/*",
+        "*://chatgpt.com/*",
+        "*://chat.deepseek.com/*",
+        "*://www.kimi.com/*",
+      ]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://claude.ai/*"],
+      "js": ["content_claude.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://chatgpt.com/*"],
+      "js": ["content_gpt.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://chat.deepseek.com/*"],
+      "js": ["content_deepseek.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://www.kimi.com/*", "*://kimi.com/*"],
+      "js": ["content_kimi.js"],
+      "run_at": "document_idle"
+    },
+  ]
+}

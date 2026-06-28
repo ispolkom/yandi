@@ -1,0 +1,102 @@
+{
+  "cache_check": {
+    "enabled": true,
+    "latency_avg": 0.002,
+    "reliability": 1.0,
+    "cost_score": 0.0,
+    "description": "Семантический кэш Redis + FAISS"
+  },
+  "risk_assess": {
+    "enabled": true,
+    "latency_avg": 0.002,
+    "reliability": 1.0,
+    "cost_score": 0.0,
+    "description": "Оценка риска (hardcoded правила)"
+  },
+  "plan": {
+    "enabled": true,
+    "latency_avg": 0.002,
+    "reliability": 0.95,
+    "cost_score": 0.2,
+    "description": "Planning Engine (Qwen3:14b → 7B в будущем)",
+    "model": "qwen9b:q8"
+  },
+  "intent": {
+    "enabled": true,
+    "latency_avg": 6.267,
+    "reliability": 0.995,
+    "cost_score": 0.5,
+    "description": "Intent Analyzer (Qwen3:14b)",
+    "model": "qwen9b:q8"
+  },
+  "clarify": {
+    "enabled": true,
+    "latency_avg": 3.0,
+    "reliability": 0.9,
+    "cost_score": 0.2,
+    "description": "Clarification Engine (Qwen3:14b → 7B в будущем)",
+    "model": "qwen9b:q8"
+  },
+  "enrich": {
+    "enabled": true,
+    "latency_avg": 8.513,
+    "reliability": 0.95,
+    "cost_score": 0.5,
+    "description": "Query Enricher (Qwen3:14b)",
+    "model": "qwen9b:q8"
+  },
+  "local_search": {
+    "enabled": true,
+    "latency_avg": 0.036,
+    "reliability": 1.0,
+    "cost_score": 0.1,
+    "description": "Local Registry Search (nomic-embed + FAISS)",
+    "model": "nomic-embed-text"
+  },
+  "web_query": {
+    "enabled": true,
+    "latency_avg": 4.0,
+    "reliability": 0.9,
+    "cost_score": 0.5,
+    "description": "Internet Query Formulator (Qwen3:14b)",
+    "model": "qwen9b:q8"
+  },
+  "web_scrape": {
+    "enabled": true,
+    "latency_avg": 12.052,
+    "reliability": 0.8,
+    "cost_score": 0.1,
+    "description": "Web Scraper (DuckDuckGo + trafilatura)"
+  },
+  "synthesize": {
+    "enabled": true,
+    "latency_avg": 30.721,
+    "reliability": 0.995,
+    "cost_score": 0.8,
+    "description": "Answer Synthesizer (Qwen3:14b)",
+    "model": "qwen9b:q8"
+  },
+  "optimistic_respond": {
+    "enabled": true,
+    "latency_avg": 0.01,
+    "reliability": 1.0,
+    "cost_score": 0.0,
+    "description": "Optimistic Responder (код)"
+  },
+  "validate": {
+    "enabled": true,
+    "latency_avg": 30.0,
+    "reliability": 0.85,
+    "cost_score": 0.6,
+    "description": "Parallel Validator (локальные Ollama-ноды)",
+    "model": "qwen9b:q8"
+  },
+  "arbitrate": {
+    "enabled": true,
+    "latency_avg": 20.0,
+    "reliability": 0.9,
+    "cost_score": 0.9,
+    "description": "Consensus Arbiter (Qwen3:14b)",
+    "model": "qwen9b:q8"
+  }
+}

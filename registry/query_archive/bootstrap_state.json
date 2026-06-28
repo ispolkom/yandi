@@ -1,0 +1,13 @@
+{
+  "science:physics": {
+    "status": "done",
+    "tag": "science:physics",
+    "total": 2,
+    "processed": 2,
+    "traces": 2,
+    "errors": 0,
+    "started_at": 1780913705.528851,
+    "updated_at": 1780913834.178511,
+    "finished_at": 1780913835.178749
+  }
+}

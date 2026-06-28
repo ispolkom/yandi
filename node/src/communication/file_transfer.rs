@@ -1,0 +1,919 @@
+// src/communication/file_transfer.rs
+//! Chunked file transfer with ACK tracking
+
+use crate::util::HashId;
+use crate::p2p::{P2PTransport, P2PPacket, P2PPacketType};
+use crate::communication::{CommPacket, CommControlPacket};
+use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use anyhow::Result;
+use tokio::sync::{Mutex, watch};
+use tracing::{info, error, debug, warn};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::{Aead, AeadCore, OsRng}};
+
+fn encrypt_chunk(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
+    let cipher = Aes256Gcm::new_from_slice(key).expect("32-byte key");
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ciphertext = cipher.encrypt(&nonce, plaintext).expect("AES-GCM encrypt");
+    let mut out = Vec::with_capacity(1 + 12 + ciphertext.len());
+    out.push(0x01u8);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ciphertext);
+    out
+}
+
+fn decrypt_chunk(key: &[u8; 32], data: &[u8]) -> Result<Vec<u8>> {
+    if data.len() < 12 {
+        return Err(anyhow::anyhow!("Encrypted chunk too short ({})", data.len()));
+    }
+    let cipher = Aes256Gcm::new_from_slice(key).expect("32-byte key");
+    let nonce = Nonce::from_slice(&data[..12]);
+    cipher
+        .decrypt(nonce, &data[12..])
+        .map_err(|_| anyhow::anyhow!("AES-GCM authentication failed"))
+}
+
+/// Фиксированный размер P2P чанка для transport-safe MTU.
+/// Этот размер должен совпадать с browser upload chunk size в Web UI/API.
+pub const FILE_TRANSFER_CHUNK_SIZE: usize = 700;
+const ACK_WAIT_SLICE_MS: u64 = 200;
+const ACK_ROUND_TIMEOUT_MS: u64 = 2000;
+const MAX_RETRY_ROUNDS: usize = 6;
+const MAX_PRESTART_CHUNKS_PER_FILE: usize = 256;
+
+
+/// Сохранить чекпоинт передачи в файл
+fn save_checkpoint(file_id: &str, filename: &str, sent_chunks: u32, total_chunks: u32) -> Result<()> {
+    let cache_dir = std::path::PathBuf::from("/home/iam/yandi/data/.yandi_cache");
+    std::fs::create_dir_all(&cache_dir)?;
+    let checkpoint_path = cache_dir.join(format!("transfer_{}.state", file_id));
+    let content = format!("{}\n{}\n{}\n", filename, sent_chunks, total_chunks);
+    std::fs::write(&checkpoint_path, content)?;
+    debug!("💾 Checkpoint saved: {} chunks sent", sent_chunks);
+    Ok(())
+}
+
+#[derive(Debug)]
+struct CheckpointData {
+    filename: String,
+    sent_chunks: u32,
+    total_chunks: u32,
+}
+
+
+/// Загрузить чекпоинт передачи из файла
+fn load_checkpoint(file_id: &str) -> Result<Option<CheckpointData>> {
+    let cache_dir = std::path::PathBuf::from("/home/iam/yandi/data/.yandi_cache");
+    let checkpoint_path = cache_dir.join(format!("transfer_{}.state", file_id));
+    if !checkpoint_path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&checkpoint_path)?;
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() >= 3 {
+        let filename = lines[0].to_string();
+        let sent_chunks = lines[1].parse::<u32>().unwrap_or(0);
+        let total_chunks = lines[2].parse::<u32>().unwrap_or(0);
+        debug!("📂 Checkpoint loaded: {} ({} sent of {} chunks)", filename, sent_chunks, total_chunks);
+        Ok(Some(CheckpointData { filename, sent_chunks, total_chunks }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn sanitize_filename(filename: &str) -> String {
+    // SEC-08: strip path components, reject traversal and unicode path separators
+    let name = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+
+    let sanitized: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    let trimmed = sanitized.trim_start_matches('.');
+    let trimmed = trimmed.trim_end_matches(|c: char| c == '.' || c == ' ');
+
+    if trimmed.is_empty() {
+        "file".to_string()
+    } else {
+        trimmed.chars().take(200).collect()
+    }
+}
+
+fn storage_filename(file_id: &str, filename: &str) -> String {
+    format!("{}__{}", file_id, sanitize_filename(filename))
+}
+
+fn chunk_ranges_to_indices(ranges: &[crate::communication::FileChunkRange]) -> Vec<u32> {
+    let mut result = Vec::new();
+    for range in ranges {
+        for idx in range.start..=range.end {
+            result.push(idx);
+        }
+    }
+    result
+}
+
+fn collect_missing_ranges(received_chunks: &[bool]) -> Vec<crate::communication::FileChunkRange> {
+    let mut ranges = Vec::new();
+    let mut start: Option<u32> = None;
+
+    for (idx, received) in received_chunks.iter().enumerate() {
+        if !received {
+            if start.is_none() {
+                start = Some(idx as u32);
+            }
+        } else if let Some(range_start) = start.take() {
+            ranges.push(crate::communication::FileChunkRange {
+                start: range_start,
+                end: idx as u32 - 1,
+            });
+        }
+    }
+
+    if let Some(range_start) = start {
+        ranges.push(crate::communication::FileChunkRange {
+            start: range_start,
+            end: received_chunks.len() as u32 - 1,
+        });
+    }
+
+    ranges
+}
+
+fn build_transfer_start_packet(
+    my_node_id: HashId,
+    file_id: &str,
+    filename: &str,
+    file_size: u64,
+    mime_type: &str,
+    total_chunks: u32,
+) -> Result<P2PPacket> {
+    let start_msg = crate::communication::FileChunkStart {
+        file_id: file_id.to_string(),
+        filename: filename.to_string(),
+        file_size,
+        mime_type: mime_type.to_string(),
+        total_chunks,
+    };
+    let start_data = serde_json::to_vec(&start_msg)?;
+    Ok(P2PPacket::new(
+        P2PPacketType::FileTransferStart,
+        my_node_id,
+        false,
+        start_data,
+    ))
+}
+
+
+/// File Transfer Manager
+pub struct FileTransferManager {
+    my_node_id: HashId,
+    transport: Arc<P2PTransport>,
+
+    /// Отправляемые файлы (outgoing transfers) - в памяти
+
+    /// Отправляемые файлы с диска (outgoing transfers) - большие файлы
+    outgoing_disk: Mutex<HashMap<String, OutgoingTransferDisk>>,
+
+    /// Принимаемые файлы (incoming transfers)
+    incoming: Mutex<HashMap<String, IncomingTransfer>>,
+
+    /// Недавно завершённые входящие передачи.
+    /// Нужны, чтобы повторно ответить FileComplete, если финальный ACK потерялся.
+    completed_incoming: Mutex<HashSet<String>>,
+
+    /// Чанки, пришедшие раньше FileTransferStart из-за reorder в dual-path.
+    prestart_chunks: Mutex<HashMap<String, Vec<BufferedChunk>>>,
+
+}
+
+/// Отправляемый файл (в памяти)
+#[derive(Debug)]
+struct OutgoingTransferDisk {
+    filename: String,
+    file_size: u64,
+    mime_type: String,
+    total_chunks: u32,
+    file_id: String,
+    file_path: std::path::PathBuf,
+    last_checkpoint: u32,
+    pending_missing: Option<Vec<u32>>,
+    response_tx: watch::Sender<u64>,
+    response_version: u64,
+    remote_completed: bool,
+}
+
+/// Принимаемый файл
+#[derive(Debug)]
+struct IncomingTransfer {
+    filename: String,
+    file_size: u64,
+    mime_type: String,
+    total_chunks: u32,
+    temp_path: std::path::PathBuf,
+    final_path: std::path::PathBuf,
+    received_chunks: Vec<bool>,
+    received_count: u32,
+    from_peer: HashId,
+}
+
+#[derive(Debug, Clone)]
+struct BufferedChunk {
+    chunk_index: u32,
+    total_chunks: u32,
+    data: Vec<u8>,
+}
+
+impl FileTransferManager {
+    /// Создать новый FileTransferManager
+    pub fn new(my_node_id: HashId, transport: Arc<P2PTransport>) -> Self {
+        Self {
+            my_node_id,
+            transport,
+            outgoing_disk: Mutex::new(HashMap::new()),
+            incoming: Mutex::new(HashMap::new()),
+            completed_incoming: Mutex::new(HashSet::new()),
+            prestart_chunks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Начать отправку файла с диска
+    pub async fn start_file_transfer_from_disk(
+        &self,
+        to: HashId,
+        filename: String,
+        file_path: std::path::PathBuf,
+        mime_type: String,
+    ) -> Result<String> {
+        self.start_file_transfer_from_disk_with_id(to, None, filename, file_path, mime_type).await
+    }
+
+    /// Начать отправку файла с заранее известным идентификатором
+    pub async fn start_file_transfer_from_disk_with_id(
+        &self,
+        to: HashId,
+        explicit_file_id: Option<String>,
+        filename: String,
+        file_path: std::path::PathBuf,
+        mime_type: String,
+    ) -> Result<String> {
+        let metadata = tokio::fs::metadata(&file_path).await?;
+        let file_size = metadata.len();
+        let total_chunks = ((file_size as usize + FILE_TRANSFER_CHUNK_SIZE - 1) / FILE_TRANSFER_CHUNK_SIZE) as u32;
+
+        let file_id = explicit_file_id.unwrap_or_else(|| {
+            format!(
+                "{}_{:016x}",
+                hex::encode(&self.my_node_id.0[..8]),
+                rand::random::<u64>()
+            )
+        });
+
+        info!("📤 Starting file transfer from disk: {} ({} bytes, {} chunks)",
+            filename, file_size, total_chunks);
+
+        let start_msg = crate::communication::FileChunkStart {
+            file_id: file_id.clone(),
+            filename: filename.clone(),
+            file_size,
+            mime_type: mime_type.clone(),
+            total_chunks,
+        };
+        let start_data = serde_json::to_vec(&start_msg)?;
+        let p2p_packet = P2PPacket::new(
+            P2PPacketType::FileTransferStart,
+            self.my_node_id,
+            false,
+            start_data,
+        );
+        self.transport.send_packet_dual_path(to, p2p_packet).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let (response_tx, _) = watch::channel(0u64);
+        let transfer = OutgoingTransferDisk {
+            filename,
+            file_size,
+            mime_type,
+            total_chunks,
+            file_id: file_id.clone(),
+            file_path: file_path.clone(),
+            last_checkpoint: 0,
+            pending_missing: None,
+            response_tx,
+            response_version: 0,
+            remote_completed: false,
+        };
+        self.outgoing_disk.lock().await.insert(file_id.clone(), transfer);
+
+        self.send_chunks(&to, &file_id).await?;
+
+        Ok(file_id)
+    }
+
+    /// Зарегистрировать потоковую отправку: создаёт outgoing state и отправляет FileTransferStart,
+    /// но не запускает проход по всем чанкам с диска.
+    pub async fn register_streaming_transfer(
+        &self,
+        to: HashId,
+        explicit_file_id: Option<String>,
+        filename: String,
+        file_path: std::path::PathBuf,
+        mime_type: String,
+        file_size: u64,
+        total_chunks: u32,
+    ) -> Result<String> {
+        let file_id = explicit_file_id.unwrap_or_else(|| {
+            format!(
+                "{}_{:016x}",
+                hex::encode(&self.my_node_id.0[..8]),
+                rand::random::<u64>()
+            )
+        });
+
+        {
+            let outgoing_disk = self.outgoing_disk.lock().await;
+            if outgoing_disk.contains_key(&file_id) {
+                return Ok(file_id);
+            }
+        }
+
+        info!(
+            "📤 Starting streaming file transfer: {} ({} bytes, {} chunks)",
+            filename, file_size, total_chunks
+        );
+
+        let start_msg = crate::communication::FileChunkStart {
+            file_id: file_id.clone(),
+            filename: filename.clone(),
+            file_size,
+            mime_type: mime_type.clone(),
+            total_chunks,
+        };
+        let start_data = serde_json::to_vec(&start_msg)?;
+        let p2p_packet = P2PPacket::new(
+            P2PPacketType::FileTransferStart,
+            self.my_node_id,
+            false,
+            start_data,
+        );
+        self.transport
+            .send_packet_dual_path(to, p2p_packet)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let (response_tx, _) = watch::channel(0u64);
+        let transfer = OutgoingTransferDisk {
+            filename,
+            file_size,
+            mime_type,
+            total_chunks,
+            file_id: file_id.clone(),
+            file_path,
+            last_checkpoint: 0,
+            pending_missing: None,
+            response_tx,
+            response_version: 0,
+            remote_completed: false,
+        };
+        self.outgoing_disk.lock().await.insert(file_id.clone(), transfer);
+
+        Ok(file_id)
+    }
+
+    /// Отправить чанки файла (из памяти)
+    async fn send_chunks(&self, to: &HashId, file_id: &str) -> Result<()> {
+        let mut next_chunk = 0;
+
+        // Загружаем чекпоинт при старте
+        if let Ok(Some(checkpoint)) = load_checkpoint(file_id) {
+            let (current_filename, total) = {
+                let outgoing_disk = self.outgoing_disk.lock().await;
+                if let Some(transfer) = outgoing_disk.get(file_id) {
+                    (transfer.filename.clone(), transfer.total_chunks)
+                } else {
+                    (String::new(), 0)
+                }
+            };
+            if checkpoint.filename == current_filename && checkpoint.total_chunks == total {
+                next_chunk = checkpoint.sent_chunks;
+                info!("🔄 Resuming transfer from chunk {}", next_chunk);
+            } else {
+                let _ = std::fs::remove_file(
+                    std::path::PathBuf::from("/home/iam/yandi/data/.yandi_cache")
+                        .join(format!("transfer_{}.state", file_id))
+                );
+                info!("📁 Starting new transfer (old checkpoint mismatched)");
+            }
+        }
+
+        let total_chunks = {
+            let outgoing_disk = self.outgoing_disk.lock().await;
+            let transfer = outgoing_disk.get(file_id).ok_or_else(|| anyhow::anyhow!("Transfer not found"))?;
+            transfer.total_chunks
+        };
+
+        while next_chunk < total_chunks {
+            self.send_single_chunk_from_disk(to, file_id, next_chunk).await?;
+            next_chunk += 1;
+            tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+
+            // Сохраняем чекпоинт каждые 100 чанков
+            if next_chunk % 100 == 0 {
+                let filename = {
+                    let outgoing_disk = self.outgoing_disk.lock().await;
+                    if let Some(transfer) = outgoing_disk.get(file_id) {
+                        transfer.filename.clone()
+                    } else {
+                        String::new()
+                    }
+                };
+                let total = {
+                    let outgoing_disk = self.outgoing_disk.lock().await;
+                    if let Some(transfer) = outgoing_disk.get(file_id) {
+                        transfer.total_chunks
+                    } else {
+                        0
+                    }
+                };
+                if let Err(e) = save_checkpoint(file_id, &filename, next_chunk, total) {
+                    warn!("Failed to save checkpoint: {}", e);
+                }
+            }
+        }
+
+        self.finalize_streaming_transfer(*to, file_id).await
+    }
+
+
+    /// Отправить один чанк с диска (бинарный формат)
+    async fn send_single_chunk_from_disk(&self, to: &HashId, file_id: &str, chunk_index: u32) -> Result<()> {
+        let (file_path, total_chunks) = {
+            let outgoing_disk = self.outgoing_disk.lock().await;
+            let transfer = outgoing_disk.get(file_id).ok_or_else(|| anyhow::anyhow!("Transfer not found"))?;
+            (transfer.file_path.clone(), transfer.total_chunks)
+        };
+
+        let start = (chunk_index as usize) * FILE_TRANSFER_CHUNK_SIZE;
+        let mut file = tokio::fs::File::open(&file_path).await?;
+        use tokio::io::{AsyncSeekExt, AsyncReadExt};
+        file.seek(std::io::SeekFrom::Start(start as u64)).await?;
+
+        let mut chunk_data = vec![0u8; FILE_TRANSFER_CHUNK_SIZE];
+        let bytes_read = file.read(&mut chunk_data).await?;
+        chunk_data.truncate(bytes_read);
+
+        // Per-file AES-256-GCM application-layer encryption
+        let file_key = self.transport.derive_file_key(to, file_id).await;
+        let payload = match file_key {
+            Some(ref key) => encrypt_chunk(key, &chunk_data),
+            None => chunk_data.clone(),
+        };
+
+        let mut binary_data = Vec::new();
+        let file_id_bytes = file_id.as_bytes();
+        let file_id_len = file_id_bytes.len() as u8;
+        binary_data.push(file_id_len);
+        binary_data.extend_from_slice(file_id_bytes);
+        binary_data.extend_from_slice(&chunk_index.to_be_bytes());
+        binary_data.extend_from_slice(&total_chunks.to_be_bytes());
+        binary_data.extend_from_slice(&payload);
+
+        let p2p_packet = P2PPacket::new(
+            P2PPacketType::FileChunk,
+            self.my_node_id,
+            false,
+            binary_data,
+        );  // total_parts=0, каждый чанк независим
+        self.transport.send_packet_dual_path(*to, p2p_packet).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        debug!("📦 Sent chunk {}/{} from disk ({} bytes)", chunk_index + 1, total_chunks, bytes_read);
+        Ok(())
+    }
+
+    /// Отправить уже полученный chunk напрямую, без повторного чтения с диска.
+    pub async fn send_streaming_chunk(
+        &self,
+        to: HashId,
+        file_id: &str,
+        chunk_index: u32,
+        chunk_data: &[u8],
+    ) -> Result<()> {
+        let total_chunks = {
+            let outgoing_disk = self.outgoing_disk.lock().await;
+            let transfer = outgoing_disk
+                .get(file_id)
+                .ok_or_else(|| anyhow::anyhow!("Transfer not found"))?;
+            transfer.total_chunks
+        };
+
+        // Per-file AES-256-GCM application-layer encryption
+        let file_key = self.transport.derive_file_key(&to, file_id).await;
+        let payload = match file_key {
+            Some(ref key) => encrypt_chunk(key, chunk_data),
+            None => chunk_data.to_vec(),
+        };
+
+        let mut binary_data = Vec::with_capacity(1 + file_id.len() + 8 + payload.len());
+        let file_id_bytes = file_id.as_bytes();
+        let file_id_len = file_id_bytes.len() as u8;
+        binary_data.push(file_id_len);
+        binary_data.extend_from_slice(file_id_bytes);
+        binary_data.extend_from_slice(&chunk_index.to_be_bytes());
+        binary_data.extend_from_slice(&total_chunks.to_be_bytes());
+        binary_data.extend_from_slice(&payload);
+
+        let p2p_packet = P2PPacket::new(
+            P2PPacketType::FileChunk,
+            self.my_node_id,
+            false,
+            binary_data,
+        );
+        self.transport
+            .send_packet_dual_path(to, p2p_packet)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        debug!(
+            "📦 Streamed chunk {}/{} directly ({} bytes)",
+            chunk_index + 1,
+            total_chunks,
+            chunk_data.len()
+        );
+        Ok(())
+    }
+
+    /// Отправить FileTransferEnd
+    async fn send_file_transfer_end(&self, to: &HashId, file_id: &str) -> Result<()> {
+        let end_msg = crate::communication::FileChunkEnd {
+            file_id: file_id.to_string(),
+        };
+        let end_data = serde_json::to_vec(&end_msg)?;
+        let p2p_packet = P2PPacket::new(
+            P2PPacketType::FileTransferEnd,
+            self.my_node_id,
+            false,
+            end_data,
+        );
+        self.transport.send_packet_dual_path(*to, p2p_packet).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        Ok(())
+    }
+
+
+    /// Начать приём файла
+    pub async fn start_receiving(&self, from: HashId, start: crate::communication::FileChunkStart) -> Result<()> {
+        info!("📥 Receiving file: {} ({} bytes, {} chunks)", 
+            start.filename, start.file_size, start.total_chunks);
+
+        self.completed_incoming.lock().await.remove(&start.file_id);
+
+        let downloads_dir = std::path::PathBuf::from("/home/iam/yandi/downloads");
+        std::fs::create_dir_all(&downloads_dir)?;
+        let local_name = storage_filename(&start.file_id, &start.filename);
+        let final_path = downloads_dir.join(&local_name);
+        let temp_path = downloads_dir.join(format!("{}.part", &local_name));
+
+        {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&temp_path)?;
+            file.set_len(start.file_size)?;
+        }
+
+        let transfer = IncomingTransfer {
+            filename: start.filename,
+            file_size: start.file_size,
+            mime_type: start.mime_type,
+            total_chunks: start.total_chunks,
+            temp_path,
+            final_path,
+            received_chunks: vec![false; start.total_chunks as usize],
+            received_count: 0,
+            from_peer: from,
+        };
+        let file_id = start.file_id.clone();
+        self.incoming.lock().await.insert(file_id.clone(), transfer);
+
+        if let Some(chunks) = self.prestart_chunks.lock().await.remove(&file_id) {
+            info!("📦 Replaying {} buffered pre-start chunks for {}", chunks.len(), file_id);
+            for chunk in chunks {
+                self.apply_incoming_chunk(&file_id, chunk.chunk_index, chunk.total_chunks, &chunk.data).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn handle_chunk(&self, data: Vec<u8>) -> Result<bool> {
+        if data.len() < 9 {
+            return Ok(false);
+        }
+
+        let file_id_len = data[0] as usize;
+        if data.len() < 1 + file_id_len + 8 {
+            return Ok(false);
+        }
+
+        let file_id = String::from_utf8_lossy(&data[1..1 + file_id_len]).to_string();
+        let chunk_index = u32::from_be_bytes([
+            data[1 + file_id_len], data[2 + file_id_len], data[3 + file_id_len], data[4 + file_id_len]
+        ]);
+        let total_chunks = u32::from_be_bytes([
+            data[5 + file_id_len], data[6 + file_id_len], data[7 + file_id_len], data[8 + file_id_len]
+        ]);
+        let chunk_data = &data[9 + file_id_len..];
+
+        {
+            let incoming = self.incoming.lock().await;
+            if !incoming.contains_key(&file_id) {
+                drop(incoming);
+                let mut prestart = self.prestart_chunks.lock().await;
+                let entry = prestart.entry(file_id.clone()).or_default();
+                if entry.len() < MAX_PRESTART_CHUNKS_PER_FILE {
+                    entry.push(BufferedChunk {
+                        chunk_index,
+                        total_chunks,
+                        data: chunk_data.to_vec(),
+                    });
+                    debug!("📥 Buffered pre-start chunk {}/{} for {}", chunk_index + 1, total_chunks, file_id);
+                } else {
+                    warn!("⚠️ Pre-start buffer full for {}, dropping chunk {}", file_id, chunk_index);
+                }
+                return Ok(false);
+            }
+        }
+
+        self.apply_incoming_chunk(&file_id, chunk_index, total_chunks, chunk_data).await
+    }
+
+    async fn apply_incoming_chunk(
+        &self,
+        file_id: &str,
+        chunk_index: u32,
+        total_chunks: u32,
+        chunk_data: &[u8],
+    ) -> Result<bool> {
+        // Decrypt per-file AES-256-GCM if present (prefix byte 0x01)
+        let decrypted_buf: Vec<u8>;
+        let plain_data: &[u8] = if chunk_data.first() == Some(&0x01) && chunk_data.len() > 13 {
+            let from_peer = {
+                let incoming = self.incoming.lock().await;
+                incoming.get(file_id).map(|t| t.from_peer)
+            };
+            let peer = from_peer.ok_or_else(|| anyhow::anyhow!("No transfer record for {}", file_id))?;
+            let key = self.transport.derive_file_key(&peer, file_id).await
+                .ok_or_else(|| anyhow::anyhow!("No file key available for {}", file_id))?;
+            decrypted_buf = decrypt_chunk(&key, &chunk_data[1..])?;
+            &decrypted_buf
+        } else {
+            chunk_data
+        };
+
+        let mut incoming = self.incoming.lock().await;
+        let Some(transfer) = incoming.get_mut(file_id) else {
+            return Ok(false);
+        };
+
+        if transfer.total_chunks != total_chunks {
+            warn!(
+                "⚠️ total_chunks mismatch for {}: start={} chunk={}",
+                file_id,
+                transfer.total_chunks,
+                total_chunks
+            );
+        }
+
+        let idx = chunk_index as usize;
+        if idx >= transfer.received_chunks.len() {
+            return Ok(false);
+        }
+
+        let write_result = (|| -> std::io::Result<()> {
+            use std::io::{Seek, SeekFrom, Write};
+
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&transfer.temp_path)?;
+            let offset = (chunk_index as u64) * (FILE_TRANSFER_CHUNK_SIZE as u64);
+            file.seek(SeekFrom::Start(offset))?;
+            file.write_all(plain_data)?;
+            Ok(())
+        })();
+
+        if let Err(e) = write_result {
+            return Err(anyhow::anyhow!("Failed to write incoming chunk: {}", e));
+        }
+
+        if !transfer.received_chunks[idx] {
+            transfer.received_chunks[idx] = true;
+            transfer.received_count += 1;
+        }
+        debug!("📦 Received chunk {}/{}", chunk_index + 1, transfer.total_chunks);
+        Ok(transfer.received_count == transfer.total_chunks)
+    }
+
+    async fn send_missing_ranges(
+        &self,
+        to: HashId,
+        file_id: &str,
+        missing_ranges: Vec<crate::communication::FileChunkRange>,
+    ) -> Result<()> {
+        let payload = serde_json::to_vec(&crate::communication::FileMissing {
+            file_id: file_id.to_string(),
+            missing_ranges,
+        })?;
+        let packet = P2PPacket::new(
+            P2PPacketType::FileMissing,
+            self.my_node_id,
+            false,
+            payload,
+        );
+        self.transport.send_packet_dual_path(to, packet).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        Ok(())
+    }
+
+    async fn send_transfer_complete(&self, to: HashId, file_id: &str) -> Result<()> {
+        let payload = serde_json::to_vec(&crate::communication::FileTransferComplete {
+            file_id: file_id.to_string(),
+        })?;
+        let packet = P2PPacket::new(
+            P2PPacketType::FileComplete,
+            self.my_node_id,
+            false,
+            payload,
+        );
+        self.transport.send_packet_dual_path(to, packet).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        Ok(())
+    }
+
+    pub async fn handle_missing(
+        &self,
+        file_id: &str,
+        missing_ranges: Vec<crate::communication::FileChunkRange>,
+    ) -> Result<()> {
+        let mut outgoing_disk = self.outgoing_disk.lock().await;
+        if let Some(transfer) = outgoing_disk.get_mut(file_id) {
+            transfer.pending_missing = Some(chunk_ranges_to_indices(&missing_ranges));
+            transfer.response_version += 1;
+            let _ = transfer.response_tx.send(transfer.response_version);
+        }
+        Ok(())
+    }
+
+    pub async fn handle_transfer_complete(&self, file_id: &str) -> Result<()> {
+        let mut outgoing_disk = self.outgoing_disk.lock().await;
+        if let Some(transfer) = outgoing_disk.get_mut(file_id) {
+            transfer.remote_completed = true;
+            transfer.pending_missing = None;
+            transfer.response_version += 1;
+            let _ = transfer.response_tx.send(transfer.response_version);
+        }
+        Ok(())
+    }
+
+    pub async fn handle_transfer_end(&self, from: HashId, file_id: &str) -> Result<()> {
+        let maybe_transfer = {
+            let incoming = self.incoming.lock().await;
+            incoming.get(file_id).map(|transfer| {
+                (
+                    transfer.received_count == transfer.total_chunks,
+                    collect_missing_ranges(&transfer.received_chunks),
+                    transfer.filename.clone(),
+                    transfer.mime_type.clone(),
+                    transfer.temp_path.clone(),
+                    transfer.final_path.clone(),
+                    transfer.file_size,
+                )
+            })
+        };
+
+        let Some((is_complete, missing_ranges, filename, mime_type, temp_path, final_path, file_size)) = maybe_transfer else {
+            let already_completed = self.completed_incoming.lock().await.contains(file_id);
+            if already_completed {
+                info!("🔁 Re-sending FileComplete for already finalized transfer {}", file_id);
+                self.send_transfer_complete(from, file_id).await?;
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!("Incoming transfer not found"));
+        };
+
+        if is_complete {
+            let actual_size = std::fs::metadata(&temp_path)?.len();
+            if actual_size != file_size {
+                return Err(anyhow::anyhow!(
+                    "Incoming file size mismatch for {}: expected {}, got {}",
+                    file_id,
+                    file_size,
+                    actual_size
+                ));
+            }
+
+            std::fs::rename(&temp_path, &final_path)?;
+            info!(
+                "✅ File received: {} ({} bytes, mime={})",
+                filename,
+                actual_size,
+                mime_type
+            );
+            self.completed_incoming.lock().await.insert(file_id.to_string());
+            self.send_transfer_complete(from, file_id).await?;
+            self.incoming.lock().await.remove(file_id);
+        } else {
+            info!(
+                "📭 Missing {} ranges for {} after transfer pass",
+                missing_ranges.len(),
+                file_id
+            );
+            self.send_missing_ranges(from, file_id, missing_ranges).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn wait_for_transfer_feedback(&self, file_id: &str, timeout_ms: u64) -> Result<Option<Vec<u32>>> {
+        let mut waited_ms = 0;
+        loop {
+            let (remote_completed, pending_missing, mut response_rx) = {
+                let outgoing_disk = self.outgoing_disk.lock().await;
+                let transfer = outgoing_disk
+                    .get(file_id)
+                    .ok_or_else(|| anyhow::anyhow!("Transfer not found"))?;
+                (
+                    transfer.remote_completed,
+                    transfer.pending_missing.clone(),
+                    transfer.response_tx.subscribe(),
+                )
+            };
+
+            if remote_completed {
+                return Ok(Some(Vec::new()));
+            }
+
+            if let Some(missing) = pending_missing {
+                let mut outgoing_disk = self.outgoing_disk.lock().await;
+                if let Some(transfer) = outgoing_disk.get_mut(file_id) {
+                    transfer.pending_missing = None;
+                }
+                return Ok(Some(missing));
+            }
+
+            if waited_ms >= timeout_ms {
+                return Ok(None);
+            }
+
+            let slice = std::cmp::min(ACK_WAIT_SLICE_MS, timeout_ms - waited_ms);
+            let _ = tokio::time::timeout(
+                tokio::time::Duration::from_millis(slice),
+                response_rx.changed()
+            ).await;
+            waited_ms += slice;
+        }
+    }
+
+    /// Завершить потоковую отправку: послать end-of-pass, дождаться missing list или complete,
+    /// при необходимости дослать недостающие chunk'и с диска и повторить цикл.
+    pub async fn finalize_streaming_transfer(&self, to: HashId, file_id: &str) -> Result<()> {
+        for round in 0..=MAX_RETRY_ROUNDS {
+            self.send_file_transfer_end(&to, file_id).await?;
+            let feedback = self.wait_for_transfer_feedback(file_id, ACK_ROUND_TIMEOUT_MS).await?;
+            let Some(missing_chunks) = feedback else {
+                continue;
+            };
+
+            if missing_chunks.is_empty() {
+                self.outgoing_disk.lock().await.remove(file_id);
+                return Ok(());
+            }
+
+            warn!(
+                "⚠️ Retrying {} missing chunks for {} (round {}/{})",
+                missing_chunks.len(),
+                file_id,
+                round + 1,
+                MAX_RETRY_ROUNDS
+            );
+
+            for chunk_index in missing_chunks {
+                self.send_single_chunk_from_disk(&to, file_id, chunk_index).await?;
+                tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+            }
+        }
+
+        self.outgoing_disk.lock().await.remove(file_id);
+        Err(anyhow::anyhow!(
+            "Streaming file transfer incomplete for {} after {} retry rounds",
+            file_id,
+            MAX_RETRY_ROUNDS
+        ))
+    }
+
+}

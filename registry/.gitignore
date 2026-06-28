@@ -1,0 +1,5 @@
+*.jsonl
+*.log
+*.md
+!README.md
+
