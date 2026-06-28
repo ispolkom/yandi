@@ -4,148 +4,270 @@
 ![Status: Alpha](https://img.shields.io/badge/Status-Alpha-orange.svg)
 ![PRs: Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen.svg)
 
----
+# YANDI — Self-Organizing Distributed AI Network
 
-## English
-
-### What is it?
-
-**YANDI (You & I)** is a decentralized P2P network with a custom transport protocol, AI orchestrator, anonymous gateways, and reputation system.
-
-It's built as an alternative to centralized services — no censorship, no logs, no control.
-
-> *"Information is not transmitted — it exists. You just connect to it."*
+### Самоорганизующаяся распределённая сеть искусственного интеллекта
 
 ---
 
-### Philosophy
+# English
 
-- **Anonymity** — no logs, no traces.
-- **Decentralization** — every node matters, no single center.
-- **Freedom** — you choose which jurisdiction to exit through.
-- **Knowledge** — data is not sold, it's stored in open knowledge bases.
-- **Community** — You & I. Together.
+## Vision
 
----
+Most AI systems rely on a single large model running in the cloud.
 
-### What's inside?
+YANDI follows a different philosophy.
 
-- **P2P node** (Rust) — DHT, encryption, port rotation, DPI bypass
-- **AI orchestrator** (Python) — local AI on GPU (Qwen 9B)
-- **Council Chat Server** (FastAPI) — multi-model AI chat
-- **Firefox extension** — bridge between browser and AI models
-- **Knowledge base** — test dataset across 14 topics
-- **Open philosophy** — human, open, without corporations
+Instead of building one increasingly larger model, YANDI creates a distributed ecosystem of specialized local AI nodes that continuously improve, cooperate, and organize themselves.
+
+The network grows naturally as more users join.
 
 ---
 
-### Who am I?
+## Core Idea
 
-A single person who built this in 6 months with a limited AI subscription.
+Every YANDI node runs a local AI model.
 
-I'm not a programmer. I just explained to neural networks what I needed, assembled the code, tested, rebuilt. Everything was done in symbiosis with AI — against those who create it for control.
+With the user's explicit permission, the node gradually accumulates knowledge from previous interactions and becomes increasingly specialized in particular domains.
 
-> *"If someone hands you a gun, first shoot the one who gave it to you."*
+No central authority decides which node should become an expert.
 
-I learn together with AI. And I teach it to serve people, not corporations.
-
----
-
-### Why open source?
-
-I don't have money for expensive APIs and paid subscriptions. But I have an idea, code, and a desire to share.
-
-If you feel the same — welcome.
-
-- **Want to help with code?** — open a PR
-- **Want to help with ideas?** — open an Issue
-- **Want to just support?** — give a star ⭐
-
-**Help people become free.**
+Specialization emerges naturally from real-world usage.
 
 ---
 
-### Installation
+## Knowledge Clusters
 
-```bash
-git clone https://github.com/ispolkom/yandi.git
-cd yandi
-pip install -r requirements.txt
-./start.sh
+Instead of one universal intelligence, YANDI builds many expert clusters.
 
+Examples:
 
-****
+* Programming
+* Medicine
+* Mathematics
+* Physics
+* Law
+* Electronics
+* History
+* Finance
+* Biology
 
+Each cluster contains multiple independent models rather than a single expert.
 
----
--
-
-## Русский
-
-### Что это?
-
-**YANDI (You & I)** — это децентрализованная P2P-сеть с собственным транспортным протоколом, AI-оркестратором, анонимными шлюзами и системой репутации.
-
-Проект создан как альтернатива централизованным сервисам — без цензуры, без логов, без контроля.
-
-> *"Информация не передаётся — она существует. Ты просто подключаешься к ней."*
+Questions are automatically routed to the most relevant cluster.
 
 ---
 
-### Философия
+## Collective Intelligence
 
-- **Анонимность** — никаких логов, никаких следов.
-- **Децентрализация** — каждый узел важен, единого центра нет.
-- **Свобода** — ты сам выбираешь, через какую юрисдикцию выходить.
-- **Знания** — данные не продаются, они хранятся в открытых базах знаний.
-- **Сообщество** — You & I. Мы вместе.
+Every response can be produced through collaboration between multiple specialized models.
 
----
+Rather than trusting a single AI, YANDI compares multiple expert opinions and builds a consensus.
 
-### Что внутри?
+When experts disagree, the disagreement is visible instead of being hidden.
 
-- **P2P нода** (Rust) — DHT, шифрование, ротация портов, обход DPI
-- **AI оркестратор** (Python) — локальный AI на GPU (Qwen 9B)
-- **Council Chat Server** (FastAPI) — многомодельный чат с AI
-- **Firefox extension** — мост между браузером и AI-моделями
-- **База знаний** — тестовый датасет по 14 темам
-- **Своя философия** — открытая, человеческая, без корпораций
+The goal is not only to answer questions but also to communicate confidence and uncertainty.
 
 ---
 
-### Кто я?
+## Self-Organization
 
-Один человек, который построил это за 6 месяцев с ограниченной подпиской на AI.
+The network continuously adapts itself.
 
-Я не программист. Я просто объяснял нейросетям, что мне нужно, собирал код, тестировал, пересобирал. Всё это сделано в симбиозе с ИИ — вопреки тем, кто создаёт его для контроля.
+If a particular knowledge domain becomes popular:
 
-> *"Если тебе дали автомат — первым делом выстрели в того, кто тебе его дал."*
+* more nodes naturally specialize in it;
+* new expert clusters appear;
+* workload is distributed automatically.
 
-Я учусь вместе с ИИ. И учу его служить людям, а не корпорациям.
+No administrator manually creates or manages these clusters.
 
----
-
-### Почему открыто?
-
-У меня нет денег на дорогие API и платные подписки. Но у меня есть идея, код и желание поделиться.
-
-Если ты чувствуешь то же самое — добро пожаловать.
-
-- **Хочешь помочь кодом?** — открывай PR
-- **Хочешь помочь идеями?** — открывай Issue
-- **Хочешь просто поддержать?** — поставь звезду ⭐
-
-**Помочь людям стать свободными.**
+The network evolves according to real demand.
 
 ---
 
-### Установка и запуск
+## Adaptive Scaling
 
-```bash
-git clone https://github.com/ispolkom/yandi.git
-cd yandi
-pip install -r requirements.txt
-./start.sh
+When request volume exceeds the capacity of existing clusters, YANDI automatically expands.
+
+As new nodes join:
+
+* they are evaluated,
+* connected to appropriate domains,
+* and may become part of existing or newly formed expert clusters.
+
+The system grows horizontally instead of relying on increasingly larger centralized servers.
+
+---
+
+## Privacy First
+
+User privacy is a fundamental design principle.
+
+* AI models run locally whenever possible.
+* Personal data never leaves the device without explicit permission.
+* Knowledge sharing is voluntary.
+* Users control what may be contributed to the distributed network.
+
+Privacy is the default—not an optional feature.
+
+---
+
+## Why Thousands of Small Experts?
+
+Human civilization is not built around one person who knows everything.
+
+It is built around millions of specialists.
+
+YANDI applies the same principle to artificial intelligence.
+
+Instead of creating one gigantic model, it creates a living ecosystem of many specialized experts working together.
+
+---
+
+## Long-Term Goal
+
+The long-term vision is a decentralized AI network capable of:
+
+* self-learning;
+* self-organizing;
+* self-scaling;
+* distributing knowledge;
+* preserving user privacy;
+* improving continuously as the network grows.
+
+YANDI is not simply another AI assistant.
+
+It is an attempt to build a distributed intelligence that evolves with its community.
+
+---
+
+# Русский
+
+## Идея
+
+Большинство современных ИИ-систем основаны на одной большой облачной модели.
+
+YANDI использует другой подход.
+
+Вместо создания всё более крупной модели строится распределённая экосистема локальных специализированных моделей, которые обучаются, взаимодействуют между собой и самостоятельно организуются.
+
+Чем больше участников сети, тем умнее становится вся система.
+
+---
+
+## Основная концепция
+
+Каждая нода YANDI запускает локальную модель искусственного интеллекта.
+
+С явного разрешения пользователя модель постепенно накапливает знания из предыдущих взаимодействий и начинает специализироваться в определённых областях.
+
+Никто заранее не назначает модель экспертом.
+
+Специализация возникает естественным образом благодаря реальному использованию.
+
+---
+
+## Кластеры знаний
+
+Вместо одного универсального ИИ создаются многочисленные экспертные кластеры.
+
+Например:
+
+* программирование;
+* медицина;
+* математика;
+* физика;
+* право;
+* электроника;
+* история;
+* финансы;
+* биология.
+
+Каждый кластер состоит из множества независимых специализированных моделей.
+
+Запрос пользователя автоматически направляется в наиболее подходящий кластер.
+
+---
+
+## Коллективный интеллект
+
+Ответ формируется совместной работой нескольких специализированных моделей.
+
+Вместо доверия одному ИИ YANDI сравнивает мнения независимых экспертов и формирует консенсус.
+
+Если между моделями существуют разногласия, они отображаются пользователю открыто.
+
+Цель системы — не только дать ответ, но и показать степень его достоверности и уровень неопределённости.
+
+---
+
+## Самоорганизация
+
+Сеть постоянно адаптируется.
+
+Если какая-либо область знаний становится особенно востребованной:
+
+* всё больше моделей начинают на ней специализироваться;
+* появляются новые экспертные кластеры;
+* нагрузка автоматически распределяется между ними.
+
+Создание и развитие кластеров происходит без централизованного управления.
+
+Архитектура сети развивается в соответствии с реальными потребностями пользователей.
+
+---
+
+## Автоматическое масштабирование
+
+Когда существующие кластеры перестают справляться с количеством запросов, сеть автоматически расширяется.
+
+При подключении новых узлов:
+
+* оцениваются их возможности;
+* определяется область специализации;
+* они включаются в существующие либо формируют новые экспертные кластеры.
+
+Вместо увеличения мощности одного сервера развивается вся распределённая сеть.
+
+---
+
+## Конфиденциальность
+
+Конфиденциальность является одним из основных принципов YANDI.
+
+* локальное выполнение моделей;
+* отсутствие обязательной передачи пользовательских данных;
+* обмен знаниями только с согласия пользователя;
+* полный контроль пользователя над публикуемой информацией.
+
+Приватность является стандартным режимом работы системы.
+
+---
+
+## Почему тысячи маленьких экспертов?
+
+Человеческая цивилизация существует благодаря миллионам специалистов, а не одному человеку, который знает всё.
+
+YANDI переносит этот принцип в искусственный интеллект.
+
+Вместо одной гигантской модели создаётся живая экосистема множества специализированных ИИ, работающих совместно.
+
+---
+
+## Долгосрочная цель
+
+Конечная цель проекта — построить полностью распределённую сеть искусственного интеллекта, которая способна:
+
+* самостоятельно обучаться;
+* самостоятельно организовываться;
+* автоматически масштабироваться;
+* распределять знания между узлами;
+* сохранять приватность пользователей;
+* становиться умнее по мере роста сети.
+
+**YANDI — это не просто ещё один AI-ассистент. Это попытка создать самоорганизующуюся распределённую экосистему искусственного интеллекта, которая развивается вместе со своим сообществом.**
+
 
 
 Copyright (c) 2026 Feodor Alekseevich Muntyan (Фёдор Алексеевич Мунтян)
