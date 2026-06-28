@@ -1,8 +1,20 @@
 # YANDI
+<p align="center">
+  <img src="node/src/web/ui/media/logo.png" width="220" alt="YANDI Logo">
+</p>
+
+<h1 align="center">YANDI</h1>
 
 <p align="center">
-  <img src="logo.png" width="220" alt="YANDI Logo">
+<b>The Self-Organizing Distributed Intelligence Network</b>
 </p>
+
+<p align="center">
+Local AI • Collective Intelligence • Privacy First
+</p>
+
+---
+
 
 <h3 align="center">
 The Self-Organizing Distributed Intelligence Network
