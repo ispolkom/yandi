@@ -13,7 +13,12 @@
     "tabs",
     "contextMenus",
     "activeTab",
-    "<all_urls>"
+    "<all_urls>",
+    "http://127.0.0.1:9010/*",
+    "*://claude.ai/*",
+    "*://chatgpt.com/*",
+    "*://chat.deepseek.com/*",
+    "*://www.kimi.com/*"
   ],
   "browser_action": {
     "default_title": "YANDI",
