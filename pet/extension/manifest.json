@@ -18,8 +18,7 @@
     "*://claude.ai/*",
     "*://chatgpt.com/*",
     "*://chat.deepseek.com/*",
-    "*://www.kimi.com/*",
-    "*://kimi.com/*",
+    "*://www.kimi.com/*"
   ],
   "browser_action": {
     "default_title": "YANDI",
@@ -38,11 +37,9 @@
         "*://claude.ai/*",
         "*://chatgpt.com/*",
         "*://chat.deepseek.com/*",
-        "*://www.kimi.com/*",
+        "*://www.kimi.com/*"
       ]
-    }
-  ],
-  "content_scripts": [
+    },
     {
       "matches": ["*://claude.ai/*"],
       "js": ["content_claude.js"],
@@ -62,6 +59,6 @@
       "matches": ["*://www.kimi.com/*", "*://kimi.com/*"],
       "js": ["content_kimi.js"],
       "run_at": "document_idle"
-    },
+    }
   ]
 }
