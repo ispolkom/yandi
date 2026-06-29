@@ -6,7 +6,11 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "council-bridge@yandi.local",
-      "strict_min_version": "91.0"
+      "strict_min_version": "91.0",
+      "data_collection_permissions": {
+        "usage": false,
+        "technical": false
+      }
     }
   },
   "permissions": [
