@@ -17,9 +17,7 @@ class LocalSynthesisResult:
     sources: list = None
     refutation_text: str = ""
 
-import threading
 import time
-from datetime import datetime
 from pathlib import Path
 import uuid
 
@@ -33,31 +31,21 @@ from agent.orch_schemas import (
     ClaimRecord,
     TrustReport,
     CoverageReport,
-    OutcomeRecord,
     QueryTrace,
 )
 from agent.orch_synthesizer import synthesize
-from agent.orch_optimistic import get_responder
 from agent.orch_tool_registry import get_registry
 from agent.orch_session import get_context, add_message, new_session_id
-from agent.orch_node_selector import select_nodes, select_nodes_federated, _should_use_federation
-from agent.orch_validator import validate_parallel
-from agent.orch_arbiter import arbitrate
-from agent.orch_knowledge_writer import write_from_arbiter
-from agent.orch_monitoring import record as mon_record
 from agent.orch_tracer import DecisionTracer, Trace
 from agent.orch_reputation import add_decision_event, get_trace, get_ledger
-from agent.orch_query_archive import record_query as archive_query
 from agent.orch_tag_tree import update_tree as tag_tree_update
 from agent.orch_unanswered import record_unanswered, start_listener_daemon as _start_unanswered_listener
 
 from agent.claim_evidence_mapper import map_claims_to_evidence, get_claim_grounding_score
 from agent.orchestrator.epistemic.existence_contract import apply_existence_query_contract
 from agent.orchestrator.epistemic.final_coverage import evaluate_and_record_final_coverage
-from agent.orchestrator.runtime.profiling import report_pipeline_profile
 from agent.orchestrator.epistemic.trust_gate import (
     TRUST_STATES,
-    _calculate_delta_factors,
     apply_epistemic_trust_adjustment,
 )
 from agent.orchestrator.response.assembly import (
@@ -78,6 +66,7 @@ from agent.orchestrator.claims.disagreement import apply_claim_claim_disagreemen
 from agent.orchestrator.synthesis import build_frame_and_synthesize
 from agent.orchestrator.pre_pipeline import run_pre_pipeline
 from agent.orchestrator.pipeline import run_standard_pipeline
+from agent.orchestrator.response.writeback import run_optimistic_respond
 
 # ---- YANDI V3: SELF-AWARE SYSTEM ----
 from agent.self_model import get_self_model
@@ -101,12 +90,9 @@ from agent.boundaries import (
 # ---- RESEARCH ENGINE ----
 from agent.research_engine import get_research_engine
 
-# ---- EXPERIENCE MEMORY ----
-from agent.experience_memory import get_experience_memory
 from agent.claim_relation import (
     infer_claim_relation,
 )
-from agent.dataset_builder import get_dataset_builder
 
 # ---- ROUTERS ----
 from agent.intent_router import should_use_rag
@@ -178,207 +164,6 @@ def _init_v3():
 
 # _start_unanswered_listener()
 
-_DOMAIN_TAG: dict[str, str] = {
-    "general": "general",
-    "legal": "legal",
-    "medical": "health:medical",
-    "financial": "finance",
-    "coding": "tech:coding",
-    "science": "science",
-    "tech": "tech",
-    "ai_ml": "tech:ai",
-    "cooking": "lifestyle:cooking",
-    "travel": "travel",
-    "sport": "lifestyle:sport",
-    "music": "culture:music",
-    "history": "culture:history",
-    "education": "education",
-    "ecology": "science:ecology",
-    "psychology": "health:psychology",
-    "geography": "science:geography",
-    "literature": "culture:literature",
-}
-
-
-def _build_tags(intent_result, enrich_result, query: str = "") -> list[str]:
-    domain = getattr(intent_result, "intent", "general") or "general"
-    base = _DOMAIN_TAG.get(domain, domain)
-    if base == "general" and query:
-        q_lower = query.lower()
-        keywords = [
-            ("рецепт", "lifestyle:cooking"),
-            ("путешест", "travel:tourism"),
-            ("гора", "science:geography"),
-            ("закон", "legal"),
-            ("симптом", "health:medical"),
-            ("акция", "finance"),
-            ("код", "tech:coding"),
-            ("нейросет", "tech:ai"),
-        ]
-        for kw, tag in keywords:
-            if kw in q_lower:
-                base = tag
-                break
-    tags = [base]
-    return tags[:3]
-
-
-def _background_validate(
-    question: str,
-    answer: str,
-    synthesis,
-    risk,
-    intent_result,
-    validation_id: str,
-    decision_id: str,
-    trace_id: str,
-    domain: str,
-    search_result,
-    web_used: bool,
-    verbose: bool,
-):
-    def log(msg):
-        if verbose:
-            print(msg, flush=True)
-
-    log(f"\n[BG:{validation_id[:6]}] Старт валидации...")
-
-    try:
-        add_decision_event(
-            event_type="ValidationStarted",
-            trace_id=trace_id,
-            entity_type="route",
-            entity_id="registry_first",
-            verdict="VERIFYING",
-            reason=f"ValidationStarted: {validation_id}",
-            domain=domain,
-            meta={"decision_id": decision_id}
-        )
-
-        nodes = select_nodes_federated(risk, domain=domain) if _should_use_federation() else select_nodes(risk, domain=domain)
-        log(f"[BG] Ноды: {[n.node_id for n in nodes.nodes]}")
-
-        val_result = validate_parallel(question, answer, nodes, domain=domain)
-        log(f"[BG] agree={val_result.agree_count} disagree={val_result.disagree_count}")
-
-        use_llm = risk.risk_level in ("medium", "high", "critical")
-        arb = arbitrate(question, answer, val_result, use_llm=use_llm)
-
-        verdict = arb.verdict
-        log(f"[BG] Вердикт: {verdict} — {arb.explanation}")
-
-        add_decision_event(
-            event_type="ValidationFinished",
-            trace_id=trace_id,
-            entity_type="route",
-            entity_id="registry_first",
-            verdict=verdict,
-            confidence=synthesis.confidence if synthesis else 0.5,
-            reason=f"ValidationFinished: verdict={verdict}",
-            domain=domain,
-            meta={"decision_id": decision_id}
-        )
-
-        if verdict in ("VERIFIED", "PARTIALLY_VERIFIED"):
-            write_from_arbiter(question, synthesis, arb, topic=domain)
-            log(f"[BG] Записано в knowledge registry ({verdict})")
-            add_decision_event(
-                event_type="KnowledgeStored",
-                trace_id=trace_id,
-                entity_type="knowledge",
-                entity_id="registry",
-                verdict=verdict,
-                reason=f"KnowledgeStored: {verdict}",
-                domain=domain,
-                meta={"decision_id": decision_id}
-            )
-
-        delta_factors = _calculate_delta_factors(
-            verification_verdict=verdict,
-            confidence=synthesis.confidence if synthesis else 0.5,
-            has_sources=bool(synthesis.sources if synthesis else []),
-            consensus_agreement=val_result.agree_count,
-            total_nodes=len(nodes.nodes) if nodes else 0,
-        )
-
-        add_decision_event(
-            event_type="ReputationUpdated",
-            trace_id=trace_id,
-            entity_type="route",
-            entity_id="registry_first",
-            verdict=verdict,
-            confidence=synthesis.confidence if synthesis else 0.5,
-            delta=delta_factors["total"],
-            delta_factors=delta_factors,
-            reason=f"ReputationUpdated: verdict={verdict}",
-            domain=domain,
-            meta={
-                "decision_id": decision_id,
-                "agree_count": val_result.agree_count,
-                "disagree_count": val_result.disagree_count,
-            }
-        )
-
-        add_decision_event(
-            event_type="ReputationUpdated",
-            trace_id=trace_id,
-            entity_type="model",
-            entity_id="heretic:q8",
-            verdict=verdict,
-            confidence=synthesis.confidence if synthesis else 0.5,
-            delta=delta_factors["total"],
-            reason=f"ReputationUpdated: verdict={verdict}",
-            domain=domain,
-            meta={"decision_id": decision_id}
-        )
-
-        if search_result and search_result.docs:
-            add_decision_event(
-                event_type="ReputationUpdated",
-                trace_id=trace_id,
-                entity_type="source",
-                entity_id="local_registry",
-                verdict=verdict,
-                confidence=synthesis.confidence if synthesis else 0.5,
-                delta=delta_factors["total"],
-                reason=f"ReputationUpdated: docs={len(search_result.docs)}",
-                domain=domain,
-                meta={"decision_id": decision_id, "docs_count": len(search_result.docs)}
-            )
-
-        if web_used:
-            add_decision_event(
-                event_type="ReputationUpdated",
-                trace_id=trace_id,
-                entity_type="source",
-                entity_id="web_search",
-                verdict=verdict,
-                confidence=synthesis.confidence if synthesis else 0.5,
-                delta=delta_factors["total"],
-                reason=f"ReputationUpdated: web_used=True",
-                domain=domain,
-                meta={"decision_id": decision_id, "web_used": True}
-            )
-
-        get_responder().on_validation_done(validation_id, verdict, arb.explanation)
-
-        for v in val_result.validations:
-            mon_record("validate", v.latency, v.verdict != "disagree")
-
-        log(f"[BG] Репутация обновлена: {delta_factors['total']:+.3f}")
-
-    except Exception as e:
-        log(f"[BG] Ошибка валидации: {e}")
-        add_decision_event(
-            event_type="ValidationFailed",
-            trace_id=trace_id,
-            entity_type="route",
-            entity_id="registry_first",
-            verdict="REJECTED",
-            reason=f"ValidationFailed: {str(e)[:100]}",
-            domain=domain,
-            meta={"decision_id": decision_id}
-        )
 
 
 # ============================================================
@@ -560,6 +345,7 @@ def process(
     query_to_use = _pipeline_state["query_to_use"]
     dt = _pipeline_state["dt"]
     _request_fetch_cache = _pipeline_state["_request_fetch_cache"]
+    cache = _pipeline_state["cache"]
 
     # Frame construction + synthesize() — extracted to
     # agent/orchestrator/synthesis.py (structural extraction;
@@ -984,340 +770,25 @@ def process(
             query_to_use, claims_data, total_claims, synthesis_result, log
         )
 
-    # ── [10] Optimistic respond ─────────────────────────────────────────────
-    log("[10] Optimistic respond...")
-    responder = get_responder()
-    validation_id = ""
-
-    def _start_bg_validation(val_id: str):
-        nonlocal validation_id
-        validation_id = val_id
-        if not enable_validation:
-            query_frame["external_validation_performed"] = False
-            return
-        if _skip_rag or is_subjective_answer:
-            query_frame["external_validation_performed"] = False
-            log(f"  · Валидация пропущена для субъективного интента")
-            return
-        if epistemic_result.testability in ["interpretive", "non_falsifiable"] and epistemic_result.domain != "media_interpretation":
-            query_frame["external_validation_performed"] = False
-            log(f"  · Валидация пропущена для {epistemic_result.testability} утверждения")
-            return
-
-        try:
-            from agent.ai_validator_redis import send_to_deepseek
-            ai_task_id = send_to_deepseek(
-                query=query_to_use,
-                answer=synthesis_result.answer,
-                frame={"epistemic": epistemic_result.__dict__},
-                sources=synthesis_result.sources,
-            )
-            query_frame["external_validation_performed"] = True
-            log(f"  · AI валидация отправлена в DeepSeek (ID: {ai_task_id})")
-        except Exception as e:
-            query_frame["external_validation_performed"] = False
-            log(f"  · Ошибка AI валидации: {e}")
-
-        t = threading.Thread(
-            target=_background_validate,
-            args=(
-                query_to_use,
-                synthesis_result.answer,
-                synthesis_result,
-                risk_result,
-                intent_result,
-                val_id,
-                decision_id,
-                trace_id,
-                intent_result.intent if intent_result else "general",
-                search_result,
-                web_used,
-                verbose
-            ),
-            daemon=False,
-        )
-        t.start()
-    optimistic = responder.respond(synthesis_result, start_validation=_start_bg_validation)
-
-    if enable_validation and not _skip_rag and not is_subjective_answer and epistemic_result.testability not in ["interpretive", "non_falsifiable"]:
-        log(f"  · Фоновая валидация запущена (ID: {validation_id[:8]})")
-    else:
-        log("  · Валидация отключена или пропущена")
-
-    if (
-        enable_cache
-        and synthesis_result.confidence > 0.3
-        and not _skip_rag
-        and not is_subjective_answer
-    ):
-        try:
-            cache.put_from_synthesis(
-                query=query_to_use,
-                synthesis_result=synthesis_result,
-                epistemic=epistemic_result.__dict__,
-                claims=claims_data if 'claims_data' in locals() else [],
-                evidence=evidence_data if 'evidence_data' in locals() else [],
-            )
-        except Exception as e:
-            if verbose:
-                log(f"[V6] Ошибка сохранения в кэш: {e}")
-
-    total = round(time.time() - t_start, 2)
-    cost["total_ms"] = total * 1000
-    mon_record("full_request", total, success=True)
-
-    # Pipeline wall-clock profile report — extracted to
-    # agent/orchestrator/runtime/profiling.py (structural extraction;
-    # behavior unchanged).
-    report_pipeline_profile(cost, total, _request_fetch_cache, log, verbose)
-
-    log(f"\n✓ Готово за {total}s")
-
-    tags = _build_tags(intent_result, enrich_result, query_to_use)
-    primary_tag = tags[0] if tags else "general"
-
-    try:
-        archive_query(
-            query=query_to_use,
-            tag=primary_tag,
-            answer=synthesis_result.answer,
-            confidence=synthesis_result.confidence,
-            trust_level=synthesis_result.trust_level,
-            session_id=request.session_id or "",
-            sources=synthesis_result.sources,
-        )
-    except Exception:
-        pass
-
-    trace.cost = cost
-    trace.final_answer = synthesis_result.answer
-    trace.add_observation("intent_type", intent_type)
-    trace.add_observation("intent_confidence", intent_confidence)
-
-    if synthesis_result:
-        outcome = OutcomeRecord(
-            final_answer=synthesis_result.answer[:500],
-            final_answer_type="direct_answer",
-            trust_label=synthesis_result.trust_level,
-            trust_score=synthesis_result.confidence,
-            coverage_ratio=0.5 if len(synthesis_result.answer) > 100 else 0.0,
-            latency_ms=cost["total_ms"],
-            learning_tags=[primary_tag] if primary_tag else [],
-            supporting_claim_ids=supporting_ids if 'supporting_ids' in locals() else [],
-        )
-        trace.set_outcome(outcome)
-
-    # ---- YANDI V6: ЗАПИСЬ В ПАМЯТЬ И РЕФЛЕКСИЯ ----
-    if self_model and memory and reflection and motivation and core_loop:
-        try:
-            self_model.add_decision({
-                "query": query_to_use,
-                "domain": epistemic_result.domain if not is_subjective_answer else "subjective_analysis",
-                "answer_mode": epistemic_result.answer_mode if not is_subjective_answer else "analysis",
-                "trust": synthesis_result.trust_level,
-                "confidence": synthesis_result.confidence,
-                "reason": epistemic_result.reason if not is_subjective_answer else "subjective_analysis",
-                "objectivity_score": epistemic_result.objectivity_score if not is_subjective_answer else 0.5,
-                "is_science_as_model": epistemic_result.is_science_as_model if not is_subjective_answer else False,
-            })
-            self_model.increment_queries()
-
-            memory.add_query(
-                query=query_to_use,
-                domain="subjective_analysis" if is_subjective_answer else epistemic_result.domain,
-                answer_mode="analysis" if is_subjective_answer else epistemic_result.answer_mode,
-                trust=synthesis_result.trust_level,
-                confidence=synthesis_result.confidence
-            )
-
-            if verbose:
-                log("[V3] Запуск рефлексии...")
-
-            evidence_count = len(reasoning_info.get("evidence_records", []))
-            reflection_result = reflection.reflect_on_query(
-                query=query_to_use,
-                response=synthesis_result.answer,
-                epistemic={
-                    "domain": epistemic_result.domain if not is_subjective_answer else "subjective_analysis",
-                    "testability": epistemic_result.testability if not is_subjective_answer else "subjective",
-                    "answer_mode": epistemic_result.answer_mode if not is_subjective_answer else "analysis",
-                    "should_use_web": epistemic_result.should_use_web if not is_subjective_answer else False,
-                    "reason": epistemic_result.reason if not is_subjective_answer else "subjective_analysis",
-                    "evidence_count": evidence_count,
-                    "objectivity_score": epistemic_result.objectivity_score if not is_subjective_answer else 0.5,
-                    "is_science_as_model": epistemic_result.is_science_as_model if not is_subjective_answer else False,
-                },
-                trust=synthesis_result.trust_level,
-                confidence=synthesis_result.confidence,
-                errors=[] if synthesis_result.confidence > 0.3 else ["low_confidence"],
-                validation_result={
-                    "performed": bool(query_frame.get("external_validation_performed", False)),
-                    "accepted": (
-                        claims_accepted
-                        if query_frame.get("external_validation_performed", False)
-                        and "claims_accepted" in locals()
-                        else 0
-                    ),
-                    "rejected": (
-                        claims_rejected
-                        if query_frame.get("external_validation_performed", False)
-                        and "claims_rejected" in locals()
-                        else 0
-                    ),
-                    "total": (
-                        total_claims
-                        if query_frame.get("external_validation_performed", False)
-                        and "total_claims" in locals()
-                        else 0
-                    ),
-                },
-            )
-
-            if verbose and reflection_result.mistakes:
-                log(f"[V3] Рефлексия: ошибки: {reflection_result.mistakes}")
-            if verbose and reflection_result.lessons:
-                log(f"[V3] Уроки: {reflection_result.lessons}")
-            # ---- КОРРЕКТИРОВКА TRUST НА ОСНОВЕ РЕФЛЕКСИИ (синхронная) ----
-            if reflection_result.mistakes:
-                old_conf = synthesis_result.confidence
-                synthesis_result.confidence = max(0.1, old_conf - 0.15)
-                if synthesis_result.trust_level == "STRONGLY_SUPPORTED":
-                    synthesis_result.trust_level = "PARTIALLY_SUPPORTED"
-                elif synthesis_result.trust_level == "PARTIALLY_SUPPORTED":
-                    synthesis_result.trust_level = "WEAKLY_SUPPORTED"
-                if verbose:
-                    log(f"[V3] Рефлексия: confidence {old_conf:.2f} → {synthesis_result.confidence:.2f}, trust → {synthesis_result.trust_level}")
-                query_frame["reflection_verdict"] = {
-                    "mistakes": reflection_result.mistakes,
-                    "lessons": reflection_result.lessons,
-                    "confidence_adjustment": -0.15,
-                    "timestamp": datetime.now().isoformat()
-                }
-            else:
-                query_frame["reflection_verdict"] = {
-                    "mistakes": [],
-                    "lessons": reflection_result.lessons,
-                    "confidence_adjustment": 0.0,
-                    "timestamp": datetime.now().isoformat()
-                }
-            
-            # ---- СОХРАНЕНИЕ ОПЫТА В ПАМЯТЬ (асинхронное обучение) ----
-            try:
-                experience_memory = get_experience_memory()
-                if experience_memory:
-                    # Определяем speech_act на основе интента
-                    speech_act = intent_result.intent if intent_result else "general"
-                    # Определяем topic на основе домена
-                    topic = epistemic_result.domain if not is_subjective_answer else "subjective"
-                    # Сохраняем опыт
-                    exp_id = experience_memory.add_experience(
-                        speech_act=speech_act,
-                        topic=topic,
-                        query=query_to_use,
-                        response=synthesis_result.answer[:500],  # обрезаем до 500 символов
-                        context={
-                            "domain": epistemic_result.domain if not is_subjective_answer else "subjective_analysis",
-                            "trust": synthesis_result.trust_level,
-                            "confidence": synthesis_result.confidence,
-                            "mistakes": reflection_result.mistakes,
-                            "lessons": reflection_result.lessons,
-                            "policy_changes": reflection_result.policy_changes if hasattr(reflection_result, "policy_changes") else [],
-                            "timestamp": datetime.now().isoformat()
-                        }
-                    )
-                    if verbose:
-                        log(f"[V3] Опыт сохранён в память (ID: {exp_id})")
-            except Exception as e:
-                if verbose:
-                    log(f"[V3] Ошибка сохранения опыта: {e}")
-
-            motivation.update_from_experience({
-                "was_useful": synthesis_result.confidence > 0.5,
-                "was_correct": synthesis_result.trust_level not in ["UNVERIFIED", "REJECTED"],
-                "had_conflict": False,
-            })
-            # ---- СОХРАНЕНИЕ ЭПИЗОДА В DATASET ----
-            try:
-                dataset_builder = get_dataset_builder()
-                dataset_builder.record_episode({
-                    "query": query_to_use,
-                    "intent": intent_result.intent if intent_result else "unknown",
-                    "domain": epistemic_result.domain if not is_subjective_answer else "subjective",
-                    "trust": synthesis_result.trust_level,
-                    "confidence": synthesis_result.confidence,
-                    "mistakes": reflection_result.mistakes if "reflection_result" in locals() else [],
-                    "lessons": reflection_result.lessons if "reflection_result" in locals() else [],
-                    "validation": {
-                        "accepted": claims_accepted if "claims_accepted" in locals() else 0,
-                        "rejected": claims_rejected if "claims_rejected" in locals() else 0,
-                        "total": total_claims if "total_claims" in locals() else 0,
-                    },  # Закрываем validation
-                    "technical_errors": technical_errors if "technical_errors" in locals() else [],
-                    "answer": synthesis_result.answer[:500] if synthesis_result.answer else "",
-                })
-                if verbose:
-                    log("[V3] Эпизод сохранён в Dataset")
-            except Exception as e:
-                if verbose:
-                    log(f"[V3] Ошибка сохранения Dataset: {e}")
-
-            if not core_loop.state.is_running:
-                core_loop.run_cycle({
-                    "query": query_to_use,
-                    "epistemic": {
-                        "domain": epistemic_result.domain if not is_subjective_answer else "subjective_analysis",
-                        "testability": epistemic_result.testability if not is_subjective_answer else "subjective",
-                        "answer_mode": epistemic_result.answer_mode if not is_subjective_answer else "analysis",
-                        "trust": synthesis_result.trust_level,
-                        "confidence": synthesis_result.confidence,
-                        "objectivity_score": epistemic_result.objectivity_score if not is_subjective_answer else 0.5,
-                        "is_science_as_model": epistemic_result.is_science_as_model if not is_subjective_answer else False,
-                    }
-                })
-
-            if verbose:
-                log(f"[V3] Состояние: цикл {core_loop.state.cycle_number}, "
-                    f"запросов {self_model.state.total_queries}, "
-                    f"эпизодов {memory.get_stats()['total_episodes']}")
-
-        except Exception as e:
-            if verbose:
-                log(f"[V3] Ошибка V3: {e}")
-
-    _tracer.save_trace(trace)
-    log(f"  · Трейс сохранен: {trace_id}")
-
-    if _bad_state_prefix:
-        synthesis_result.answer = _bad_state_prefix + synthesis_result.answer
-
-    # ---- БАННЕР ----
-    if is_subjective_answer:
-        banner = "[МНЕНИЕ ЯНДИ • СУБЪЕКТИВНАЯ ИНТЕРПРЕТАЦИЯ]"
-    elif epistemic_result.domain == "media_interpretation" and not is_subjective_answer:
-        if entity:
-            banner = f"[РАЗБОР ФИЛЬМА • {entity.get('title', '')}]"
-        else:
-            banner = "[РАЗБОР ФИЛЬМА • ТРЕБУЕТСЯ УТОЧНЕНИЕ]"
-    elif epistemic_result.testability in ["interpretive", "non_falsifiable"] and not is_subjective_answer:
-        banner = "[ИНТЕРПРЕТАТИВНЫЙ ОТВЕТ • ОБЗОР РАМОК]"
-    elif epistemic_result.answer_mode == "pluralistic_contextual" and not is_subjective_answer:
-        banner = "[МНОГОПЕРСПЕКТИВНЫЙ ОТВЕТ • НЕТ ЕДИНСТВЕННОЙ ТРАКТОВКИ]"
-    elif epistemic_result.is_science_as_model and not is_subjective_answer:
-        banner = "[НАУЧНАЯ МОДЕЛЬ • ЭТО ТЕОРИЯ, НЕ ИСТИНА]"
-    else:
-        banner = "[ПРЕДВАРИТЕЛЬНЫЙ • ⏳ На проверке]"
-
-    if not optimistic.text.startswith(banner):
-        optimistic.text = f"{banner}\n\n{optimistic.text}"
-
-    return OrchestratorResponse(
-        answer=optimistic.text,
-        trust_level=synthesis_result.trust_level,
-        preliminary=True,
-        sources=synthesis_result.sources,
-        steps_taken=[],
-        latency_total=total,
-        session_id=request.session_id,
+    # Optimistic respond ([10]) — extracted to
+    # agent/orchestrator/response/writeback.py (structural extraction;
+    # behavior unchanged). Optional params below replicate the original
+    # 'X' in locals() checks at the call site, in process()'s own scope
+    # (see writeback.py's module docstring for why each is genuinely
+    # sometimes-undefined, not just a defensive check).
+    return run_optimistic_respond(
+        request, verbose, enable_validation, enable_cache, t_start, query_frame,
+        log, trace, trace_id, decision_id, cost, cache, _request_fetch_cache,
+        query_to_use, _skip_rag, is_subjective_answer, epistemic_result,
+        synthesis_result, risk_result, intent_result, search_result, web_used,
+        claims_data, evidence_data, self_model, memory, reflection, motivation,
+        core_loop, reasoning_info, intent_type, intent_confidence, _bad_state_prefix,
+        entity, enrich_result, _tracer,
+        supporting_ids=supporting_ids if 'supporting_ids' in locals() else None,
+        technical_errors=technical_errors if 'technical_errors' in locals() else None,
+        claims_accepted=claims_accepted if 'claims_accepted' in locals() else None,
+        claims_rejected=claims_rejected if 'claims_rejected' in locals() else None,
+        total_claims=total_claims if 'total_claims' in locals() else None,
     )
 
 
