@@ -1573,6 +1573,24 @@ def process(
 
         # ── [2] Plan ───────────────────────────────────────────────────────────
         log("[2] Planning...")
+        # P1 (autonomous fix pass, plan/intent ~6s investigation):
+        # step_timer overhead (~0ms, isolated benchmark), build_plan()'s
+        # own logic (~2ms, [Plan SubProfile]), a single core_loop idle
+        # cycle (61ms, isolated benchmark), module import (~0.3s) and
+        # _init_v3() (~82ms) were all measured directly and ruled out —
+        # none explain a 6s gap. No timeout occurred before this point in
+        # the last live run, ruling out an orphaned P0-C background
+        # thread as the cause THAT time. Remaining candidate: OS/GIL
+        # thread-scheduling contention from a concurrently running
+        # thread (e.g. the core_loop background thread) that isolated
+        # microbenchmarks can't reproduce. This logs live thread count/
+        # names right at measurement start so the next live run can
+        # confirm or rule this out with real data instead of guessing
+        # further.
+        log(
+            f"  · threads_alive={threading.active_count()} "
+            f"names={[t.name for t in threading.enumerate()]}"
+        )
         t0 = time.time()
         plan, dt, _ = step_timer("plan", lambda: build_plan(query_to_use, risk_result, use_llm=False))
         cost["plan_ms"] = (time.time() - t0) * 1000
@@ -1602,6 +1620,10 @@ def process(
 
     # ── [3] Intent analyze ─────────────────────────────────────────────────
     log("[3] Intent analyze...")
+    log(
+        f"  · threads_alive={threading.active_count()} "
+        f"names={[t.name for t in threading.enumerate()]}"
+    )
     t0 = time.time()
     intent_result, dt, timed_out = step_timer("intent", lambda: analyze_intent(query_to_use, ctx))
     cost["intent_ms"] = (time.time() - t0) * 1000
