@@ -34,7 +34,10 @@ from agent.orchestrator.response.assembly import (
 )
 from agent.orchestrator.claims.status import classify_claim_epistemic_status
 from agent.orchestrator.claims.validation import apply_structural_claim_validation
-from agent.orchestrator.claims.lifecycle import setup_claim_and_evidence_lifecycle
+from agent.orchestrator.claims.lifecycle import (
+    setup_claim_and_evidence_lifecycle,
+    update_beliefs_link_answer_and_personality_cycle,
+)
 import agent.orchestrator.claims.mapping as mapping_mod
 from agent.orchestrator.claims.mapping import run_claim_evidence_batch
 import agent.orchestrator.claims.retrieval as retrieval_mod
@@ -705,6 +708,102 @@ finally:
     retrieval_mod.merge_evidence = _orig_merge_r
     retrieval_mod.map_claims_to_evidence = _orig_map_r
     retrieval_mod.run_claim_evidence_batch = _orig_batch_r
+
+
+# ============================================================
+# 12. claims/lifecycle.py — update_beliefs_link_answer_and_personality_cycle
+# ============================================================
+
+captured_add_belief_calls = []
+fake_belief_manager_bl = SimpleNamespace(
+    add_belief=lambda **kw: captured_add_belief_calls.append(kw),
+    get_stats=lambda: {"total": 5},
+)
+fake_linker_bl = SimpleNamespace(
+    link_answer_to_claims=lambda answer, claims: (None, ["b1", "b3"])
+)
+captured_personality_calls = []
+fake_personality_bl = SimpleNamespace(
+    increment_cycles=lambda: captured_personality_calls.append("cycles"),
+    increment_decisions=lambda: captured_personality_calls.append("decisions"),
+    get_summary=lambda: {"name": "YANDI", "cycles": 5},
+)
+
+claims_bl = [
+    {"claim_id": "b1", "claim_text": "a" * 25, "claim_confidence": 0.9, "evidence_relations": [{"evidence_role": "direct", "evidence_eligible": True, "relation": "supports", "evidence_id": "e1"}]},
+    {"claim_id": "b2", "claim_text": "short", "claim_confidence": 0.9, "evidence_relations": []},
+    {"claim_id": "b3", "claim_text": "c" * 25, "claim_confidence": 0.9, "evidence_relations": [{"evidence_role": "direct", "evidence_eligible": True, "relation": "contradicts", "evidence_id": "e2"}]},
+    {"claim_id": "b4", "claim_text": "d" * 25, "claim_confidence": 0.9, "evidence_relations": []},
+]
+cost_bl = {}
+logged_bl = []
+supporting_ids_bl = update_beliefs_link_answer_and_personality_cycle(
+    claims_bl, make_synthesis_result(), make_epistemic_result(), False,
+    fake_belief_manager_bl, fake_linker_bl, fake_personality_bl,
+    cost_bl, logged_bl.append, True,
+)
+
+check("beliefs: add_belief called for exactly the 2 eligible claims (b1, b3)", len(captured_add_belief_calls) == 2, str(captured_add_belief_calls))
+check("beliefs: short claim_text (<=20 chars) skipped", all(c["claim_ids"] != ["b2"] for c in captured_add_belief_calls))
+check("beliefs: only claims_data[:3] considered, 4th claim (b4) never reached", all(c["claim_ids"] != ["b4"] for c in captured_add_belief_calls))
+check("beliefs: evidence_for/against correctly split by relation", captured_add_belief_calls[0]["evidence_for"] == ["e1"] and captured_add_belief_calls[0]["evidence_against"] == [])
+check("beliefs: confidence capped at 0.5 when support present", captured_add_belief_calls[0]["confidence"] == 0.5)
+check("beliefs: confidence further capped to 0.35 when only contradicts (no supports)", captured_add_belief_calls[1]["confidence"] == 0.35)
+check("beliefs: topic uses epistemic_result.domain when not subjective", captured_add_belief_calls[0]["topic"] == "scientific")
+check("beliefs: cost[belief_update_ms] recorded", "belief_update_ms" in cost_bl)
+check("linker: supporting_ids returned from claim_answer_linker", supporting_ids_bl == ["b1", "b3"])
+check("personality: increment_cycles and increment_decisions both called once", captured_personality_calls == ["cycles", "decisions"])
+check("beliefs: [Belief] logged per candidate", sum("[Belief] candidate=" in l for l in logged_bl) == 2)
+check("beliefs: [V6] Beliefs обработано summary logged", any("[V6] Beliefs обработано" in l for l in logged_bl))
+check("beliefs: [Belief Update Timing] logged", any("[Belief Update Timing]" in l for l in logged_bl))
+check("linker: [V6] Связано claims logged", any("[V6] Связано claims" in l for l in logged_bl))
+check("personality: [V6] Личность logged", any("[V6] Личность" in l for l in logged_bl))
+
+# subjective_answer=True -> topic becomes "subjective", not epistemic_result.domain.
+captured_add_belief_calls.clear()
+update_beliefs_link_answer_and_personality_cycle(
+    [claims_bl[0]], make_synthesis_result(), make_epistemic_result(), True,
+    fake_belief_manager_bl, None, None, {}, lambda m: None, False,
+)
+check("beliefs: subjective answer -> topic='subjective'", captured_add_belief_calls[0]["topic"] == "subjective")
+
+# All three collaborators None -> no crash, supporting_ids stays [], cost still recorded.
+cost_none = {}
+supporting_ids_none = update_beliefs_link_answer_and_personality_cycle(
+    claims_bl, make_synthesis_result(), make_epistemic_result(), False,
+    None, None, None, cost_none, lambda m: None, False,
+)
+check("beliefs: all collaborators None -> supporting_ids stays []", supporting_ids_none == [])
+check("beliefs: all collaborators None -> cost[belief_update_ms] still recorded", "belief_update_ms" in cost_none)
+
+# Exceptions in each collaborator are individually caught and swallowed —
+# none crash the call, none affect the others' results.
+def _raise_add_belief(**kw):
+    raise RuntimeError("belief boom")
+
+
+def _raise_link(answer, claims):
+    raise RuntimeError("linker boom")
+
+
+def _raise_cycles():
+    raise RuntimeError("personality boom")
+
+
+raising_belief_manager = SimpleNamespace(add_belief=_raise_add_belief, get_stats=lambda: {"total": 0})
+raising_linker = SimpleNamespace(link_answer_to_claims=_raise_link)
+raising_personality = SimpleNamespace(increment_cycles=_raise_cycles, increment_decisions=lambda: None, get_summary=lambda: {"name": "", "cycles": 0})
+
+cost_exc = {}
+supporting_ids_exc = update_beliefs_link_answer_and_personality_cycle(
+    claims_bl, make_synthesis_result(), make_epistemic_result(), False,
+    raising_belief_manager, raising_linker, raising_personality,
+    cost_exc, lambda m: None, True,
+)
+check("beliefs: add_belief exception caught, no crash", True)
+check("beliefs: add_belief exception -> cost[belief_update_ms] still recorded", "belief_update_ms" in cost_exc)
+check("linker: exception caught -> supporting_ids left at [] (assignment never completed)", supporting_ids_exc == [])
+check("personality: exception caught -> does not propagate or affect return value", True)
 
 
 print()
