@@ -998,6 +998,7 @@ def run_standard_pipeline(
         "query_to_use": query_to_use,
         "dt": dt,
         "_request_fetch_cache": _request_fetch_cache,
+        "cache": cache,
     }
 
     return None, state_out
