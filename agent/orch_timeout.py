@@ -30,6 +30,44 @@ DEFAULT_TIMEOUTS: dict[str, int] = {
 }
 
 
+
+# P0-C (YANDI autonomous fix pass): `with ThreadPoolExecutor(...) as ex:`
+# calls `ex.__exit__` -> `shutdown(wait=True)` on the way out of the
+# `with` block — including on the `TimeoutError` branch below, whose
+# `return` statement still has to pass through that `__exit__` before
+# control reaches the caller. `shutdown(wait=True)` blocks until the
+# already-running worker thread actually finishes, so a declared
+# `timeout=N` never bounded real wall-clock latency: the caller got
+# back control only after the underlying `fn()` call itself completed,
+# however long that took. Reproduced deterministically (declared
+# timeout=2s, fn sleeps 5s -> caller unblocked only after ~5s, not ~2s).
+#
+# Fix: build the executor without `with`, `shutdown(wait=False)`
+# explicitly on every exit path. The orphaned thread is NOT killed
+# (Python cannot safely kill a running thread) — it keeps running
+# in the background and is only reclaimed by CPython's atexit
+# thread-join machinery when the whole process actually exits. For a
+# per-query process (this orchestrator's CLI usage) that means: the
+# *response* is no longer held hostage by a slow step, but the
+# process itself may still take a bit longer to exit if a background
+# call is still in flight when the query finishes — an acceptable,
+# bounded trade-off, not a hang on the user-facing path.
+#
+# Danger this does NOT solve (documented, not silently hidden):
+# an orphaned background call that later acquires GENERATION_SEMAPHORE,
+# writes to a shared registry file, or mutates global state can still
+# do so *after* the caller has moved on — soft timeout only stops the
+# caller from waiting, it does not stop the background work. Hard
+# cancellation would require a process/subprocess boundary (so the OS
+# can actually kill it), which is a materially bigger change than this
+# pass — not done here. The affected callers here (`build_plan`,
+# `analyze_intent`, and generally anything wrapped by `step_timer`/
+# `run_with_timeout`) are I/O-bound HTTP calls to a local Ollama, not
+# uncooperative CPU-bound loops, so a soft timeout is the right level
+# for this pass; a genuinely runaway CPU-bound step would need the
+# subprocess boundary instead.
+
+
 def run_with_timeout(
     step: StepName,
     fn: Callable[[], T],
@@ -47,42 +85,64 @@ def run_with_timeout(
 
     Returns:
         Результат fn() или default при таймауте/ошибке
+
+    ВАЖНО: при таймауте фоновый поток НЕ убивается (Python не может
+    безопасно убить поток) — он может продолжить работать после того,
+    как эта функция уже вернула `default` вызывающему коду.
     """
     t = timeout or DEFAULT_TIMEOUTS.get(step, 60)
     t0 = time.time()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        future = ex.submit(fn)
-        try:
-            result = future.result(timeout=t)
-            return result
-        except concurrent.futures.TimeoutError:
-            elapsed = time.time() - t0
-            print(f"[timeout] step={step} timeout={t}s elapsed={elapsed:.1f}s")
-            return default
-        except Exception as e:
-            elapsed = time.time() - t0
-            print(f"[timeout] step={step} error={e} elapsed={elapsed:.1f}s")
-            return default
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = ex.submit(fn)
+    try:
+        result = future.result(timeout=t)
+        ex.shutdown(wait=False)
+        return result
+    except concurrent.futures.TimeoutError:
+        elapsed = time.time() - t0
+        print(
+            f"[Timeout] step={step} limit={t}s "
+            f"returned_after={elapsed:.2f}s background_may_continue=True"
+        )
+        ex.shutdown(wait=False)
+        return default
+    except Exception as e:
+        elapsed = time.time() - t0
+        print(f"[timeout] step={step} error={e} elapsed={elapsed:.1f}s")
+        ex.shutdown(wait=False)
+        return default
 
 
 def step_timer(step: StepName, fn: Callable[[], T], timeout: int | None = None) -> tuple[T | None, float, bool]:
     """
     Выполнить шаг и вернуть (результат, время, timed_out).
+
+    ВАЖНО: при таймауте фоновый поток НЕ убивается (Python не может
+    безопасно убить поток) — он может продолжить работать после того,
+    как эта функция уже вернула управление вызывающему коду.
     """
     t = timeout or DEFAULT_TIMEOUTS.get(step, 60)
     t0 = time.time()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        future = ex.submit(fn)
-        try:
-            result = future.result(timeout=t)
-            return result, time.time() - t0, False
-        except concurrent.futures.TimeoutError:
-            return None, time.time() - t0, True
-        except Exception as e:
-            print(f"[timeout] step={step} error={e}")
-            return None, time.time() - t0, True
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = ex.submit(fn)
+    try:
+        result = future.result(timeout=t)
+        ex.shutdown(wait=False)
+        return result, time.time() - t0, False
+    except concurrent.futures.TimeoutError:
+        elapsed = time.time() - t0
+        print(
+            f"[Timeout] step={step} limit={t}s "
+            f"returned_after={elapsed:.2f}s background_may_continue=True"
+        )
+        ex.shutdown(wait=False)
+        return None, elapsed, True
+    except Exception as e:
+        print(f"[timeout] step={step} error={e}")
+        ex.shutdown(wait=False)
+        return None, time.time() - t0, True
 
 
 if __name__ == "__main__":
