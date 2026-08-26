@@ -1,0 +1,97 @@
+{
+  "_comment": "YANDI Epistemic Core v1 — Phase 0 baseline fixture. Captured before any Phase 1+ code change. Used by later phases to detect unintended semantic drift. Do not hand-edit values; regenerate via a fresh baseline run if intentionally re-baselining, and note why in YANDI_EPISTEMIC_CORE_V1_BASELINE.md.",
+  "captured_at": "2026-08-26T23:52Z/2026-08-27T00:13Z",
+  "git_commit_before_phase0": "416b0e1",
+  "regression_suites": {
+    "total": 14,
+    "passed": 14,
+    "failed": 0,
+    "suites": [
+      "belief_manager_regression_test", "candidate_routing_regression_test",
+      "claim_lifecycle_regression_test", "claim_priority_regression_test",
+      "claim_query_batch_regression_test", "claim_relation_regression_test",
+      "evidence_eligibility_regression_test", "final_claim_extraction_regression_test",
+      "final_epistemic_regression_test", "orchestrator_modularization_regression_test",
+      "planner_regression_test", "refutation_performance_regression_test",
+      "shared_fetch_regression_test", "timeout_regression_test"
+    ]
+  },
+  "registry_state": {
+    "beliefs_json_before": {"bytes": 1301423, "lines": 43735},
+    "beliefs_json_after_4_live_queries": {"bytes": 1310451, "lines": 44059},
+    "beliefs_json_growth_per_4_queries": {"bytes": 9028, "lines": 324}
+  },
+  "live_queries": [
+    {
+      "label": "factual_established",
+      "query": "В каком году была основана компания Apple?",
+      "web": true, "validate": false,
+      "latency_s": 126.45,
+      "trust_level": "UNVERIFIED",
+      "preliminary": true,
+      "answer_len": 2276,
+      "sources_count": 2,
+      "claims_final": 3,
+      "claims_rejected": 0,
+      "claim_status_counts": {"supported": 1, "disputed": 0, "contradicted": 2, "unverified": 0, "rejected": 0},
+      "note": "SUPPORTS and CONTRADICTS simultaneously present in this run's claim set — this is the required mixed-evidence baseline case per the phase plan.",
+      "grounding": {"semantic": 1.00, "epistemic": 1.00, "support": 0.33},
+      "final_claim_coverage": {"factual": 5, "covered": 1, "uncovered": 4, "coverage": 0.20, "status": "ok"},
+      "trace_id": "trace_1787777555_411d2d8b",
+      "trace_file": "registry/dataset/orch_traces/20260826.jsonl"
+    },
+    {
+      "label": "disputed_topic",
+      "query": "Безопасен ли подсластитель аспартам для здоровья?",
+      "web": true, "validate": false,
+      "latency_s": 309.96,
+      "trust_level": "UNVERIFIED",
+      "preliminary": true,
+      "answer_len": 2539,
+      "sources_count": 2,
+      "claims_final": 11,
+      "claims_rejected": 1,
+      "claim_status_counts": {"supported": 0, "disputed": 0, "contradicted": 0, "unverified": 11, "rejected": 0},
+      "note": "All 11 claims landed on unverified (relations were 'uncertain', not supports/contradicts) despite candidate_links being found — illustrates the 'uncertain != contradicted, uncertain != supported' invariant already holding.",
+      "grounding": {"semantic": 0.82, "epistemic": 0.00, "support": 0.00},
+      "final_claim_coverage": {"factual": 11, "covered": 8, "uncovered": 3, "coverage": 0.73, "status": "ok"},
+      "trace_id": "trace_1787777681_546544ca",
+      "trace_file": "registry/dataset/orch_traces/20260826.jsonl"
+    },
+    {
+      "label": "existence_question",
+      "query": "Существует ли частица тахион?",
+      "web": true, "validate": false,
+      "latency_s": 192.71,
+      "trust_level": "WEAKLY_SUPPORTED",
+      "preliminary": true,
+      "answer_len": 2438,
+      "sources_count": 5,
+      "claims_final": 8,
+      "claims_rejected": 0,
+      "claim_status_counts": {"supported": 1, "disputed": 0, "contradicted": 0, "unverified": 7, "rejected": 0},
+      "grounding": {"semantic": 1.00, "epistemic": 0.12, "support": 0.12},
+      "final_claim_coverage": {"factual": 5, "covered": 5, "uncovered": 0, "coverage": 1.00, "status": "ok"},
+      "existence_contract": {"core_claims": 3, "total_claims": 8, "status": "OK"},
+      "trace_id": "trace_1787777991_1dfe271d",
+      "trace_file": "registry/dataset/orch_traces/20260827.jsonl"
+    },
+    {
+      "label": "factual_with_validation",
+      "query": "Кто написал роман Война и мир?",
+      "web": true, "validate": true,
+      "latency_s": 295.91,
+      "trust_level": "UNVERIFIED",
+      "preliminary": true,
+      "answer_len": 2334,
+      "sources_count": 2,
+      "claims_final": 6,
+      "claims_rejected": 0,
+      "claim_status_counts": {"supported": 3, "disputed": 0, "contradicted": 0, "unverified": 3, "rejected": 0},
+      "grounding": {"semantic": 1.00, "epistemic": 0.50, "support": 0.50},
+      "final_claim_coverage": {"factual": 9, "covered": 5, "uncovered": 4, "coverage": 0.56, "status": "ok"},
+      "trace_id": "trace_1787778184_fad1a4b0",
+      "trace_file": "registry/dataset/orch_traces/20260827.jsonl"
+    }
+  ]
+}
