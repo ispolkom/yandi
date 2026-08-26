@@ -3779,6 +3779,18 @@ def process(
         #     claim["evidence_relations"]
         #
         # Relation общего main_claim здесь больше НЕ используется.
+        #
+        # P0 (performance architecture pass, unaccounted=74.85s
+        # investigation): found via the new [t+SS.SSs] log timestamps
+        # — this whole block (add_belief() per claim, at most 3) had
+        # ZERO cost[...] tracking, invisible in [PROFILE] entirely.
+        # One live run: 3 candidates, ~81s total (~27s/candidate) —
+        # belief_manager.add_belief()'s own embedding-prefilter +
+        # LLM-judge comparison against existing beliefs, previously
+        # completely unmeasured. Pure instrumentation here — timing
+        # only, add_belief()'s own logic is untouched.
+        _t0_belief_update = time.time()
+
         if _belief_manager and claims_data:
             try:
                 belief_updates_count = 0
@@ -3865,6 +3877,15 @@ def process(
                 belief_updates_count = 0
                 if verbose:
                     log(f"[V6] Ошибка добавления убеждений: {e}")
+
+        cost["belief_update_ms"] = (time.time() - _t0_belief_update) * 1000
+
+        if verbose:
+            log(
+                f"[Belief Update Timing] "
+                f"candidates={min(len(claims_data), 3) if claims_data else 0} "
+                f"total={cost['belief_update_ms'] / 1000:.2f}s"
+            )
 
         # ---- YANDI V6: LINKER ----
         supporting_ids = []
@@ -5172,6 +5193,9 @@ def process(
             ("claim_pass2_mapper_nli", "claim_pass2_mapping_nli_ms"),
             ("claim_claim_nli", "claim_claim_nli_ms"),
             ("final_claim_coverage", "final_coverage_ms"),
+            # P0 (performance architecture pass): previously untracked
+            # entirely — see [Belief Update Timing] instrumentation.
+            ("belief_update", "belief_update_ms"),
         ]
 
         for label, key in profile_keys:
