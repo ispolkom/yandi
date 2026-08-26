@@ -1209,12 +1209,29 @@ def _claim_retrieval_priority(
     )
 
     if _existing_role is not None:
-        role_info = {
-            "role": _existing_role,
-            "target_match": None,
-            "has_assertion": None,
-            "has_instrument": None,
-        }
+        # P0-A (autonomous fix pass): observability fix, not a second
+        # classifier. orch_synthesizer.py now persists the full
+        # _classify_claim_role() output (not just the role label) on
+        # the claim as "_role_classification" — reuse it here instead
+        # of hardcoding None for claims that carry it. Claims from any
+        # other source (that never went through that construction
+        # path) still fall back to None, exactly as before.
+        _stored_info = claim.get("_role_classification")
+
+        if isinstance(_stored_info, dict):
+            role_info = {
+                "role": _existing_role,
+                "target_match": _stored_info.get("target_match"),
+                "has_assertion": _stored_info.get("has_assertion"),
+                "has_instrument": _stored_info.get("has_instrument"),
+            }
+        else:
+            role_info = {
+                "role": _existing_role,
+                "target_match": None,
+                "has_assertion": None,
+                "has_instrument": None,
+            }
         role = _existing_role
     else:
         role_info = _classify_claim_role(text, query_context)

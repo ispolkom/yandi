@@ -770,6 +770,34 @@ def synthesize(
                     f"chars={len(claim_source)}"
                 )
 
+                # P0-A (autonomous fix pass): bounded, non-secret diagnostic
+                # to determine — for any future live run — whether a direct
+                # existence verdict was present in local_answer BEFORE
+                # extraction runs, without dumping the full payload. Reuses
+                # the single existing classifier (_classify_claim_role) on
+                # the whole local_answer text instead of building a second,
+                # independent detector. role=CORE here means the full text
+                # somewhere asserts/denies the existence target directly —
+                # if extraction later still yields core_claims=0, the loss
+                # happened at extraction, not generation. Any other role
+                # means the verdict most likely was never generated in the
+                # first place.
+                try:
+                    _local_answer_role_info = _classify_claim_role(
+                        claim_source,
+                        enriched.original,
+                    )
+                    print(
+                        "[Local Answer Existence Check] "
+                        f"existence_question={_local_answer_role_info['role'] is not None} "
+                        f"role_on_full_answer={_local_answer_role_info['role'] or '-'} "
+                        f"target_match={_local_answer_role_info['target_match']} "
+                        f"has_assertion={_local_answer_role_info['has_assertion']} "
+                        f"preview={claim_source[:220]!r}"
+                    )
+                except Exception as e:
+                    print(f"[Local Answer Existence Check] error={e}")
+
                 extract_prompt = _EXTRACT_PROMPT.format(
                     query=enriched.original,
                     frame_hint=hint,
@@ -1006,6 +1034,7 @@ def synthesize(
                     _claim_role = _role_info["role"] or "general"
                 except Exception:
                     _claim_role = "general"
+                    _role_info = None
 
                 claims.append({
                     "claim_id": claim_id,
@@ -1013,6 +1042,16 @@ def synthesize(
                     "claim_type": claim_type,
                     "claim_confidence": 0.3,  # Всегда низкая
                     "supports_query_aspect": [_claim_role],
+                    # P0-A (autonomous fix pass): persist the FULL
+                    # classification (not just the role label) so that
+                    # claim_evidence_retriever.py's reuse path can show
+                    # real target_match/has_assertion/has_instrument in
+                    # its [Claim Retrieval Priority] diagnostic instead
+                    # of hardcoding None whenever role is reused instead
+                    # of recomputed. Single source of truth — same
+                    # _classify_claim_role() call above, no second
+                    # independent classifier.
+                    "_role_classification": _role_info,
                     "derived_from_evidence_ids": [],
                     "is_meta": False,
                 })
