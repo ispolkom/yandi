@@ -42,6 +42,8 @@ import agent.orchestrator.claims.mapping as mapping_mod
 from agent.orchestrator.claims.mapping import run_claim_evidence_batch
 import agent.orchestrator.claims.retrieval as retrieval_mod
 from agent.orchestrator.claims.retrieval import apply_claim_resolution_and_second_retrieval
+import agent.orchestrator.claims.disagreement as disagreement_mod
+from agent.orchestrator.claims.disagreement import apply_claim_claim_disagreement
 from agent.orchestrator_v2 import LocalSynthesisResult
 from agent.orch_tracer import Trace
 from agent.epistemic_router import EpistemicClassification
@@ -804,6 +806,119 @@ check("beliefs: add_belief exception caught, no crash", True)
 check("beliefs: add_belief exception -> cost[belief_update_ms] still recorded", "belief_update_ms" in cost_exc)
 check("linker: exception caught -> supporting_ids left at [] (assignment never completed)", supporting_ids_exc == [])
 check("personality: exception caught -> does not propagate or affect return value", True)
+
+
+# ============================================================
+# 13. claims/disagreement.py — apply_claim_claim_disagreement
+# ============================================================
+#
+# The embedding call uses a raw `requests.Session().post(...)` created
+# *inside* the function body (matches the original inline code exactly —
+# not something this migration should "fix"), so it can't be monkeypatched
+# via a module-level attribute the way the other extractions' dependencies
+# are. Forcing requests.Session.post to raise exercises the "FAIL-OPEN FOR
+# CORRECTNESS" branch deterministically (semantic_available=False -> full
+# candidate pair set, still routed through batch NLI) without any real
+# network call — this is itself a real, load-bearing code path (embedding
+# service down), not just a test convenience.
+
+import requests as _requests_mod
+
+_orig_session_post = _requests_mod.Session.post
+_orig_infer_batch = disagreement_mod.infer_claim_relations_batch
+
+
+def _raise_post(self, *a, **kw):
+    raise RuntimeError("embed endpoint unreachable (test)")
+
+
+captured_infer_calls = []
+
+
+def _fake_infer_batch(claim_pairs, batch_size=16):
+    captured_infer_calls.append({"pairs": list(claim_pairs), "batch_size": batch_size})
+    results = []
+    for i, pair in enumerate(claim_pairs):
+        if i == 0:
+            results.append({"pair_id": pair["pair_id"], "relation": "contradicts", "method": "llm_nli_batch"})
+        else:
+            results.append({"pair_id": pair["pair_id"], "relation": "unrelated", "method": "llm_nli_batch"})
+    return results
+
+
+captured_challenge_calls = []
+
+
+class _FakeDisagreementEngine:
+    def challenge(self, **kw):
+        captured_challenge_calls.append(kw)
+
+
+_requests_mod.Session.post = _raise_post
+disagreement_mod.infer_claim_relations_batch = _fake_infer_batch
+
+try:
+    claims_dis = [
+        {"claim_id": "d1", "claim_text": "Земля вращается вокруг Солнца", "claim_confidence": 0.3},
+        {"claim_id": "d2", "claim_text": "Солнце вращается вокруг Земли", "claim_confidence": 0.9},
+        {"claim_id": "d3", "claim_text": "Луна — спутник Земли", "claim_confidence": 0.5},
+    ]
+    cost_dis = {}
+    logged_dis = []
+    engine = _FakeDisagreementEngine()
+
+    apply_claim_claim_disagreement(claims_dis, engine, make_epistemic_result(), False, cost_dis, logged_dis.append, True)
+
+    check("disagreement: embedding failure -> fail-open, full pair set sent to batch NLI", len(captured_infer_calls[0]["pairs"]) == 3, str(captured_infer_calls))
+    check("disagreement: batch_size unchanged (16)", captured_infer_calls[0]["batch_size"] == 16)
+    check("disagreement: [Claim↔Claim Prefilter] logs semantic=fallback on embedding failure", any("semantic=fallback" in l for l in logged_dis))
+    check("disagreement: [Claim↔Claim Prefilter] logs the embedding_error", any("embedding_error=" in l for l in logged_dis))
+    check("disagreement: contradicts+llm_nli_batch triggers exactly one challenge() call", len(captured_challenge_calls) == 1, str(captured_challenge_calls))
+    check("disagreement: challenge() topic uses epistemic_result.domain (not subjective)", captured_challenge_calls[0]["topic"] == "scientific")
+    check("disagreement: challenge() old_position is claim d1's text (first of the pair)", captured_challenge_calls[0]["old_position"] == "Земля вращается вокруг Солнца")
+    check("disagreement: challenge() new_position picks the higher-confidence claim's text (d2, conf=0.9)", captured_challenge_calls[0]["new_position"] == "Солнце вращается вокруг Земли")
+    check("disagreement: challenge() confidence_before/after come from claim_confidence", captured_challenge_calls[0]["confidence_before"] == 0.3 and captured_challenge_calls[0]["confidence_after"] == 0.9)
+    check("disagreement: cost[claim_claim_nli_ms] recorded", "claim_claim_nli_ms" in cost_dis)
+    check("disagreement: [Claim↔Claim Batch Summary] logged with contradicts=1", any("[Claim↔Claim Batch Summary]" in l and "contradicts=1" in l for l in logged_dis))
+    check("disagreement: [Claim↔Claim Timing] logged", any("[Claim↔Claim Timing]" in l for l in logged_dis))
+    check("disagreement: [V6] Зафиксирован спор logged", any("Зафиксирован спор" in l for l in logged_dis))
+
+    # disagreement_engine=None -> no-op, no NLI call, cost untouched.
+    captured_infer_calls.clear()
+    captured_challenge_calls.clear()
+    cost_none_dis = {}
+    apply_claim_claim_disagreement(claims_dis, None, make_epistemic_result(), False, cost_none_dis, lambda m: None, False)
+    check("disagreement: disagreement_engine=None -> no-op, batch NLI never called", captured_infer_calls == [])
+    check("disagreement: disagreement_engine=None -> cost untouched", cost_none_dis == {})
+
+    # len(claims_data) <= 1 -> no-op.
+    apply_claim_claim_disagreement([claims_dis[0]], engine, make_epistemic_result(), False, {}, lambda m: None, False)
+    check("disagreement: single claim -> no-op, batch NLI never called", captured_infer_calls == [])
+
+    # Non-"llm_nli_batch" method never triggers a challenge, even if relation=="contradicts".
+    captured_challenge_calls.clear()
+
+    def _fake_infer_fallback_method(claim_pairs, batch_size=16):
+        return [{"pair_id": p["pair_id"], "relation": "contradicts", "method": "batch_fallback"} for p in claim_pairs]
+
+    disagreement_mod.infer_claim_relations_batch = _fake_infer_fallback_method
+    apply_claim_claim_disagreement(claims_dis, engine, make_epistemic_result(), False, {}, lambda m: None, False)
+    check("disagreement: contradicts via batch_fallback (not llm_nli_batch) does NOT trigger challenge", captured_challenge_calls == [])
+
+    # Exception inside the block (batch NLI raises) is caught and logged,
+    # never propagates.
+    def _raise_infer(claim_pairs, batch_size=16):
+        raise RuntimeError("nli boom")
+
+    disagreement_mod.infer_claim_relations_batch = _raise_infer
+    logged_exc_dis = []
+    apply_claim_claim_disagreement(claims_dis, engine, make_epistemic_result(), False, {}, logged_exc_dis.append, True)
+    check("disagreement: batch NLI exception is caught, does not propagate", True)
+    check("disagreement: batch NLI exception logs [V6] Ошибка batch спора", any("Ошибка batch спора" in l for l in logged_exc_dis))
+
+finally:
+    _requests_mod.Session.post = _orig_session_post
+    disagreement_mod.infer_claim_relations_batch = _orig_infer_batch
 
 
 print()
