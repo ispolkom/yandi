@@ -1259,7 +1259,7 @@ def synthesize(
     # synthesize(). Если исключение происходило раньше этой строки,
     # exception handler не мог обратиться к импортированному сверху
     # agent.orch_schemas.SynthesisResult и падал с UnboundLocalError.
-    from orchestrator_v2 import LocalSynthesisResult
+    from agent.orchestrator_v2 import LocalSynthesisResult
 
     synthesis_result = LocalSynthesisResult(
         # Canonical answer — фактически сформированный Synthesizer output.
