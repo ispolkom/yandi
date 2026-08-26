@@ -182,65 +182,54 @@ class BeliefManager:
         return belief
     
     def _find_similar(self, topic: str, statement: str) -> Optional[Belief]:
-        for belief in self.beliefs:
-            if belief.status in ["active", "revised"] and belief.topic == topic:
-                if self._is_similar_statement(belief.statement, statement):
-                    return belief
-        return None
-    
-    def _is_similar_statement(self, a: str, b: str) -> bool:
         """
-        Проверяет, являются ли два belief-утверждения эквивалентными.
+        Найти существующее убеждение, эквивалентное новому statement.
 
-        Этапы:
-        1. embeddinggemma используется только как дешёвый prefilter;
-        2. высокая тематическая близость НЕ означает тождество;
-        3. окончательное решение принимает короткий LLM judge;
-        4. merge разрешён только для relation == equivalent.
+        P0 (performance architecture pass): раньше _is_similar_statement()
+        делал СВОИ 2 embed HTTP-вызова на КАЖДОЕ сравнение — включая
+        повторное re-embed одного и того же нового `statement` на
+        каждой итерации. При 108 активных beliefs одной темы (реальное
+        число в registry на момент фикса) один add_belief() для
+        действительно нового утверждения мог стоить 200+ HTTP round-trips
+        (наблюдалось ~27s/кандидат в живом прогоне).
+
+        Теперь: сначала быстрый exact-match проход по всем кандидатам
+        (без единого HTTP-вызова — как и раньше, эта проверка не стоила
+        сети). Только если exact match не найден, делается ОДИН
+        batch-embed вызов (statement + все оставшиеся кандидаты этой
+        темы), и по кандидатам в ТОМ ЖЕ порядке — threshold-gated LLM
+        judge, первый "equivalent" выигрывает. Критерии решения не
+        изменились — изменился только способ получения embedding (один
+        batch-запрос вместо N избыточных), и лишний embed-вызов больше
+        не тратится впустую, когда дубликат находится по exact match.
         """
+        import numpy as np
 
-        if not a or not b:
-            return False
+        candidates = [
+            belief
+            for belief in self.beliefs
+            if belief.status in ["active", "revised"] and belief.topic == topic
+        ]
 
-        # Точное совпадение после нормализации — быстрый путь.
-        a_norm = " ".join(a.lower().split())
-        b_norm = " ".join(b.lower().split())
+        if not candidates or not statement:
+            return None
 
-        if a_norm == b_norm:
-            return True
+        statement_norm = " ".join(statement.lower().split())
 
-        try:
-            import requests
-            import numpy as np
+        for belief in candidates:
+            belief_norm = " ".join((belief.statement or "").lower().split())
+            if belief_norm == statement_norm:
+                return belief
 
-            session = requests.Session()
-            session.trust_env = False
+        vectors = self._embed_batch([statement] + [c.statement for c in candidates])
 
-            def _gemma_embed(value: str):
-                resp = session.post(
-                    "http://127.0.0.1:11434/api/embed",
-                    json={
-                        "model": "embeddinggemma:latest",
-                        "input": value[:2000],
-                    },
-                    timeout=30,
-                )
-                resp.raise_for_status()
+        if vectors is None:
+            # Fail-safe (как раньше): при отказе embedding — не сливаем
+            # по fuzzy-пути.
+            return None
 
-                vec = np.array(
-                    resp.json()["embeddings"][0],
-                    dtype=np.float32,
-                )
-
-                norm = np.linalg.norm(vec)
-                return vec / norm if norm > 0 else vec
-
-            similarity = float(
-                np.dot(
-                    _gemma_embed(a),
-                    _gemma_embed(b),
-                )
-            )
+        for i, belief in enumerate(candidates):
+            similarity = float(np.dot(vectors[0], vectors[i + 1]))
 
             # По измеренным данным:
             # ~0.17 — unrelated
@@ -251,7 +240,53 @@ class BeliefManager:
             # Поэтому threshold здесь НЕ решает equivalence.
             # Он только отсекает явно разные утверждения.
             if similarity < 0.70:
-                return False
+                continue
+
+            if self._llm_judge_relation(belief.statement, statement) == "equivalent":
+                return belief
+
+        return None
+
+    @staticmethod
+    def _embed_batch(texts: List[str]):
+        """Один /api/embed вызов на N текстов вместо N отдельных вызовов."""
+        try:
+            import requests
+            import numpy as np
+
+            session = requests.Session()
+            session.trust_env = False
+
+            resp = session.post(
+                "http://127.0.0.1:11434/api/embed",
+                json={
+                    "model": "embeddinggemma:latest",
+                    "input": [t[:2000] for t in texts],
+                },
+                timeout=60,
+            )
+            resp.raise_for_status()
+
+            vecs = np.array(resp.json()["embeddings"], dtype=np.float32)
+            norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+
+            return vecs / norms
+
+        except Exception:
+            return None
+
+    def _llm_judge_relation(self, a: str, b: str) -> str:
+        """
+        Короткий LLM judge — то же решение, что раньше было хвостом
+        _is_similar_statement(), вызывается только для кандидатов,
+        уже прошедших embedding-prefilter (similarity >= 0.70).
+        """
+        try:
+            import requests
+
+            session = requests.Session()
+            session.trust_env = False
 
             prompt = f"""
 Ты определяешь отношение между двумя утверждениями.
@@ -305,18 +340,14 @@ different
                 resp.json().get("response", "{}")
             )
 
-            relation = str(
+            return str(
                 parsed.get("relation", "")
             ).strip().lower()
 
-            return relation == "equivalent"
-
         except Exception:
-            # При отказе semantic/NLI проверки НЕ сливаем beliefs.
-            # Лучше сохранить два кандидата, чем ошибочно объединить
-            # противоположные утверждения.
-            return False
-    
+            # При отказе LLM judge НЕ сливаем beliefs (как раньше).
+            return ""
+
     def _update_existing(
         self,
         belief: Belief,
