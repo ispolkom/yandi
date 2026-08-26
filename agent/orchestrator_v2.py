@@ -864,7 +864,15 @@ def process(
 
     def log(msg: str):
         if verbose:
-            print(msg, flush=True)
+            # P0 (performance architecture pass, unaccounted=73.31s
+            # investigation): every top-level log() call now carries
+            # wall-clock elapsed-since-request-start. This reconstructs
+            # a full timeline of the SEQUENTIAL top-level flow from the
+            # log alone (post-hoc, deltas between consecutive lines) —
+            # pure instrumentation, no behavior change. Sub-phase costs
+            # already tracked in cost[...] (claim_setup_ms etc.) stay
+            # as they are; this is for finding gaps BETWEEN them.
+            print(f"[t+{time.time() - t_start:7.2f}s] {msg}", flush=True)
 
     def _claims_conflict(text1: str, text2: str) -> bool:
         """
@@ -3961,6 +3969,15 @@ def process(
                 semantic_error = None
                 claim_vectors = {}
 
+                # P0 (performance architecture pass, unaccounted
+                # investigation): this used to call /api/embed ONCE
+                # PER CLAIM sequentially — the exact same N+1 pattern
+                # already found and fixed in extract_claim_from_source()
+                # (claim_relation.py) earlier this session. Ollama's
+                # /api/embed accepts a list input and returns one
+                # embedding per item in one call — batching here uses
+                # the identical technique, same math (each vector still
+                # individually L2-normalized), just fewer round-trips.
                 try:
                     import requests
                     import numpy as np
@@ -3968,35 +3985,37 @@ def process(
                     embed_session = requests.Session()
                     embed_session.trust_env = False
 
-                    def _claim_embed(value: str):
+                    def _claim_embed_batch(values):
                         resp = embed_session.post(
                             "http://127.0.0.1:11434/api/embed",
                             json={
                                 "model": "embeddinggemma:latest",
-                                "input": value[:2000],
+                                "input": [v[:2000] for v in values],
                             },
                             timeout=30,
                         )
 
                         resp.raise_for_status()
 
-                        vec = np.array(
-                            resp.json()["embeddings"][0],
+                        vecs = np.array(
+                            resp.json()["embeddings"],
                             dtype=np.float32,
                         )
 
-                        norm = np.linalg.norm(vec)
-
-                        return (
-                            vec / norm
-                            if norm > 0
-                            else vec
+                        norms = np.linalg.norm(
+                            vecs, axis=1, keepdims=True
                         )
+                        norms[norms == 0] = 1.0
 
-                    for idx, item in enumerate(active_claims):
-                        claim_vectors[idx] = _claim_embed(
-                            item["text"]
-                        )
+                        return vecs / norms
+
+                    _texts = [item["text"] for item in active_claims]
+
+                    if _texts:
+                        _vecs = _claim_embed_batch(_texts)
+
+                        for idx in range(len(active_claims)):
+                            claim_vectors[idx] = _vecs[idx]
 
                     semantic_available = (
                         len(claim_vectors)
