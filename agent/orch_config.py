@@ -35,6 +35,16 @@ MAX_TOKENS_ANALYST   = 2000   # синтез ответа — подробно
 MAX_TOKENS_DATASET   = 10000  # генерация датасета — максимальное качество
 MAX_TOKENS_DEFAULT   = 10000  # потолок для всего остального
 
+# P0-B (YANDI autonomous fix pass): final_claim_coverage.py::extract_final_claims()
+# раньше переиспользовал _call_ollama() из orch_web_query.py и вместе с ним
+# MAX_TOKENS_CONDUCTOR=500 — бюджет, рассчитанный на короткую 2-3-query
+# формулировку, не на variable-size JSON-массив ВСЕХ claims финального
+# ответа. Отдельная именованная константа — задача своя (может расти
+# независимо от conductor), число то же самое, что уже откалибровано и
+# проверено для "подробных" задач (MAX_TOKENS_ANALYST), не изобретение
+# новой калибровки.
+FINAL_CLAIM_EXTRACTION_MAX_TOKENS = MAX_TOKENS_ANALYST
+
 # Температура по роли
 TEMP_CONDUCTOR = 0.1   # детерминированные решения
 TEMP_ANALYST   = 0.2   # чуть больше вариативности в ответах

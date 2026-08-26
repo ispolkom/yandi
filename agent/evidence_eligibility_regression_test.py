@@ -179,8 +179,13 @@ def main() -> int:
     from unittest.mock import patch
     import agent.final_claim_coverage as fcc
 
-    def extract(raw):
-        with patch("agent.final_claim_coverage._call_ollama", lambda p: raw):
+    def extract(raw, done_reason="stop"):
+        # P0-B (autonomous fix pass): final_claim_coverage.py now uses its
+        # own dedicated _call_ollama_for_extraction() (dict response with
+        # done_reason/eval_count metadata), not the shared string-returning
+        # _call_ollama() from orch_web_query.py.
+        mock_gen = {"response": raw, "done_reason": done_reason, "eval_count": 42, "num_predict": 2000}
+        with patch("agent.final_claim_coverage._call_ollama_for_extraction", lambda p: mock_gen):
             return fcc.extract_final_claims("Длинный содержательный ответ " * 10)
 
     fenced = (
