@@ -33,6 +33,10 @@ from agent.orchestrator.response.assembly import (
     _adapt_answer_to_style,
 )
 from agent.orchestrator.claims.status import classify_claim_epistemic_status
+from agent.orchestrator.claims.validation import apply_structural_claim_validation
+from agent.orchestrator.claims.lifecycle import setup_claim_and_evidence_lifecycle
+import agent.orchestrator.claims.mapping as mapping_mod
+from agent.orchestrator.claims.mapping import run_claim_evidence_batch
 from agent.orchestrator_v2 import LocalSynthesisResult
 from agent.orch_tracer import Trace
 from agent.epistemic_router import EpistemicClassification
@@ -402,6 +406,180 @@ check("claims/status: hard-blocked source class excluded -> unverified, not supp
 check("claims/status: counts tally matches per-claim statuses", counts == {
     "supported": 1, "disputed": 1, "contradicted": 1, "unverified": 3, "rejected": 1,
 }, str(counts))
+
+
+# ============================================================
+# 8. claims/validation.py
+# ============================================================
+
+fake_validator = SimpleNamespace(
+    filter_claims=lambda claims: [c for c in claims if not c.get("_rejected")],
+    rejection_reasons={"low_confidence": 1},
+)
+claims_in = [
+    {"claim_id": "v1", "claim_text": "ok claim"},
+    {"claim_id": "v2", "claim_text": "bad claim", "_rejected": True, "_rejected_reason": "too_vague", "structural_validation": "rejected"},
+]
+trace = make_trace()
+claims_out, rejected = apply_structural_claim_validation(list(claims_in), fake_validator, {"claims": [1, 2]}, trace, log=lambda m: None, verbose=False)
+check("validation: accepted claim passes through", claims_out == [claims_in[0]], str(claims_out))
+check("validation: rejected claim is filtered out of claims_data", claims_in[1] not in claims_out)
+check("validation: rejected claim is returned separately for diagnostics", rejected == [claims_in[1]])
+check("validation: rejected claim recorded on trace.rejected_claims", len(trace.rejected_claims) == 1 and trace.rejected_claims[0]["claim_id"] == "v2" and trace.rejected_claims[0]["rejection_reason"] == "too_vague")
+
+# No validator -> pass-through, no rejections.
+claims_out2, rejected2 = apply_structural_claim_validation(list(claims_in), None, {}, make_trace(), log=lambda m: None, verbose=False)
+check("validation: no claim_validator -> claims_data unchanged", claims_out2 == claims_in)
+check("validation: no claim_validator -> no rejected claims", rejected2 == [])
+
+# filter_claims raises -> claims_data left as the pre-call input, no rejections
+# recorded (matches the original inline try/except: only the reassignment and
+# rejected-claims computation are inside the try, so an exception before either
+# completes leaves both untouched — not "fixed" here, preserved as-is).
+def _raise_validator(claims):
+    raise RuntimeError("validator boom")
+
+
+raising_validator = SimpleNamespace(filter_claims=_raise_validator, rejection_reasons={})
+claims_out3, rejected3 = apply_structural_claim_validation(list(claims_in), raising_validator, {}, make_trace(), log=lambda m: None, verbose=False)
+check("validation: filter_claims exception -> claims_data left unchanged", claims_out3 == claims_in)
+check("validation: filter_claims exception -> rejected_structural_claims stays []", rejected3 == [])
+
+
+# ============================================================
+# 9. claims/lifecycle.py
+# ============================================================
+
+reasoning_info = {
+    "claims": ["простая строка claim", {"claim_text": "уже словарь", "claim_id": "pre_id"}, 123],
+    "evidence_records": [{"evidence_id": "ev1", "content_excerpt": "какой-то текст evidence", "evidence_role": "direct", "evidence_eligible": True, "retrieval_origin": "web"}],
+    "trust_report": {"foo": "bar"},
+    "coverage_report": {"cov": 1},
+    "technical_errors": ["timeout on x"],
+}
+logged9 = []
+(
+    trust_report_data, trust_reasons, coverage_report_data, claims_data9, evidence_data9, technical_errors9,
+) = setup_claim_and_evidence_lifecycle(
+    reasoning_info, search_result=None, web_result=None, refutation_snippets=[],
+    query_to_use="тестовый запрос", log=logged9.append, verbose=True,
+)
+
+check("lifecycle: trust_report_data passed through", trust_report_data == {"foo": "bar"})
+check("lifecycle: trust_reasons starts empty", trust_reasons == [])
+check("lifecycle: coverage_report_data passed through", coverage_report_data == {"cov": 1})
+check("lifecycle: technical_errors passed through", technical_errors9 == ["timeout on x"])
+check("lifecycle: synthesizer evidence_records survive into evidence_data", any(ev.get("evidence_id") == "ev1" for ev in evidence_data9))
+check("lifecycle: non-dict/non-str claim (123) dropped during normalization", len(claims_data9) == 2, str(claims_data9))
+check("lifecycle: every claim gets a claim_id", all(c.get("claim_id") for c in claims_data9))
+check("lifecycle: pre-existing claim_id preserved, not overwritten", any(c.get("claim_id") == "pre_id" for c in claims_data9))
+check("lifecycle: string claim gets a generated cl_ claim_id", any(c.get("claim_id", "").startswith("cl_") for c in claims_data9))
+check("lifecycle: claim_type defaults to factual", all(c.get("claim_type") == "factual" for c in claims_data9))
+check("lifecycle: claim_confidence defaults to 0.5", all(c.get("claim_confidence") == 0.5 for c in claims_data9))
+check("lifecycle: query_context filled from query_to_use", all(c.get("query_context") == "тестовый запрос" for c in claims_data9))
+check("lifecycle: verbose logs [Evidence Pool]", any("[Evidence Pool]" in l for l in logged9))
+check("lifecycle: verbose logs dropped-claim diagnostic", any("Пропущен claim неизвестного типа" in l for l in logged9))
+
+
+# ============================================================
+# 10. claims/mapping.py — run_claim_evidence_batch (de-closured
+#     _run_claim_evidence_batch; see the extraction commit for the full
+#     free-variable audit: only `log`/`verbose` were true closure captures,
+#     everything else was already a module-level import).
+# ============================================================
+
+_orig_directness = mapping_mod.evaluate_evidence_directness
+_orig_classify = mapping_mod.classify_claim_evidence_batch
+
+mapping_mod.evaluate_evidence_directness = lambda claim_text, ev_text: 0.75
+
+captured_classify_calls = []
+
+
+def _fake_classify(jobs, batch_size=8):
+    captured_classify_calls.append({"jobs": jobs, "batch_size": batch_size})
+    return {
+        "c1": {
+            "supports": [{
+                "evidence_id": "e1",
+                "relation_method": "nli",
+                "source_claim": "evidence one text",
+                "source_class": "academic",
+                "quality_score": 0.9,
+                "evidence_eligible": True,
+                "evidence_role": "direct",
+                "retrieval_origin": "web",
+                "directness": 0.75,
+            }],
+        },
+        # c3 intentionally absent from the classifier's output -> must fall
+        # back to an empty evidence_relations list, not crash.
+    }
+
+
+mapping_mod.classify_claim_evidence_batch = _fake_classify
+
+claims_m = [
+    {"claim_id": "c1", "claim_text": "claim one text", "derived_from_evidence_ids": ["e1", "e2"]},
+    {"claim_id": "c2", "claim_text": "", "derived_from_evidence_ids": ["e1"]},
+    {"claim_id": "c3", "claim_text": "claim three", "derived_from_evidence_ids": ["e_missing"]},
+]
+evidence_m = [
+    {"evidence_id": "e1", "content_excerpt": "evidence one text", "source_type": "web", "source_uri": "http://x", "source_class": "academic", "quality_score": 0.9, "evidence_eligible": True, "evidence_role": "direct", "retrieval_origin": "web"},
+    {"evidence_id": "e2", "content_excerpt": "", "source_type": "web"},  # empty excerpt -> must be skipped
+]
+
+logged10 = []
+try:
+    relation_count = run_claim_evidence_batch(claims_m, evidence_m, "PASS1", logged10.append, True)
+
+    by_id_m = {c["claim_id"]: c for c in claims_m}
+
+    check("mapping: empty claim_text -> evidence_relations=[] and excluded from jobs", by_id_m["c2"]["evidence_relations"] == [])
+    check("mapping: empty claim_text claim excluded from classifier jobs", all(j["claim_id"] != "c2" for j in captured_classify_calls[0]["jobs"]))
+    check("mapping: linked evidence with empty content_excerpt (e2) skipped as a candidate source", len(captured_classify_calls[0]["jobs"][0]["sources"]) == 1 and captured_classify_calls[0]["jobs"][0]["sources"][0]["evidence_id"] == "e1")
+    check("mapping: missing linked evidence id (e_missing) yields zero candidate sources, claim still gets a job", any(j["claim_id"] == "c3" and j["sources"] == [] for j in captured_classify_calls[0]["jobs"]))
+    check("mapping: classify called with batch_size=8 (unchanged)", captured_classify_calls[0]["batch_size"] == 8)
+    check("mapping: c1 evidence_relations populated from classifier output, field-mapped correctly", by_id_m["c1"]["evidence_relations"] == [{
+        "evidence_id": "e1", "relation": "supports", "method": "nli", "source_claim": "evidence one text",
+        "error": None, "source_class": "academic", "quality_score": 0.9, "evidence_eligible": True,
+        "evidence_role": "direct", "retrieval_origin": "web", "directness": 0.75,
+    }], str(by_id_m["c1"]["evidence_relations"]))
+    check("mapping: c3 absent from classifier output -> evidence_relations=[] (no crash)", by_id_m["c3"]["evidence_relations"] == [])
+    check("mapping: relation_count return value == total relations written", relation_count == 1, str(relation_count))
+    check("mapping: verbose=True logs [Evidence Eligibility] per candidate pair", any("[Evidence Eligibility]" in l for l in logged10))
+    check("mapping: verbose=True logs [Claim Evidence Batch PASS1] summary with batch_label", any("[Claim Evidence Batch PASS1]" in l for l in logged10))
+
+    # verbose=False -> no log calls at all.
+    logged10b = []
+    claims_m2 = [{"claim_id": "c1", "claim_text": "x", "derived_from_evidence_ids": []}]
+    run_claim_evidence_batch(claims_m2, [], "PASS2", logged10b.append, False)
+    check("mapping: verbose=False emits no log lines", logged10b == [])
+
+    # Same call shape works for PASS2's batch_label (mechanical param, not a
+    # different code path) -> just confirm the label is threaded through.
+    logged10c = []
+    claims_m3 = [{"claim_id": "c1", "claim_text": "claim one text", "derived_from_evidence_ids": ["e1"]}]
+    run_claim_evidence_batch(claims_m3, evidence_m, "PASS2", logged10c.append, True)
+    check("mapping: PASS2 batch_label threaded through unchanged", any("[Claim Evidence Batch PASS2]" in l for l in logged10c))
+
+    # Exception/fallback behavior: the original closure had no try/except
+    # around the classifier call, so an exception must propagate unchanged
+    # (no silent fallback introduced by the extraction).
+    def _raise_classify(jobs, batch_size=8):
+        raise RuntimeError("classifier boom")
+
+    mapping_mod.classify_claim_evidence_batch = _raise_classify
+    threw = False
+    try:
+        run_claim_evidence_batch([{"claim_id": "c1", "claim_text": "x", "derived_from_evidence_ids": []}], [], "PASS1", lambda m: None, False)
+    except RuntimeError:
+        threw = True
+    check("mapping: classifier exception propagates unchanged (no swallowed fallback)", threw)
+
+finally:
+    mapping_mod.evaluate_evidence_directness = _orig_directness
+    mapping_mod.classify_claim_evidence_batch = _orig_classify
 
 
 print()
