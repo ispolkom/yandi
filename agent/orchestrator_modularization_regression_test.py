@@ -32,7 +32,10 @@ from agent.orchestrator.response.assembly import (
     _generate_apology_response,
     _adapt_answer_to_style,
 )
-from agent.orchestrator.claims.status import classify_claim_epistemic_status
+from agent.orchestrator.claims.status import (
+    classify_claim_epistemic_status,
+    evaluate_claim_status_gate,
+)
 from agent.orchestrator.claims.validation import apply_structural_claim_validation
 from agent.orchestrator.claims.lifecycle import (
     setup_claim_and_evidence_lifecycle,
@@ -1079,6 +1082,79 @@ finally:
     synthesis_mod.extract_main_claim = _orig_extract_main_claim
     synthesis_mod.is_relevant = _orig_is_relevant
     synthesis_mod.scrape = _orig_scrape
+
+
+# ============================================================
+# 15. claims/status.py — evaluate_claim_status_gate
+# ============================================================
+
+def claims_with_statuses(*statuses):
+    return [{"claim_id": f"c{i}", "verification_status": s} for i, s in enumerate(statuses)]
+
+
+# Case 1: no claims -> UNVERIFIED, confidence 0.0, replacement answer.
+sr = make_synthesis_result(answer="исходный ответ", trust_level="SUPPORTED", confidence=0.8)
+accepted, total, rejected = evaluate_claim_status_gate([], sr, log=lambda m: None)
+check("status_gate: no claims -> total_claims=0", total == 0)
+check("status_gate: no claims -> claims_accepted=0", accepted == 0)
+check("status_gate: no claims -> trust_level=UNVERIFIED", sr.trust_level == "UNVERIFIED")
+check("status_gate: no claims -> confidence=0.0", sr.confidence == 0.0)
+check("status_gate: no claims -> answer replaced with 'не удалось выделить'", "не удалось выделить" in sr.answer)
+
+# Case 2: all claims rejected -> UNVERIFIED, confidence 0.0, replacement answer.
+sr = make_synthesis_result(answer="исходный ответ", trust_level="SUPPORTED", confidence=0.8)
+accepted, total, rejected = evaluate_claim_status_gate(claims_with_statuses("rejected", "rejected"), sr, log=lambda m: None)
+check("status_gate: all rejected -> claims_rejected==total_claims", rejected == total == 2)
+check("status_gate: all rejected -> trust_level=UNVERIFIED", sr.trust_level == "UNVERIFIED")
+check("status_gate: all rejected -> answer replaced with 'не прошли структурную проверку'", "не прошли структурную проверку" in sr.answer)
+
+# Case 3: only contradicted (no supported/verified) -> UNVERIFIED, confidence
+# capped at 0.25, contradiction warning prepended.
+sr = make_synthesis_result(answer="исходный ответ", trust_level="STRONGLY_SUPPORTED", confidence=0.9)
+accepted, total, rejected = evaluate_claim_status_gate(claims_with_statuses("contradicted", "unverified"), sr, log=lambda m: None)
+check("status_gate: only contradicted -> trust_level=UNVERIFIED", sr.trust_level == "UNVERIFIED")
+check("status_gate: only contradicted -> confidence capped at 0.25", sr.confidence <= 0.25)
+check("status_gate: only contradicted -> warning notice prepended", sr.answer.startswith("⚠️ ВАЖНО:") and "ОПРОВЕРГНУТА" in sr.answer)
+
+# Warning is not duplicated if the answer already carries one.
+sr2 = make_synthesis_result(answer="⚠️ ВАЖНО: уже есть предупреждение\n\nостальное", trust_level="STRONGLY_SUPPORTED", confidence=0.9)
+evaluate_claim_status_gate(claims_with_statuses("contradicted"), sr2, log=lambda m: None)
+check("status_gate: existing ⚠️ ВАЖНО: prefix is not duplicated", sr2.answer.count("⚠️ ВАЖНО:") == 1)
+
+# Case 4: disputed present -> trust capped WEAKLY_SUPPORTED, confidence <= 0.45.
+sr = make_synthesis_result(answer="ответ", trust_level="STRONGLY_SUPPORTED", confidence=0.9)
+evaluate_claim_status_gate(claims_with_statuses("disputed", "verified"), sr, log=lambda m: None)
+check("status_gate: disputed present -> trust capped to WEAKLY_SUPPORTED", sr.trust_level == "WEAKLY_SUPPORTED")
+check("status_gate: disputed present -> confidence capped at 0.45", sr.confidence <= 0.45)
+
+# disputed branch does not downgrade an already-lower trust_level.
+sr_low = make_synthesis_result(answer="ответ", trust_level="UNVERIFIED", confidence=0.9)
+evaluate_claim_status_gate(claims_with_statuses("disputed", "verified"), sr_low, log=lambda m: None)
+check("status_gate: disputed branch does not raise an already-lower trust_level", sr_low.trust_level == "UNVERIFIED")
+
+# Case 5: verified==0, supported>0 -> trust capped PARTIALLY_SUPPORTED, confidence <= 0.60.
+sr = make_synthesis_result(answer="ответ", trust_level="STRONGLY_SUPPORTED", confidence=0.9)
+evaluate_claim_status_gate(claims_with_statuses("supported", "supported"), sr, log=lambda m: None)
+check("status_gate: verified=0, supported>0 -> trust capped to PARTIALLY_SUPPORTED", sr.trust_level == "PARTIALLY_SUPPORTED")
+check("status_gate: verified=0, supported>0 -> confidence capped at 0.60", sr.confidence <= 0.60)
+
+# Case 6: verified==0, supported==0 -> trust capped WEAKLY_SUPPORTED, confidence
+# <= 0.40, unsupported-notice prepended.
+sr = make_synthesis_result(answer="ответ", trust_level="STRONGLY_SUPPORTED", confidence=0.9)
+evaluate_claim_status_gate(claims_with_statuses("unverified", "candidate"), sr, log=lambda m: None)
+check("status_gate: verified=0, supported=0 -> trust capped to WEAKLY_SUPPORTED", sr.trust_level == "WEAKLY_SUPPORTED")
+check("status_gate: verified=0, supported=0 -> confidence capped at 0.40", sr.confidence <= 0.40)
+check("status_gate: verified=0, supported=0 -> unsupported-notice prepended", sr.answer.startswith("⚠️ ВАЖНО:") and "неподтверждённая гипотеза" in sr.answer)
+
+# Case 7: verified>0 -> else branch, answer/trust/confidence untouched.
+sr = make_synthesis_result(answer="ответ без изменений", trust_level="STRONGLY_SUPPORTED", confidence=0.9)
+accepted, total, rejected = evaluate_claim_status_gate(claims_with_statuses("verified", "supported"), sr, log=lambda m: None)
+check("status_gate: verified>0 -> answer left untouched", sr.answer == "ответ без изменений")
+check("status_gate: verified>0 -> trust_level left untouched", sr.trust_level == "STRONGLY_SUPPORTED")
+check("status_gate: verified>0 -> confidence left untouched", sr.confidence == 0.9)
+check("status_gate: claims_accepted counts only verified (not supported)", accepted == 1)
+check("status_gate: total_claims counts everything", total == 2)
+check("status_gate: claims_rejected counts only rejected", rejected == 0)
 
 
 print()

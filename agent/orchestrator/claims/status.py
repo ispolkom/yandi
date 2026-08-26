@@ -224,3 +224,266 @@ def classify_claim_epistemic_status(claims_data, log, verbose):
         )
 
     return claim_status_counts
+
+
+def evaluate_claim_status_gate(claims_data, synthesis_result, log):
+    """
+    Extracted from agent/orchestrator_v2.py [9] ("---- [9] CLAIM STATUS
+    GATE ----" block). Counts claims by verification_status and rewrites
+    synthesis_result.answer/trust_level/confidence for 5 mutually
+    exclusive cases (no claims; all rejected; only-contradicted; disputed
+    present; verified==0).
+
+    Эпистемические статусы:
+
+    verified      — подтверждён более сильной процедурой проверки
+    supported     — есть evidence SUPPORTS, но это ещё не verified
+    disputed      — есть одновременно supports и contradicts
+    contradicted  — есть contradicts и нет supports
+    candidate     — ещё не прошёл evidence relation stage
+    unverified    — поддержки/опровержения не найдено
+    rejected      — структурно непригодный claim
+
+    IMPORTANT — caller contract: the original inline code only ever
+    assigned claims_accepted/total_claims/claims_rejected as process()
+    locals when the outer guard (`not skip_rag and not is_subjective_answer
+    and synthesis_result`) was true, and downstream code (the still-inline
+    [10] V3 reflection block) checks `'claims_accepted' in locals()` to
+    detect whether this gate ran at all. Moving that guard into this
+    function would make the check always true after any call (Python
+    would always assign the return values as locals), silently changing
+    behavior. So the guard stays at the call site in orchestrator_v2.py;
+    this function assumes it has already been evaluated true.
+
+    Mutates synthesis_result in place. Returns (claims_accepted,
+    total_claims, claims_rejected) for the caller to assign as its own
+    locals.
+    """
+    claims_verified = len([
+        c for c in claims_data
+        if c.get("verification_status") == "verified"
+    ])
+
+    claims_supported = len([
+        c for c in claims_data
+        if c.get("verification_status") == "supported"
+    ])
+
+    claims_disputed = len([
+        c for c in claims_data
+        if c.get("verification_status") == "disputed"
+    ])
+
+    claims_contradicted = len([
+        c for c in claims_data
+        if c.get("verification_status") == "contradicted"
+    ])
+
+    claims_candidate = len([
+        c for c in claims_data
+        if c.get("verification_status") == "candidate"
+    ])
+
+    claims_rejected = len([
+        c for c in claims_data
+        if c.get("verification_status") == "rejected"
+    ])
+
+    claims_unverified = len([
+        c for c in claims_data
+        if c.get("verification_status") in (
+            "unverified",
+            "weak",
+            None,
+            "",
+        )
+    ])
+
+    total_claims = len(claims_data)
+
+    # Совместимость со старым reflection/data pipeline:
+    # accepted означает ТОЛЬКО реально verified.
+    claims_accepted = claims_verified
+
+    log(
+        f"[Claim Status Gate] "
+        f"verified={claims_verified}, "
+        f"supported={claims_supported}, "
+        f"disputed={claims_disputed}, "
+        f"contradicted={claims_contradicted}, "
+        f"candidate={claims_candidate}, "
+        f"unverified={claims_unverified}, "
+        f"rejected={claims_rejected}, "
+        f"total={total_claims}"
+    )
+
+    if total_claims == 0:
+        log("[Claim Status Gate] Claims отсутствуют — статус UNVERIFIED")
+
+        synthesis_result.answer = (
+            "Я попыталась найти информацию.\n\n"
+            "Но мне не удалось выделить достаточно проверяемых утверждений.\n"
+            "Я не могу дать уверенный ответ на этот вопрос.\n\n"
+            "Если дашь дополнительный контекст — я попробую ещё раз."
+        )
+
+        synthesis_result.trust_level = "UNVERIFIED"
+        synthesis_result.confidence = 0.0
+
+    elif claims_rejected == total_claims:
+        log("[Claim Status Gate] Все claims структурно отклонены")
+
+        synthesis_result.answer = (
+            "Я попыталась сформировать ответ, но выделенные утверждения "
+            "не прошли структурную проверку.\n\n"
+            "Поэтому я не могу считать этот ответ надёжным."
+        )
+
+        synthesis_result.trust_level = "UNVERIFIED"
+        synthesis_result.confidence = 0.0
+
+    elif claims_contradicted > 0 and (
+        claims_contradicted
+        + claims_rejected
+        + claims_unverified
+        + claims_candidate
+        == total_claims
+    ):
+        # Нет ни одного supported/verified claim,
+        # зато есть явно contradicted.
+        log(
+            "[Claim Status Gate] "
+            "Поддержанных claims нет, присутствуют опровергающие evidence"
+        )
+
+        synthesis_result.trust_level = "UNVERIFIED"
+        synthesis_result.confidence = min(
+            synthesis_result.confidence,
+            0.25,
+        )
+
+        # P0-A (YANDI_FINAL_EPISTEMIC_AUDIT_AND_FIX.md): раньше этот
+        # branch менял ТОЛЬКО trust_level/confidence — сам текст
+        # synthesis_result.answer уже был сгенерирован compose_prompt
+        # ДО того, как Claim Status вообще стал известен, и никогда
+        # не пересматривался. Текст мог свободно утверждать то, что
+        # найденные evidence прямо опровергают. Здесь — не переписываем
+        # и не удаляем сгенерированный текст (в нём может быть полезный
+        # объясняющий контекст), а явно маркируем его эпистемический
+        # статус прямо в теле ответа, а не только в trust-бейдже.
+        _contradiction_notice = (
+            "⚠️ ВАЖНО: часть проверяемых утверждений в этом ответе "
+            f"была ОПРОВЕРГНУТА найденными источниками "
+            f"(contradicted={claims_contradicted} из {total_claims}), "
+            "и ни одно утверждение не получило прямого подтверждения. "
+            "Текст ниже остаётся гипотезой модели — не считай его "
+            "установленным фактом.\n"
+        )
+
+        if not synthesis_result.answer.startswith("⚠️ ВАЖНО:"):
+            synthesis_result.answer = (
+                _contradiction_notice
+                + "\n"
+                + synthesis_result.answer
+            )
+
+    elif claims_disputed > 0:
+        # Спор не означает ложность ответа, но требует сильного cap.
+        log(
+            f"[Claim Status Gate] "
+            f"Обнаружены спорные claims: {claims_disputed}"
+        )
+
+        trust_rank = {
+            "UNVERIFIED": 0,
+            "WEAKLY_SUPPORTED": 1,
+            "PARTIALLY_SUPPORTED": 2,
+            "SUPPORTED": 3,
+            "STRONGLY_SUPPORTED": 4,
+            "VERIFIED": 5,
+        }
+
+        current = synthesis_result.trust_level
+
+        if trust_rank.get(current, 0) > trust_rank["WEAKLY_SUPPORTED"]:
+            synthesis_result.trust_level = "WEAKLY_SUPPORTED"
+
+        synthesis_result.confidence = min(
+            synthesis_result.confidence,
+            0.45,
+        )
+
+    elif claims_verified == 0:
+        # supported != verified.
+        #
+        # Даже если часть claims имеет supports evidence,
+        # без отдельной сильной проверки Trust не должен
+        # подниматься выше PARTIALLY_SUPPORTED.
+        log(
+            f"[Claim Status Gate] "
+            f"verified=0, supported={claims_supported} — "
+            f"ответ остаётся предварительным"
+        )
+
+        trust_rank = {
+            "UNVERIFIED": 0,
+            "WEAKLY_SUPPORTED": 1,
+            "PARTIALLY_SUPPORTED": 2,
+            "SUPPORTED": 3,
+            "STRONGLY_SUPPORTED": 4,
+            "VERIFIED": 5,
+        }
+
+        current = synthesis_result.trust_level
+
+        if trust_rank.get(current, 0) > trust_rank["PARTIALLY_SUPPORTED"]:
+            synthesis_result.trust_level = "PARTIALLY_SUPPORTED"
+
+        # Если вообще нет supported claims — cap ещё ниже.
+        if claims_supported == 0:
+            if trust_rank.get(
+                synthesis_result.trust_level,
+                0,
+            ) > trust_rank["WEAKLY_SUPPORTED"]:
+                synthesis_result.trust_level = "WEAKLY_SUPPORTED"
+
+            synthesis_result.confidence = min(
+                synthesis_result.confidence,
+                0.40,
+            )
+
+            # P0-A: точный сценарий из аудита — supported=0,
+            # verified=0, unverified>0. Раньше синтезированный текст
+            # (сгенерированный ДО того, как Claim Status стал
+            # известен) оставался без изменений — только trust
+            # badge менялся. Явно маркируем это в самом тексте.
+            _unsupported_notice = (
+                "⚠️ ВАЖНО: ни одно из "
+                f"{total_claims} проверяемых утверждений не получило "
+                "подтверждающих доказательств (supported=0, "
+                "verified=0). Всё, что изложено ниже — "
+                "неподтверждённая гипотеза модели, а не установленный "
+                "факт. Система не получила достаточной evidence-базы "
+                "для проверки.\n"
+            )
+
+            if not synthesis_result.answer.startswith("⚠️ ВАЖНО:"):
+                synthesis_result.answer = (
+                    _unsupported_notice
+                    + "\n"
+                    + synthesis_result.answer
+                )
+        else:
+            synthesis_result.confidence = min(
+                synthesis_result.confidence,
+                0.60,
+            )
+
+    else:
+        log(
+            f"[Claim Status Gate] "
+            f"Есть verified claims: "
+            f"{claims_verified}/{total_claims}"
+        )
+
+    return claims_accepted, total_claims, claims_rejected
