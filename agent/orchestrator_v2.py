@@ -54,7 +54,7 @@ from agent.orch_clarifier import ClarificationSession
 from agent.orch_enricher import enrich_query
 from agent.orch_registry_search import search_registry, CONF_THRESHOLD
 from agent.orch_web_query import formulate_queries, formulate_refutation_queries
-from agent.orch_web_scraper import scrape
+from agent.orch_web_scraper import scrape, SharedFetchCache
 from agent.orch_synthesizer import synthesize
 from agent.orch_optimistic import get_responder
 from agent.orch_timeout import step_timer
@@ -1963,6 +1963,22 @@ def process(
             meta={"decision_id": decision_id}
         )
 
+        # ============================================================
+        # REQUEST-SCOPED SHARED FETCH CACHE
+        # ============================================================
+        #
+        # Refutation performance audit: main web scrape(), refutation
+        # scrape() и claim-specific retrieve_for_claims() раньше каждый
+        # создавали СВОЙ собственный SharedFetchCache (или scrape()
+        # создавал одноразовый внутри себя) — то есть один и тот же URL,
+        # физически обнаруженный и в основном web, и в refutation
+        # discovery pool, мог быть скачан дважды. Один экземпляр на
+        # запрос, переданный во все три места, устраняет это дублирование
+        # БЕЗ изменения relation/evidence_role/retrieval_origin — это
+        # чисто физический fetch-уровень, epistemic ownership каждого
+        # snippet/claim остаётся независимым, как и раньше.
+        _request_fetch_cache = SharedFetchCache()
+
         # ── [6] Local registry search ─────────────────────────────────────────
         #
         # ВАЖНО:
@@ -2163,7 +2179,10 @@ def process(
                 for i, q in enumerate(wq_result.queries[:3]):
                     trace.add_reasoning(f"query_evolution_{i}", {"query": q}, "generated", [])
 
-                web_result, dt, timed_out = step_timer("web_scrape", partial(scrape, wq_result))
+                web_result, dt, timed_out = step_timer(
+                    "web_scrape",
+                    partial(scrape, wq_result, fetch_cache=_request_fetch_cache),
+                )
                 cost["web_ms"] = (time.time() - t0) * 1000
                 registry.update_latency("web_scrape", dt)
 
@@ -2261,7 +2280,10 @@ def process(
             # (строка ~2024, web query timeout fallback), выполняющемся
             # до этой строки.
             refutation_wq = WebQueryResult(queries=query_frame["refutation_queries"])
-            refutation_result, dt_ref, timed_out_ref = step_timer("refutation_scrape", partial(scrape, refutation_wq))
+            refutation_result, dt_ref, timed_out_ref = step_timer(
+                "refutation_scrape",
+                partial(scrape, refutation_wq, fetch_cache=_request_fetch_cache),
+            )
             log("[Refutation DEBUG] refutation_result type: " + str(type(refutation_result)))
             if refutation_result:
                 log("[Refutation DEBUG] has snippets: " + str(hasattr(refutation_result, "snippets")))
@@ -3276,7 +3298,8 @@ def process(
                 _claim_retrieval_t0 = time.time()
 
                 claim_retrieved_evidence = retrieve_for_claims(
-                    retrieval_claims
+                    retrieval_claims,
+                    fetch_cache=_request_fetch_cache,
                 )
 
                 cost["claim_retrieval_ms"] = (
@@ -5251,6 +5274,21 @@ def process(
             f"measured_sum={measured_ms / 1000:.2f}s "
             f"unaccounted={unaccounted_ms / 1000:.2f}s "
             f"total={total:.2f}s"
+        )
+
+        # Refutation performance audit: cumulative view of the ONE
+        # request-scoped SharedFetchCache shared across main web
+        # scrape(), refutation scrape() and claim-specific
+        # retrieve_for_claims() — measures real cross-phase URL
+        # overlap (saved = physical fetches avoided), not a guess.
+        _fc_summary = _request_fetch_cache.summary()
+        log(
+            f"[Search Work Audit] "
+            f"requests={_fc_summary['requests']} "
+            f"unique_urls={_fc_summary['unique']} "
+            f"network_fetches={_fc_summary['network_fetches']} "
+            f"saved={_fc_summary['saved']} "
+            f"hit_ratio={_fc_summary['hit_ratio']:.2f}"
         )
 
         log("=" * 72)

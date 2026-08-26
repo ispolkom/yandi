@@ -1586,6 +1586,7 @@ def _claim_retrieval_priority(
 
 def retrieve_for_claims(
     claims: List[Dict[str, Any]],
+    fetch_cache: Optional["SharedFetchCache"] = None,
 ) -> List[Dict[str, Any]]:
     """
     Claim-specific retrieval для ограниченного числа claims.
@@ -1725,7 +1726,14 @@ def retrieve_for_claims(
     # here, per retrieve_for_claims() call, never persisted across
     # separate user queries. See SharedFetchCache docstring for the
     # epistemic-ownership invariant this preserves.
-    shared_fetch_cache = SharedFetchCache()
+    #
+    # Refutation performance audit: callers that already have a
+    # request-scoped cache (main web scrape + refutation scrape) can
+    # pass it in here too, so a URL discovered by main web/refutation
+    # AND independently needed by claim-specific retrieval is also
+    # only fetched once. Falls back to a fresh instance when not
+    # provided (e.g. standalone/test callers) — same as scrape().
+    shared_fetch_cache = fetch_cache if fetch_cache is not None else SharedFetchCache()
 
     # P1 (performance architecture pass): precompute search queries
     # for ALL selected claims via batched LLM calls (QUERY_BATCH_SIZE
