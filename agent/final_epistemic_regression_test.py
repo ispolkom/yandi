@@ -169,7 +169,14 @@ def main() -> int:
         {"claim_text": "Юпитер является газовым гигантом.", "claim_type": "factual"},
         {"claim_text": "Разумная жизнь на Юпитере не обнаружена.", "claim_type": "factual"},
     ]})
-    with patch("agent.final_claim_coverage._call_ollama", lambda p: resp_ok):
+    # P0-B (autonomous fix pass): final_claim_coverage.py now uses its own
+    # dedicated _call_ollama_for_extraction() (dict response with
+    # done_reason/eval_count), not the shared string-returning
+    # _call_ollama() from orch_web_query.py.
+    def _mock_gen(raw, done_reason="stop"):
+        return {"response": raw, "done_reason": done_reason, "eval_count": 42, "num_predict": 2000}
+
+    with patch("agent.final_claim_coverage._call_ollama_for_extraction", lambda p: _mock_gen(resp_ok)):
         with patch("agent.final_claim_coverage.infer_claim_relations_batch", return_value=[]):
             result = fcc.evaluate_final_claim_coverage(
                 "Юпитер — газовый гигант. Разумная жизнь на Юпитере не обнаружена.",
@@ -179,7 +186,7 @@ def main() -> int:
 
     # 6. "Я не знаю." -> factual_count может быть 0, coverage=1.0 ОК.
     resp_empty = json.dumps({"claims": []})
-    with patch("agent.final_claim_coverage._call_ollama", lambda p: resp_empty):
+    with patch("agent.final_claim_coverage._call_ollama_for_extraction", lambda p: _mock_gen(resp_empty)):
         result = fcc.evaluate_final_claim_coverage("Я не знаю.", [{"claim_id": "cl_1", "claim_text": "x", "verification_status": "unverified"}])
     check(
         "6. короткий нефактический ответ -> coverage=1.0 корректен",
@@ -191,7 +198,7 @@ def main() -> int:
     def fake_call_error(prompt):
         raise Exception("simulated outage")
 
-    with patch("agent.final_claim_coverage._call_ollama", fake_call_error):
+    with patch("agent.final_claim_coverage._call_ollama_for_extraction", fake_call_error):
         result = fcc.evaluate_final_claim_coverage(
             "Длинный содержательный ответ с фактами " * 10,
             [{"claim_id": "cl_1", "claim_text": "x", "verification_status": "unverified"}],
@@ -203,7 +210,7 @@ def main() -> int:
     )
 
     # Parse error variant (malformed JSON, не exception).
-    with patch("agent.final_claim_coverage._call_ollama", lambda p: "not json {{{"):
+    with patch("agent.final_claim_coverage._call_ollama_for_extraction", lambda p: _mock_gen("not json {{{")):
         result = fcc.evaluate_final_claim_coverage(
             "Длинный содержательный ответ с фактами " * 10,
             [{"claim_id": "cl_1", "claim_text": "x", "verification_status": "unverified"}],
@@ -225,7 +232,7 @@ def main() -> int:
         {"claim_id": "cl_1", "claim_text": "Юпитер является газовым гигантом.", "verification_status": "unverified"},
         {"claim_id": "cl_2", "claim_text": "Атмосфера Юпитера содержит водород.", "verification_status": "unverified"},
     ]
-    with patch("agent.final_claim_coverage._call_ollama", lambda p: resp_partial):
+    with patch("agent.final_claim_coverage._call_ollama_for_extraction", lambda p: _mock_gen(resp_partial)):
         with patch("agent.final_claim_coverage.infer_claim_relations_batch", return_value=[]):
             result = fcc.evaluate_final_claim_coverage("irrelevant body text", pipeline)
     check(

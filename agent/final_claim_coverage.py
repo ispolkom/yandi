@@ -34,11 +34,104 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-from agent.orch_web_query import _call_ollama
+import requests as _requests
+
+from agent.orch_config import (
+    OLLAMA_BASE,
+    MODEL,
+    TEMP_ANALYST,
+    FINAL_CLAIM_EXTRACTION_MAX_TOKENS,
+    GENERATION_SEMAPHORE,
+)
 from agent.claim_relation import (
     infer_claim_relation,
     infer_claim_relations_batch,
 )
+
+_session = _requests.Session()
+_session.trust_env = False
+
+_EXTRACTION_TIMEOUT = 180  # same order as orch_synthesizer's analyst-role calls
+
+
+def _call_ollama_for_extraction(prompt: str) -> Dict[str, Any]:
+    """
+    P0-B: dedicated Ollama call for extract_final_claims() — deliberately
+    NOT the shared orch_web_query._call_ollama(), whose num_predict is
+    hardcoded to MAX_TOKENS_CONDUCTOR (500, sized for short 2-3-query
+    formulation, not for a variable-size JSON array of every claim in a
+    final answer). Uses its own FINAL_CLAIM_EXTRACTION_MAX_TOKENS budget
+    without touching the web-query conductor's budget at all.
+
+    Returns metadata (done_reason/eval_count) alongside the text so the
+    caller can tell a token-limit cutoff apart from a genuine formatting
+    failure, instead of collapsing both into the same generic parse
+    error.
+    """
+    _wait_started = time.time()
+
+    with GENERATION_SEMAPHORE:
+        _waited = time.time() - _wait_started
+
+        if _waited > 0.05:
+            print(
+                f"[Final Claim Extraction LLM] generation queue wait={_waited:.2f}s"
+            )
+
+        resp = _session.post(
+            f"{OLLAMA_BASE}/api/generate",
+            json={
+                "model": MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": TEMP_ANALYST,
+                    "num_predict": FINAL_CLAIM_EXTRACTION_MAX_TOKENS,
+                },
+            },
+            timeout=_EXTRACTION_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    return {
+        "response": (data.get("response") or "").strip(),
+        "done_reason": data.get("done_reason"),
+        "eval_count": data.get("eval_count"),
+        "num_predict": FINAL_CLAIM_EXTRACTION_MAX_TOKENS,
+    }
+
+
+def _json_completeness_indicator(text: str) -> str:
+    """
+    P0-B: cheap heuristic, NOT a JSON validator (json.loads already does
+    real validation) — just a fast diagnostic signal for whether the raw
+    response looks like a balanced, closed top-level object.
+
+    "Ends with `}`" alone is not enough: truncated output that stops
+    right after the LAST array item's own closing `}` (missing the
+    outer array's `]` and the outer object's `}`) also ends with `}` —
+    brace/bracket counts must additionally balance. Still approximate
+    (doesn't account for braces inside string literals) — good enough
+    for a diagnostic tag, not a claim of correctness.
+    """
+    if not text:
+        return "empty"
+
+    stripped = text.strip()
+
+    if stripped.endswith("```"):
+        stripped = stripped[:-3].rstrip()
+
+    if not stripped.endswith("}"):
+        return "incomplete"
+
+    balanced = (
+        stripped.count("{") == stripped.count("}")
+        and stripped.count("[") == stripped.count("]")
+    )
+
+    return "complete" if balanced else "incomplete"
 
 
 @dataclass
@@ -275,7 +368,8 @@ meta
 """.strip()
 
     try:
-        raw = _call_ollama(prompt)
+        _gen = _call_ollama_for_extraction(prompt)
+        raw = _gen["response"]
     except Exception as exc:
         print(
             f"[Final Claim Extraction] status=call_error "
@@ -293,21 +387,40 @@ meta
     #
     # P1-C: format_hint — компактная диагностика БЕЗ дампа самого
     # raw-текста (только короткие теги вида "has_code_fence+...").
-    if not data:
-        print(
-            f"[Final Claim Extraction] status=parse_error "
-            f"raw_len={len(raw or '')} "
-            f"format_hint={_format_hint(raw)}"
-        )
-        return [], "parse_error"
+    #
+    # P0-B (autonomous fix pass): если Ollama сам сообщил
+    # done_reason="length" — генерация была реально ОБОРВАНА лимитом
+    # токенов, это НЕ generic parse_error (проблема формата), а честный
+    # generation_truncated (проблема бюджета). Разделяем статусы, чтобы
+    # downstream (evaluate_final_claim_coverage) и будущий аудит не
+    # путали "модель написала мусор" с "модели не хватило места дописать
+    # валидный JSON". Bounded tail (не весь raw) печатается ТОЛЬКО в
+    # failure-ветках — ровно то, чего не хватало прошлому аудиту, чтобы
+    # доказать truncation без гадания.
+    if not data or "claims" not in data:
+        _no_claims_key = bool(data) and "claims" not in data
+        _truncated = _gen.get("done_reason") == "length"
+        _status = "generation_truncated" if _truncated else "parse_error"
 
-    if "claims" not in data:
         print(
-            f"[Final Claim Extraction] status=parse_error "
-            f"(no 'claims' key) raw_len={len(raw or '')} "
-            f"format_hint={_format_hint(raw)}"
+            f"[Final Claim Extraction] status={_status} "
+            f"{'(no claims key) ' if _no_claims_key else ''}"
+            f"raw_len={len(raw or '')} "
+            f"format_hint={_format_hint(raw)} "
+            f"json_complete={_json_completeness_indicator(raw)} "
+            f"done_reason={_gen.get('done_reason')} "
+            f"eval_count={_gen.get('eval_count')} "
+            f"num_predict={_gen.get('num_predict')}"
         )
-        return [], "parse_error"
+
+        if _status != "ok":
+            _tail_len = 300
+            print(
+                f"[Final Claim Extraction Tail] "
+                f"last_{_tail_len}_chars={(raw or '')[-_tail_len:]!r}"
+            )
+
+        return [], _status
 
     try:
         result = []
