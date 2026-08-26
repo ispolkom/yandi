@@ -97,7 +97,10 @@ from agent.orchestrator.response.assembly import (
 )
 from agent.orchestrator.claims.status import classify_claim_epistemic_status
 from agent.orchestrator.claims.validation import apply_structural_claim_validation
-from agent.orchestrator.claims.lifecycle import setup_claim_and_evidence_lifecycle
+from agent.orchestrator.claims.lifecycle import (
+    setup_claim_and_evidence_lifecycle,
+    update_beliefs_link_answer_and_personality_cycle,
+)
 from agent.orchestrator.claims.mapping import run_claim_evidence_batch
 from agent.orchestrator.claims.retrieval import apply_claim_resolution_and_second_retrieval
 
@@ -2665,148 +2668,14 @@ def process(
             f"support={support_grounding_score:.2f}"
         )
 
-        # ---- YANDI V6: BELIEFS ----
-        #
-        # Belief != истина.
-        #
-        # Источник истины для evidence_for/evidence_against:
-        #
-        #     claim["evidence_relations"]
-        #
-        # Relation общего main_claim здесь больше НЕ используется.
-        #
-        # P0 (performance architecture pass, unaccounted=74.85s
-        # investigation): found via the new [t+SS.SSs] log timestamps
-        # — this whole block (add_belief() per claim, at most 3) had
-        # ZERO cost[...] tracking, invisible in [PROFILE] entirely.
-        # One live run: 3 candidates, ~81s total (~27s/candidate) —
-        # belief_manager.add_belief()'s own embedding-prefilter +
-        # LLM-judge comparison against existing beliefs, previously
-        # completely unmeasured. Pure instrumentation here — timing
-        # only, add_belief()'s own logic is untouched.
-        _t0_belief_update = time.time()
-
-        if _belief_manager and claims_data:
-            try:
-                belief_updates_count = 0
-
-                for claim in claims_data[:3]:
-                    claim_text = (claim.get("claim_text") or "").strip()
-
-                    if not claim_text or len(claim_text) <= 20:
-                        continue
-
-                    evidence_relations = list(
-                        claim.get("evidence_relations", []) or []
-                    )
-
-                    # BeliefManager получает только DIRECT evidence,
-                    # прошедшие Source Quality Gate.
-                    #
-                    # secondary/context/internal могут храниться в trace,
-                    # но не имеют права напрямую двигать belief.
-                    belief_relations = [
-                        rel
-                        for rel in evidence_relations
-                        if rel.get("evidence_role") == "direct"
-                        and rel.get("evidence_eligible") is True
-                    ]
-
-                    evidence_for = [
-                        rel.get("evidence_id")
-                        for rel in belief_relations
-                        if rel.get("relation") == "supports"
-                        and rel.get("evidence_id")
-                    ]
-
-                    evidence_against = [
-                        rel.get("evidence_id")
-                        for rel in belief_relations
-                        if rel.get("relation") == "contradicts"
-                        and rel.get("evidence_id")
-                    ]
-
-                    # uncertain / unrelated / missing relation
-                    # не считаются ни поддержкой, ни опровержением.
-
-                    belief_confidence = min(
-                        float(claim.get("claim_confidence", 0.5)),
-                        0.5,
-                    )
-
-                    if evidence_against and not evidence_for:
-                        belief_confidence = min(
-                            belief_confidence,
-                            0.35,
-                        )
-
-                    _belief_manager.add_belief(
-                        topic=epistemic_result.domain
-                        if not is_subjective_answer
-                        else "subjective",
-                        statement=claim_text[:200],
-                        confidence=belief_confidence,
-                        evidence_for=evidence_for,
-                        evidence_against=evidence_against,
-                        claim_ids=[claim.get("claim_id")],
-                    )
-
-                    belief_updates_count += 1
-
-                    if verbose:
-                        log(
-                            f"[Belief] candidate={claim.get('claim_id')} "
-                            f"for={len(evidence_for)} "
-                            f"against={len(evidence_against)} "
-                            f"conf={belief_confidence:.2f}"
-                        )
-
-                if verbose:
-                    stats = _belief_manager.get_stats()
-                    log(
-                        f"[V6] Beliefs обработано: {belief_updates_count}, "
-                        f"всего в памяти: {stats['total']}"
-                    )
-
-            except Exception as e:
-                belief_updates_count = 0
-                if verbose:
-                    log(f"[V6] Ошибка добавления убеждений: {e}")
-
-        cost["belief_update_ms"] = (time.time() - _t0_belief_update) * 1000
-
-        if verbose:
-            log(
-                f"[Belief Update Timing] "
-                f"candidates={min(len(claims_data), 3) if claims_data else 0} "
-                f"total={cost['belief_update_ms'] / 1000:.2f}s"
-            )
-
-        # ---- YANDI V6: LINKER ----
-        supporting_ids = []
-        if _claim_answer_linker:
-            try:
-                _, supporting_ids = _claim_answer_linker.link_answer_to_claims(
-                    answer=synthesis_result.answer,
-                    claims=claims_data,
-                )
-                if verbose and supporting_ids:
-                    log(f"[V6] Связано claims: {len(supporting_ids)}")
-            except Exception as e:
-                if verbose:
-                    log(f"[V6] Ошибка линковки: {e}")
-
-        # ---- YANDI V6: PERSONALITY ----
-        if _personality_core:
-            try:
-                _personality_core.increment_cycles()
-                _personality_core.increment_decisions()
-                if verbose:
-                    summary = _personality_core.get_summary()
-                    log(f"[V6] Личность: {summary['name']}, циклов {summary['cycles']}")
-            except Exception as e:
-                if verbose:
-                    log(f"[V6] Ошибка личности: {e}")
+        # Belief update + claim<->answer linker + personality cycle —
+        # extracted to agent/orchestrator/claims/lifecycle.py (structural
+        # extraction; behavior unchanged).
+        supporting_ids = update_beliefs_link_answer_and_personality_cycle(
+            claims_data, synthesis_result, epistemic_result, is_subjective_answer,
+            _belief_manager, _claim_answer_linker, _personality_core,
+            cost, log, verbose,
+        )
 
         # ---- YANDI V6: DISAGREEMENT ----
         if _disagreement_engine and claims_data and len(claims_data) > 1:
