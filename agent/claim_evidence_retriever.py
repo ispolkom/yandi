@@ -473,9 +473,19 @@ def retrieve_claim_evidence(
     else:
         subject_anchor_text = claim_text
 
+    # P1 (autonomous fix pass, claim_specific_retrieval=235.56s live
+    # bottleneck investigation): per-phase sub-timers so the aggregate
+    # worker time can actually be attributed instead of staying one
+    # opaque number. Real code paths only — no NLI/LLM call happens
+    # inside this function (that's a separate, already-instrumented
+    # downstream stage: claim_pass2_mapping_nli_ms).
+    _t0_query_gen = time.time()
+
     query_result = formulate_claim_evidence_queries(
         contextual_claim_text
     )
+
+    _query_generation_ms = (time.time() - _t0_query_gen) * 1000
 
     # P1 (YANDI_FINAL_EPISTEMIC_AUDIT_AND_FIX.md): раньше сгенерированные
     # queries не логировались НИГДЕ в момент формирования — видны были
@@ -493,6 +503,8 @@ def retrieve_claim_evidence(
 
     if not query_result.queries:
         return []
+
+    _t0_web_request = time.time()
 
     try:
         web_result = scrape(
@@ -518,12 +530,26 @@ def retrieve_claim_evidence(
         )
         return []
 
+    _web_request_ms = (time.time() - _t0_web_request) * 1000
+
     if not web_result or not web_result.snippets:
+        print(
+            "[Claim Retrieval Worker SubProfile] "
+            f"claim_id={claim.get('claim_id', 'unknown')} "
+            f"query_generation={_query_generation_ms:.1f}ms "
+            f"web_request={_web_request_ms:.1f}ms "
+            f"parsing=0.0ms embedding=0.0ms "
+            f"total={(_query_generation_ms + _web_request_ms):.1f}ms "
+            f"note=no_snippets"
+        )
         return []
 
     evidence_records = []
 
     seen_urls = set()
+
+    _parsing_ms = 0.0
+    _embedding_ms = 0.0
 
     for snippet in web_result.snippets:
         url = getattr(snippet, "url", "") or ""
@@ -561,10 +587,12 @@ def retrieve_claim_evidence(
             # Сначала достаём из документа наиболее близкие к claim
             # passages. Полная страница может содержать меню,
             # вводный текст и тысячи нерелевантных символов.
+            _t0_parsing = time.time()
             claim_passage = extract_claim_from_source(
                 text,
                 contextual_claim_text,
             )
+            _parsing_ms += (time.time() - _t0_parsing) * 1000
 
             passage_for_check = claim_passage or text
 
@@ -612,11 +640,13 @@ def retrieve_claim_evidence(
                 f"url={url[:120]}"
             )
 
+            _t0_embedding = time.time()
             claim_relevant = is_relevant(
                 passage_for_check,
                 contextual_claim_text,
                 threshold=0.4,
             )
+            _embedding_ms += (time.time() - _t0_embedding) * 1000
 
         except Exception:
             # При технической ошибке relevance не выдумываем.
@@ -717,6 +747,19 @@ def retrieve_claim_evidence(
             float(ev.get("quality_score", 0.0) or 0.0),
         ),
         reverse=True,
+    )
+
+    _total_ms = _query_generation_ms + _web_request_ms + _parsing_ms + _embedding_ms
+
+    print(
+        "[Claim Retrieval Worker SubProfile] "
+        f"claim_id={claim.get('claim_id', 'unknown')} "
+        f"query_generation={_query_generation_ms:.1f}ms "
+        f"web_request={_web_request_ms:.1f}ms "
+        f"parsing={_parsing_ms:.1f}ms "
+        f"embedding={_embedding_ms:.1f}ms "
+        f"total={_total_ms:.1f}ms "
+        f"snippets={len(web_result.snippets)}"
     )
 
     return evidence_records[:MAX_RESULTS_PER_CLAIM]
@@ -1431,7 +1474,7 @@ def retrieve_for_claims(
 
     retrieval_started = time.time()
 
-    def _retrieve_one(claim):
+    def _retrieve_one(claim, submitted_at):
         claim_id = claim.get(
             "claim_id",
             "unknown",
@@ -1439,9 +1482,17 @@ def retrieve_for_claims(
 
         started = time.time()
 
+        # P1 (autonomous fix pass): with max_workers=3 and up to
+        # MAX_CLAIMS selected claims, tasks beyond the first 3 sit
+        # queued inside the ThreadPoolExecutor until a worker frees up.
+        # queue_wait makes that visible instead of it being silently
+        # folded into the per-claim "time=" number.
+        queue_wait = started - submitted_at
+
         print(
             f"[Claim Retrieval Worker] "
             f"START claim={claim_id} "
+            f"queue_wait={queue_wait:.2f}s "
             f"text={claim.get('claim_text', '')[:100]}"
         )
 
@@ -1458,6 +1509,7 @@ def retrieve_for_claims(
             f"[Claim Retrieval Worker] "
             f"DONE claim={claim_id} "
             f"records={len(records)} "
+            f"queue_wait={queue_wait:.2f}s "
             f"time={elapsed:.2f}s"
             + (
                 f" error={error}"
@@ -1466,7 +1518,7 @@ def retrieve_for_claims(
             )
         )
 
-        return claim, records, elapsed, error
+        return claim, records, elapsed, error, queue_wait
 
     worker_results = []
 
@@ -1480,10 +1532,13 @@ def retrieve_for_claims(
             max_workers=max_workers
         ) as executor:
 
+            _submitted_at = time.time()
+
             future_map = {
                 executor.submit(
                     _retrieve_one,
                     claim,
+                    _submitted_at,
                 ): claim
                 for claim in selected
             }
@@ -1503,6 +1558,7 @@ def retrieve_for_claims(
                         [],
                         0.0,
                         str(exc)[:300],
+                        0.0,
                     ))
 
     # Сохраняем deterministic merge order согласно selected.
@@ -1517,6 +1573,7 @@ def retrieve_for_claims(
     }
 
     per_claim_times = []
+    per_claim_queue_waits = []
 
     for claim in selected:
         claim_id = claim.get(
@@ -1531,11 +1588,15 @@ def retrieve_for_claims(
         if item is None:
             records = []
             elapsed = 0.0
+            queue_wait = 0.0
         else:
-            _, records, elapsed, _ = item
+            _, records, elapsed, _, queue_wait = item
 
         per_claim_times.append(
             elapsed
+        )
+        per_claim_queue_waits.append(
+            queue_wait
         )
 
         added = 0
@@ -1581,13 +1642,30 @@ def retrieve_for_claims(
         - retrieval_started
     )
 
+    _worker_sum = sum(per_claim_times)
+
+    # P1 (autonomous fix pass): effective_parallelism close to
+    # `workers` means concurrency is actually being used; close to 1.0
+    # despite workers=3 would mean something (queue contention,
+    # GENERATION_SEMAPHORE, or an actually-serialized dependency) is
+    # eating the concurrency — proves it with a number instead of
+    # guessing from wall/worker_sum by hand.
+    _effective_parallelism = (
+        _worker_sum / retrieval_elapsed
+        if retrieval_elapsed > 0
+        else 0.0
+    )
+
     print(
         f"[Claim Retrieval Timing] "
         f"claims={len(selected)} "
         f"workers={max_workers} "
         f"wall={retrieval_elapsed:.2f}s "
-        f"worker_sum={sum(per_claim_times):.2f}s "
-        f"worker_max={max(per_claim_times, default=0.0):.2f}s"
+        f"worker_sum={_worker_sum:.2f}s "
+        f"worker_max={max(per_claim_times, default=0.0):.2f}s "
+        f"effective_parallelism={_effective_parallelism:.2f} "
+        f"queue_wait_sum={sum(per_claim_queue_waits):.2f}s "
+        f"queue_wait_max={max(per_claim_queue_waits, default=0.0):.2f}s"
     )
 
     direct_count = sum(
