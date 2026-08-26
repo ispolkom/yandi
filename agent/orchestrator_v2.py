@@ -82,10 +82,7 @@ from agent.epistemic_router import (
 from agent.claim_evidence_mapper import map_claims_to_evidence, get_claim_grounding_score
 from agent.claim_evidence_retriever import retrieve_for_claims
 from agent.source_quality import evaluate_evidence_directness
-from agent.evidence_pool import (
-    build_canonical_evidence_pool,
-    merge_evidence,
-)
+from agent.evidence_pool import merge_evidence
 from agent.orchestrator.epistemic.existence_contract import apply_existence_query_contract
 from agent.orchestrator.epistemic.final_coverage import evaluate_and_record_final_coverage
 from agent.orchestrator.runtime.profiling import report_pipeline_profile
@@ -103,6 +100,7 @@ from agent.orchestrator.response.assembly import (
 )
 from agent.orchestrator.claims.status import classify_claim_epistemic_status
 from agent.orchestrator.claims.validation import apply_structural_claim_validation
+from agent.orchestrator.claims.lifecycle import setup_claim_and_evidence_lifecycle
 
 # ---- YANDI V3: SELF-AWARE SYSTEM ----
 from agent.self_model import get_self_model
@@ -2406,140 +2404,20 @@ def process(
     else:
         log(f"  · trust={synthesis_result.trust_level}, conf={synthesis_result.confidence:.2f}, len={len(synthesis_result.answer)}")
 
-        trust_report_data = reasoning_info.get("trust_report", {})
-        trust_reasons = []
-        coverage_report_data = reasoning_info.get("coverage_report", {})
-        claims_data = reasoning_info.get("claims", [])
-
-        # ====================================================
-        # CANONICAL EVIDENCE POOL
-        # ====================================================
-        #
-        # Evidence принадлежит Orchestrator, а не Synthesizer.
-        #
-        # Synthesizer может вернуть собственные evidence_records,
-        # но основной web/local/refutation retrieval уже произошёл
-        # раньше и не должен исчезать только потому, что Synthesizer
-        # его не протащил.
-        synthesizer_evidence = reasoning_info.get(
-            "evidence_records",
-            [],
-        ) or []
-
-        pipeline_evidence = build_canonical_evidence_pool(
-            search_result=search_result,
-            web_result=web_result,
-            refutation_snippets=refutation_snippets,
+        # Claim & evidence lifecycle setup — extracted to
+        # agent/orchestrator/claims/lifecycle.py (structural extraction;
+        # behavior unchanged).
+        (
+            trust_report_data,
+            trust_reasons,
+            coverage_report_data,
+            claims_data,
+            evidence_data,
+            technical_errors,
+        ) = setup_claim_and_evidence_lifecycle(
+            reasoning_info, search_result, web_result, refutation_snippets,
+            query_to_use, log, verbose,
         )
-
-        evidence_data = merge_evidence(
-            pipeline_evidence,
-            synthesizer_evidence,
-        )
-
-        technical_errors = reasoning_info.get(
-            "technical_errors",
-            [],
-        )
-
-        if verbose:
-            direct_count = sum(
-                1
-                for ev in evidence_data
-                if (
-                    ev.get("evidence_role") == "direct"
-                    and
-                    ev.get("evidence_eligible") is True
-                )
-            )
-
-            context_count = sum(
-                1
-                for ev in evidence_data
-                if ev.get("evidence_role") == "context"
-            )
-
-            origins = {}
-
-            for ev in evidence_data:
-                origin = ev.get(
-                    "retrieval_origin",
-                    "unknown",
-                )
-
-                origins[origin] = (
-                    origins.get(origin, 0) + 1
-                )
-
-            log(
-                f"[Evidence Pool] "
-                f"total={len(evidence_data)} "
-                f"direct={direct_count} "
-                f"context={context_count} "
-                f"origins={origins}"
-            )
-
-        if claims_data and evidence_data:
-            # ---- NORMALIZE CLAIMS BEFORE EVIDENCE MAPPING ----
-            # Synthesizer/claim extractor может вернуть claims как строки
-            # или как словари. Mapper ожидает только словари.
-            normalized_claims = []
-            for claim in claims_data or []:
-                if isinstance(claim, dict):
-                    if "claim_text" not in claim:
-                        if "text" in claim:
-                            claim["claim_text"] = claim["text"]
-                        elif "claim" in claim:
-                            claim["claim_text"] = claim["claim"]
-                    normalized_claims.append(claim)
-                elif isinstance(claim, str):
-                    text = claim.strip()
-                    if text:
-                        normalized_claims.append({
-                            "claim_text": text,
-                            "source": "synthesizer"
-                        })
-                else:
-                    log(f"[Claims] Пропущен claim неизвестного типа: {type(claim).__name__}")
-            claims_data = normalized_claims
-            log(f"[Claims] Normalized claims: {len(claims_data)}")
-
-        # ============================================================
-        # CLAIM IDENTITY
-        # ============================================================
-        #
-        # Claim должен иметь стабильный ID ещё ДО Validator/Mapper.
-        # Иначе rejected claim может потерять идентичность, поскольку
-        # раньше claim_id иногда создавался только внутри Mapper.
-        for claim in claims_data:
-            if not claim.get("claim_id"):
-                claim["claim_id"] = f"cl_{uuid.uuid4().hex[:8]}"
-
-            if not claim.get("claim_type"):
-                claim["claim_type"] = "factual"
-
-            if "claim_confidence" not in claim:
-                claim["claim_confidence"] = 0.5
-
-            # ========================================================
-            # CLAIM QUERY CONTEXT
-            # ========================================================
-            #
-            # Atomic claim может потерять явный субъект:
-            #
-            #   query:
-            #       "Есть ли разумная жизнь на Юпитере?"
-            #
-            #   claim:
-            #       "Температура варьируется от -145°C..."
-            #
-            # query_context используется ТОЛЬКО retrieval-слоем
-            # для восстановления предметного контекста.
-            #
-            # Сам claim_text не изменяется и позже именно он
-            # проверяется через NLI.
-            if not claim.get("query_context"):
-                claim["query_context"] = query_to_use
 
         # Structural claim validation — extracted to
         # agent/orchestrator/claims/validation.py (structural extraction;
