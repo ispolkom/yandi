@@ -381,6 +381,14 @@ class ClaimRecord:
     supports_query_aspect: List[str] = field(default_factory=list)
     conflicts_with_claim_ids: List[str] = field(default_factory=list)
     verification_status: str = ""
+    # Epistemic Core v1 Phase 1: per-evidence NLI verdict, so a persisted
+    # trace can answer "why" (not just "with which evidence_id") a claim
+    # got its verification_status. Each entry:
+    # {"evidence_id", "relation" (supports/contradicts/unrelated/uncertain),
+    # "relation_method", "source_claim"}. Additive-only field — old traces
+    # without it simply have an empty list here (default_factory), nothing
+    # to migrate.
+    evidence_relations: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

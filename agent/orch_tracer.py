@@ -294,6 +294,16 @@ class Trace:
         is_clean, reason = is_claim_clean(claim_text)
         if is_clean:
             clean_text = clean_claim_text(claim_text)
+            evidence_relations = [
+                {
+                    "evidence_id": rel.get("evidence_id", ""),
+                    "relation": rel.get("relation", "unrelated"),
+                    "relation_method": rel.get("method", "unknown"),
+                    "source_claim": (rel.get("source_claim") or "")[:300],
+                }
+                for rel in (claim_data.get("evidence_relations") or [])
+                if rel.get("evidence_id")
+            ]
             claim_record = ClaimRecord(
                 claim_id=claim_data.get("claim_id", f"cl_{uuid.uuid4().hex[:8]}"),
                 claim_text=clean_text[:300],
@@ -301,6 +311,7 @@ class Trace:
                 claim_type=claim_data.get("claim_type", "factual"),
                 claim_confidence=claim_data.get("claim_confidence", 0.7),
                 verification_status=claim_data.get("verification_status", "unverified"),
+                evidence_relations=evidence_relations,
             )
             self.claims.append(claim_record)
         else:
@@ -395,6 +406,12 @@ class Trace:
                     "claim_type": c.claim_type,
                     "claim_confidence": c.claim_confidence,
                     "verification_status": c.verification_status,
+                    # Same [:3] cap as derived_from_evidence_ids above —
+                    # evidence_relations covers exactly that same evidence-id
+                    # set (see claims/mapping.py::run_claim_evidence_batch,
+                    # candidate_sources is built from derived_from_evidence_ids),
+                    # so the same truncation reasoning applies.
+                    "evidence_relations": c.evidence_relations[:3],
                 }
                 for c in self.claims[:15]
             ],
