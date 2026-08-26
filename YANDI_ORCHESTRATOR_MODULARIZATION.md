@@ -16,50 +16,106 @@ of running the logic inline. There is one implementation per block, never two.
 ## STATUS
 
 ```
-ORCHESTRATOR MODULARIZATION STATUS: PARTIAL
-LEGACY orchestrator_v2.py:           PRIMARY (still owns process(), the CLI, and ~70% of pipeline logic)
-BEHAVIORAL EQUIVALENCE:              CONFIRMED (14/14 regression suites green after every commit; 145/145 modularization equivalence checks green)
-READY FOR EPISTEMIC ARCHITECTURE WORK: PARTIALLY (claims/* and epistemic/* fully bounded; [8] frame-construction/synthesis and [10] write-back still monolithic)
+ORCHESTRATOR MODULARIZATION STATUS: PARTIAL (substantial — see below)
+LEGACY orchestrator_v2.py:           PRIMARY (still owns process()'s outer
+                                      pipeline shape, phases [0]-[7]/[9]/[10]
+                                      glue, and the CLI)
+BEHAVIORAL EQUIVALENCE:              CONFIRMED (14/14 regression suites green
+                                      after every commit; 198/198 modularization
+                                      equivalence checks green)
+READY FOR EPISTEMIC ARCHITECTURE WORK: YES for claims/*/epistemic/* — this was
+                                      the actual goal of the migration and is
+                                      done; the remaining inline pipeline glue
+                                      does not block epistemic/provenance work.
 ```
 
-## MILESTONE 1 — package skeleton + first low-risk extractions
+## MILESTONES 1-3 — DONE
 
-**Result: DONE.**
+Package skeleton, all of `claims/*` (identity/validation/mapping/retrieval/
+status/disagreement), all of `epistemic/*` (existence_contract/final_coverage/
+trust_gate), all of `response/*` (assembly), `runtime/profiling`. See git log
+for the 13 commits covering this (`e35ddb7`..`c4d956f`).
 
-## MILESTONE 2 — claims/* lifecycle (identity → validation → mapping → retrieval)
+## MILESTONE 4 (partial) — synthesis.py + pre_pipeline.py
 
-**Result: DONE.**
+**Result: DONE for these two; [0]-[7] pipeline glue and [10] deliberately
+NOT extracted this session — see "Why stop here" below.**
 
-## MILESTONE 3 — claims/* completed (belief/linker/personality, disagreement)
+- `synthesis.py`: frame construction (refutation scan, hypothesis graph,
+  local-answer wait, blind analysis, source classification) through the
+  `synthesize()` call itself. `blind_analysis` moved with it (single call site).
+- `pre_pipeline.py`: the highest-risk extraction of the whole migration —
+  ~600 lines, 11 short-circuit early-return branches (self-query,
+  provocation, insult×2, apology, personal-question, song/social/self-
+  reflection analyzers, no-context, early-gate break/know-but-not-tell),
+  preserved in exact sequential order. Return protocol is a plain
+  `(response_or_None, dict)` pair — not a positional tuple (too easy to
+  transpose 29 values) and not a new PipelineContext class (out of scope
+  per the brief) — the caller unpacks the dict key-by-key so a typo is an
+  immediate `KeyError`, not a silent value swap. `is_self_query`,
+  `load_yandi_manifest`, `extract_urls`, `clean_query_from_urls` moved
+  with it (each had exactly one call site, all inside this block).
 
-**Result: DONE.** `claims/*` is now a complete, bounded subpackage covering
-the entire claim epistemic lifecycle from identity assignment through
-disagreement detection.
+- `orchestrator_v2.py`: 5620 → **2248 lines (−3372, −60.0%)**.
+- `agent/orchestrator/`: **4049 lines across 17 files**.
+- 18 extraction commits total this migration, all with the same discipline:
+  one extraction → exact-diff verify against pre-move source → full 14-suite
+  regression → deterministic equivalence checks added → live sanity run(s)
+  → commit. Never batched.
+- `agent/orchestrator_modularization_regression_test.py`: 198 deterministic
+  checks.
+- For `pre_pipeline.py` specifically: a dedicated audit fork independently
+  re-derived the full free-variable cross-reference (which of the ~50
+  variables assigned in the block are actually read downstream) before any
+  code was written, catching several grep false-positives (e.g. a `target=`
+  keyword argument colliding with the `target` variable name). Verified with
+  a **sequence-sensitive** `diff` (not the whitespace-normalized multiset
+  compare used for earlier, order-insensitive extractions), since branch
+  *order* is exactly what's at risk in an 11-early-return block. Live-tested
+  6 of the 11 early-return branches for real (not mocked): self_query,
+  insult_handled, apology, swear-triggered insult (confirming the swear
+  check still gates the Criticism Detector), gate_break (hit unplanned —
+  accumulated character-state irritation from prior test runs), and the
+  full continuation path with a fresh session.
 
-- 12 blocks extracted total (see MOVED COMPONENTS below).
-- `orchestrator_v2.py`: 5620 → 3410 lines (−2210, −39.3%).
-- `agent/orchestrator/`: 2645 lines across 16 files.
-- All 14 regression suites (13 pre-existing + the modularization equivalence
-  suite) green before and after every single commit (never batched — one
-  extraction, one full regression run, one commit).
-- `agent/orchestrator_modularization_regression_test.py`: 145 deterministic
-  checks (see EQUIVALENCE STATUS below for methodology).
-- No duplicate implementations introduced.
-- Five live sanity runs with `--web -v` across the milestone, each targeting
-  the newly-extracted code path specifically (existence contract/final
-  coverage/profiling/trust gate/response assembly/claim status; PASS1+PASS2
-  batch NLI; Claim Resolution Gate + retrieval, including the added_count==0
-  branch; belief update + personality cycle; claim↔claim disagreement,
-  including a real embedding call) — all completed normally end-to-end.
-- `git status` clean after each commit.
+## WHY STOP HERE (this session)
+
+Two things surfaced while scoping the next extraction ([6] discovery
+fan-out) that changed the risk/benefit calculus:
+
+1. **Cross-phase timer coupling found**: `cost["registry_ms"]` in `[6]` is
+   computed from a `t0` that was actually set in the *previous* phase `[5]
+   Query enrich`, not in `[6]` itself. This is existing (if slightly odd)
+   behavior, not a bug to fix — but it means `[0]`-`[7]` are more tightly
+   timer-coupled to each other than `claims/*`/`synthesis`/`pre_pipeline`
+   were, and extracting them piecemeal risks either silently changing what
+   a cost bucket measures, or requiring awkward timestamp-passing between
+   every adjacent pair of extracted phases.
+2. **`[0]`-`[7]` and `[10]` are exactly the "pipeline glue" the brief
+   designates P3/last** (§9, §20-23 of the original brief): once `claims/*`
+   and `epistemic/*` are done (they are), the remaining phases are better
+   absorbed directly into `pipeline.py` as one deliberate, separately-
+   reviewed step — matching how `pre_pipeline.py` needed its own dedicated
+   audit fork rather than a quick mechanical move. Doing `[0]`-`[7]`
+   piecemeal now would likely need re-doing once `pipeline.py` exists,
+   for comparatively little interim clarity benefit (they're already
+   short, single-purpose, and individually cost-timed).
+
+This is a deliberate stop at a clean, fully-green checkpoint — not a
+blocked or failed state. See NEXT STEPS below for the concrete follow-on
+plan.
 
 ## CURRENT LEGACY STRUCTURE
 
 ```
-agent/orchestrator_v2.py (3410 lines)
-    lines 1-~450  top-level helpers (mostly pure; a few still to extract)
-    process()     still one unbroken function, ~2900 lines
-                  (was 4703 lines / 84% of the file before milestone 1)
+agent/orchestrator_v2.py (2248 lines)
+    lines 1-~340   top-level helpers (mostly pure; a few dead, documented, untouched)
+    process()      ~1550 lines: phases [0] Cache, [1] Risk, [2] Plan,
+                   [3] Intent, [3.5] Epistemic classification,
+                   [4] Clarification, [5] Enrich, [6] Discovery fan-out,
+                   [7] Web search decision, then delegated calls into
+                   pre_pipeline/synthesis/claims/*/epistemic/*, [9] gate
+                   call, [10] Optimistic respond (still ~410 lines inline)
     interactive() + CLI entrypoint (untouched, P3 per the migration brief)
 ```
 
@@ -68,95 +124,76 @@ agent/orchestrator_v2.py (3410 lines)
 ```
 agent/orchestrator/
     __init__.py
-    pipeline.py            (not yet created — P3, process() itself moves last)
-    context.py              (not yet created — deferred per the brief: don't
-                             introduce a PipelineContext until several more
-                             modules are proven out)
-    pre_pipeline.py         (not yet created — next major target: 13 short-
-                             circuit early-return branches, ~600 lines)
-    discovery.py            (not yet created — fan-out: registry/web/
-                             refutation/local-answer, ThreadPoolExecutor)
-    synthesis.py             (not yet created — frame construction through
-                             the synthesize() call itself, ~800 lines)
-    claims/                 ✅ COMPLETE subpackage
-        __init__.py
-        status.py           ✅ DONE
-        validation.py       ✅ DONE
-        lifecycle.py        ✅ DONE (claim identity/evidence pool setup +
-                             belief update/linker/personality cycle)
-        mapping.py          ✅ DONE (de-closured run_claim_evidence_batch)
-        retrieval.py        ✅ DONE (Claim Resolution Gate + PASS2 retrieval)
-        disagreement.py     ✅ DONE (embedding prefilter + batch NLI + challenge)
-    epistemic/               ✅ COMPLETE subpackage
-        __init__.py
-        existence_contract.py  ✅ DONE
-        final_coverage.py      ✅ DONE
-        trust_gate.py           ✅ DONE
+    pipeline.py            (not yet created — P3/last: [0]-[7] pipeline glue
+                             + [10] optimistic-respond move here together,
+                             then process() becomes a thin call into it)
+    context.py              (not yet created — deferred: don't introduce a
+                             PipelineContext until pipeline.py's own shape
+                             is known)
+    discovery.py            (not created as a separate file — [6] fan-out
+                             turned out to be timer-coupled to [5]; folds
+                             into pipeline.py instead, see "why stop here")
+    synthesis.py            ✅ DONE
+    pre_pipeline.py         ✅ DONE
+    claims/                 ✅ COMPLETE subpackage (6 modules)
+    epistemic/               ✅ COMPLETE subpackage (3 modules)
     runtime/
         __init__.py
         profiling.py         ✅ DONE
         timeout.py            (dropped from target — agent/orch_timeout.py
-                               already owns this; confirmed during audit)
-        shared_work.py        (not yet created — candidate for
-                               generate_local_answer/blind_analysis)
+                               already owns this)
+        shared_work.py        (not yet created — generate_local_answer is
+                               still in orchestrator_v2.py, submitted from
+                               [6]; candidate once pipeline.py exists)
     registry/                (not yet created — nothing extracted into it yet)
         integration.py
-    response/                 ✅ COMPLETE subpackage
-        __init__.py
-        assembly.py          ✅ DONE
+    response/                 ✅ COMPLETE subpackage (assembly)
 ```
 
 ## MOVED COMPONENTS (in commit order)
 
-| # | Commit | Extracted | From (orig. lines, pre-migration) | To |
-|---|---|---|---|---|
-| 1 | `e35ddb7` | Existence Query Contract | 5025-5104 | `agent/orchestrator/epistemic/existence_contract.py` |
-| 2 | `a613e84` | Final Claim Coverage orchestration | 4453-4562 | `agent/orchestrator/epistemic/final_coverage.py` |
-| 3 | `1f1b166` | Pipeline wall-clock `[PROFILE]` report | 5010-5117 | `agent/orchestrator/runtime/profiling.py` |
-| 4 | `9174dc9` | `TRUST_STATES`/`_TRUST_ORDER`/`_calculate_delta_factors`/`_apply_trust_cap` + epistemic trust adjustment block | 357-472 (helpers) + 4464-4651 (block) | `agent/orchestrator/epistemic/trust_gate.py` |
-| 5 | `1cf3fa7` | `build_self_answer`, `_generate_character_response`, `_generate_apology_response`, `_adapt_answer_to_style`, `_generate_vulgar_response` (dead, moved with siblings) | 618-773 | `agent/orchestrator/response/assembly.py` |
-| 6 | `f37be5f` | Claim epistemic status classification (`---- CLAIM EPISTEMIC STATUS ----` block) | 3267-3476 | `agent/orchestrator/claims/status.py` |
-| 7 | `0cbf172` | Structural claim validation (`STRUCTURAL CLAIM VALIDATION` block) | 2543-2648 | `agent/orchestrator/claims/validation.py` |
-| 8 | `b94ed9f` | Claim & evidence lifecycle setup (CANONICAL EVIDENCE POOL + claim normalization + CLAIM IDENTITY + CLAIM QUERY CONTEXT) | 2409-2542 | `agent/orchestrator/claims/lifecycle.py` |
-| 9 | `7926f2e` | `_run_claim_evidence_batch` de-closured (PASS1/PASS2 batch NLI) | 2526-2764 (nested closure) | `agent/orchestrator/claims/mapping.py` |
-| 10 | `d84de56` | Claim Resolution Gate + PASS2 retrieval | 2556-2817 | `agent/orchestrator/claims/retrieval.py` |
-| 11 | `74138d8` | Belief update + claim<->answer linker + personality cycle | 2668-2809 | `agent/orchestrator/claims/lifecycle.py` (2nd function) |
-| 12 | `c406da6` | Claim<->claim disagreement (embedding prefilter + batch NLI + challenge) | 2680-3191 | `agent/orchestrator/claims/disagreement.py` |
+| # | Commit | Extracted | To |
+|---|---|---|---|
+| 1 | `e35ddb7` | Existence Query Contract | `epistemic/existence_contract.py` |
+| 2 | `a613e84` | Final Claim Coverage orchestration | `epistemic/final_coverage.py` |
+| 3 | `1f1b166` | Pipeline wall-clock `[PROFILE]` report | `runtime/profiling.py` |
+| 4 | `9174dc9` | Trust helpers + epistemic trust adjustment | `epistemic/trust_gate.py` |
+| 5 | `1cf3fa7` | Response assembly helpers | `response/assembly.py` |
+| 6 | `f37be5f` | Claim epistemic status classification | `claims/status.py` |
+| 7 | `0cbf172` | Structural claim validation | `claims/validation.py` |
+| 8 | `b94ed9f` | Claim & evidence lifecycle setup | `claims/lifecycle.py` |
+| 9 | `7926f2e` | `_run_claim_evidence_batch` de-closured | `claims/mapping.py` |
+| 10 | `d84de56` | Claim Resolution Gate + PASS2 retrieval | `claims/retrieval.py` |
+| 11 | `74138d8` | Belief update + linker + personality cycle | `claims/lifecycle.py` (2nd fn) |
+| 12 | `c406da6` | Claim<->claim disagreement | `claims/disagreement.py` |
+| 13 | `40501dc` | Frame construction + synthesize() | `synthesis.py` |
+| 14 | `c4d956f` | Claim Status Gate counting/messaging | `claims/status.py` (2nd fn) |
+| 15 | `4338c05` | Pre-pipeline (11 early-return branches) | `pre_pipeline.py` |
 
-Each row was verified against the pre-move source with an exact whitespace-
-normalized diff before the call site was rewired (see each commit body for
-the specific diff notes — free-variable renames like `_belief_manager` →
-`belief_manager`, module-level constant hoisting, or the full free-variable
-audit for `_run_claim_evidence_batch`, which captured exactly two names —
-`verbose` and `log` — everything else was already a module-level import).
+Each row was verified against the pre-move source with an exact diff before
+the call site was rewired (whitespace-normalized multiset compare for most;
+sequence-sensitive `diff` for `pre_pipeline.py` specifically, where branch
+order was the primary risk).
 
 ## REMAINING COMPONENTS (still inline in `process()`)
 
-Per the structural audit map, largest remaining undifferentiated regions,
-highest risk first:
-
-- **`[10]` Optimistic respond** (~440 lines): background-validation kickoff
+- **`[0]`-`[7]` pipeline glue** (~700 lines): cache check (its own early-
+  return on cache hit), risk assess, plan, intent analyze (LLM), epistemic
+  classification (~187 lines, the largest sub-block here), clarification,
+  query enrich, discovery fan-out (`ThreadPoolExecutor`, registry/web/
+  refutation/local-answer), web search decision. Individually simple,
+  collectively timer-coupled to each other (see "why stop here"). Target:
+  fold directly into `pipeline.py` as one step, not piecemeal.
+- **`[10]` Optimistic respond** (~410 lines): background-validation kickoff
   (`nonlocal` closure), cache write, query archive write, V3 memory/
   reflection/dataset write-back (8+ ordered side-effecting calls in one
-  try/except), trust banner selection, final `OrchestratorResponse` return.
-  HIGH risk — dense side-effect ordering, forward-reads from earlier phases
-  (`claims_accepted`/`total_claims` from the still-inline Claim Status Gate).
-- **`[8]` Synthesize + frame construction** (~800 lines, now the largest
-  remaining undifferentiated region within `[8]`): refutation scan,
-  hypothesis graph, local-answer wait, blind analysis, source
-  classification, the `synthesize()` call itself. Not yet touched —
-  candidate `synthesis.py`.
-- **`[9]` Claim Status Gate** (the counting half, not yet split from the
-  now-extracted classification loop — status.py owns classification, the
-  gate/messaging half that rewrites `synthesis_result.answer` for the 5
-  mutually-exclusive cases is still inline): MEDIUM risk, forward-read of
-  counts at `[10]`.
-- **Pre-pipeline** (~600 lines, 13 short-circuit early-return branches):
-  scene/target/intent/self-query/entity/strategy/swear/criticism/boundary/
-  song-social-reflection/context/early-gate. MEDIUM risk — each branch is
-  simple but ordering between them is behaviorally load-bearing.
-- **Discovery fan-out** (`ThreadPoolExecutor(max_workers=4)`, registry/web/
-  refutation/local-answer parallel submit): not yet touched.
+  try/except, reads `claims_accepted`/`total_claims` via `'in locals()'`
+  checks — the same kind of scope-sensitive gotcha `pre_pipeline.py` and
+  `synthesis.py` each had one of), trust banner selection, final
+  `OrchestratorResponse` return. HIGH risk, explicitly flagged to do last
+  in the original brief, right before `pipeline.py` itself.
+- `generate_local_answer` (submitted from `[6]`, not yet moved — candidate
+  for `runtime/shared_work.py` once `discovery`/`[6]` is addressed).
 
 ## IMPORT DEPENDENCY GRAPH
 
@@ -166,59 +203,51 @@ agent.orchestrator_v2
     → agent.orchestrator.runtime.profiling
     → agent.orchestrator.response.assembly
     → agent.orchestrator.claims.{status,validation,lifecycle,mapping,retrieval,disagreement}
-        (each of the above → existing domain modules only:
-         agent.claim_evidence_retriever, agent.claim_evidence_mapper,
-         agent.final_claim_coverage, agent.orch_registry_search,
-         agent.evidence_pool, agent.claim_relation, agent.source_quality;
-         claims.retrieval → claims.mapping (the one intra-package import
-         so far — both are claims/*, no cross-subpackage or reverse
-         dependency); none import orchestrator_v2)
+    → agent.orchestrator.synthesis
+    → agent.orchestrator.pre_pipeline
+        (claims.retrieval → claims.mapping is the one intra-package import;
+         everything else → existing domain modules only; none import
+         orchestrator_v2; orchestrator_v2 never imports anything that
+         imports it back)
 ```
 
-No circular imports found or introduced. Direction holds cleanly:
-`agent.orchestrator.* → domain modules` (+ one intra-`claims/*` import),
-never the reverse, and `agent.orchestrator_v2 → agent.orchestrator.*`,
-never the reverse.
+No circular imports found or introduced anywhere in the migration.
 
 ## GLOBAL/SINGLETON HANDLING
 
-No global/singleton ownership changed. V6 singletons (`_belief_manager`,
-`_claim_answer_linker`, `_personality_core`, `_disagreement_engine`, `_claim_validator`)
-are passed into the extracted `claims/*` functions as explicit parameters
-rather than read as module globals inside them — the only structural change
-needed to make the extracted code independent of orchestrator_v2.py's module
-globals. Does not change how many times any singleton is constructed or when.
+No global/singleton ownership changed anywhere in the migration. Every
+V3/V6 singleton and the module-level `_tracer` (`DecisionTracer()` —
+confirmed stateful, accumulates an in-memory trace list, so it is always
+passed in as a parameter, never re-constructed in an extracted module) is
+passed explicitly into the extracted functions. `pre_pipeline.py`'s audit
+additionally confirmed every one of the 12 `get_*()` singleton getters it
+calls is called exactly once in the whole file (no double-construction risk).
 
 ## EQUIVALENCE STATUS
 
-**CONFIRMED**, with a caveat on methodology: because this migration moves
-code (single source of truth) rather than duplicating it, there is no
-separate "old" implementation left to diff against once a block is
-extracted — the old inline code is gone, replaced by a call into the new
-module. So equivalence is established four ways:
+**CONFIRMED.** Methodology (see earlier sections of this doc's history in
+git log for the full write-up): exact diff at extraction time (sequence-
+sensitive where branch order is the risk, e.g. `pre_pipeline.py`;
+whitespace-normalized multiset compare otherwise) + full 14-suite
+regression after every commit + `agent/orchestrator_modularization_regression_test.py`
+(198 deterministic checks, network/LLM dependencies monkeypatched for
+determinism) + live `--web -v` sanity runs targeting each newly-moved code
+path specifically, including — for `pre_pipeline.py` — deliberately
+constructed inputs to hit 6 of its 11 early-return branches for real.
 
-1. **At extraction time**: an exact whitespace-normalized diff between the
-   pre-move inline source and the new module's function body, done before
-   the call site is rewired (documented per-block in each commit message).
-2. **After extraction**: the full 13-suite pre-existing regression baseline,
-   run end-to-end through `orchestrator_v2.py` (which now delegates to the
-   new modules), green before and after every commit.
-3. **Ongoing regression net**: `agent/orchestrator_modularization_regression_test.py`
-   (145 checks) pins each extracted unit's behavior going forward, including
-   deterministic coverage of network-adjacent code (`claims/mapping.py`'s
-   batch NLI, `claims/disagreement.py`'s embedding fail-open path) via
-   monkeypatched dependencies — no real network calls in the test suite.
-4. **Live sanity checks**: real `--web -v` runs after each extraction,
-   confirmed normal end-to-end completion with correct log-marker shapes
-   (not offline-mocked) — one per milestone-2/3 extraction so far, each
-   targeting the specific newly-moved code path.
+## NEXT STEPS
 
-## NEXT EXTRACTION TARGET
-
-`synthesis.py`: frame construction (refutation scan, hypothesis graph,
-local-answer wait, blind analysis, source classification) through the
-`synthesize()` call itself — the largest remaining undifferentiated region
-within `[8]`, sitting upstream of the now-complete `claims/*` subpackage.
-After that: the pre-pipeline (13 early-return branches) and `[10]`
-optimistic-respond (HIGH risk, save for last before `pipeline.py`/`process()`
-itself per the brief's explicit P3 ordering).
+1. `pipeline.py`: fold `[0]`-`[7]` pipeline glue into it as one deliberate
+   step (not piecemeal — see "why stop here"), resolving the `t0`
+   cross-phase timer coupling explicitly rather than threading timestamps
+   between separate small extracted functions.
+2. `[10]` Optimistic respond → also into `pipeline.py` or a dedicated
+   `response/writeback.py` — needs the same kind of dedicated free-variable
+   audit `pre_pipeline.py` got, given the `'claims_accepted' in locals()`
+   pattern and the `nonlocal` closure.
+3. Once both are done, `process()` itself becomes a thin function that
+   calls `pipeline.process(...)` — at that point `orchestrator_v2.py`
+   is a true CLI + compatibility facade (Milestone 4 complete per the brief).
+4. Only after that: consider whether a `PipelineContext`/`RequestContext`
+   is warranted (separate commit, separate regression, per the brief —
+   still not needed for anything done so far).
