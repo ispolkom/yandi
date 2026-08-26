@@ -165,6 +165,287 @@ class FinalClaimCoverageResult:
     coverage_status: str = "ok"
 
 
+# ============================================================
+# CANDIDATE ROUTING (P0 follow-up, per explicit user decision)
+# ============================================================
+#
+# THIS IS A ROUTING LAYER, NOT AN EPISTEMIC DECISION.
+#
+# It answers ONLY: "which (final_claim, pipeline_claim) pairs are
+# worth sending to the expensive NLI batch call?" It NEVER assigns
+# supports/contradicts/unrelated itself — a pair not selected here is
+# simply never given an NLI pair_id, which downstream already treats
+# as "no relation found" (relation_by_id.get(...) -> {} -> no match),
+# identical to how a genuinely-checked-and-unrelated pair already
+# behaves. See NO_NLI_CANDIDATES handling in evaluate_final_claim_
+# coverage() for why that distinction still matters for diagnostics.
+#
+# Numbers below (threshold, top-K) are NOT invented — they come from
+# an offline recall experiment (scratchpad, not committed — the
+# corpus itself is real: live-run claim texts from two actual
+# orchestrator runs plus explicit adversarial pairs across 3 domains
+# — Jupiter/life, Mars/water, Higgs boson — to rule out domain-
+# specific tuning) that computed REAL embedding similarity (live
+# embeddinggemma) against REAL ground-truth NLI relations (live
+# infer_claim_relation(), not guessed) for 29 pairs across 8 families
+# shaped like production (one final claim vs several pipeline claims):
+#
+#   threshold=0.45 alone: supports_recall=1.00, contradicts_recall=1.00
+#     (29-pair corpus), ~31% pair reduction.
+#   Per-family top-K: the true supports/contradicts pair was NEVER
+#     ranked worse than 3rd by cosine similarity within its family
+#     (worst case: a contradicts pair narrowly edged out for 2nd place
+#     by an uncertain pair, 0.717 vs 0.730 similarity — a 0.013 margin,
+#     not a wide safety gap).
+#
+# COVERAGE_ROUTING_TOP_K=5 adds a 2-slot margin above that observed
+# worst case (rank 3), because production pipeline_claims counts
+# (13-20 in the two live runs) are larger than this corpus's families
+# (3-6), so a similar "narrowly edged out" case could plausibly rank
+# slightly lower with more candidates competing for top slots.
+COVERAGE_ROUTING_SIM_THRESHOLD = 0.45
+COVERAGE_ROUTING_TOP_K = 5
+
+
+def _content_words(text: str) -> set:
+    stopwords = {
+        "что", "это", "как", "для", "на", "в", "с", "по", "из", "от", "до",
+        "за", "у", "о", "к", "и", "а", "но", "или", "же", "бы", "не", "да",
+        "нет", "кто", "какой", "какая", "какие", "его", "её", "их", "быть",
+        "уже", "также", "при", "об", "то", "если", "только", "все", "всё",
+    }
+    return {
+        w for w in re.findall(r"[а-яёa-z0-9]+", (text or "").lower())
+        if len(w) >= 4 and w not in stopwords
+    }
+
+
+def _lexical_overlap(a: str, b: str) -> float:
+    wa, wb = _content_words(a), _content_words(b)
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / len(wa | wb)
+
+
+_NEGATION_MARKERS_RE = re.compile(
+    r"\bне{1,2}[а-яё]*\b|\bнет\b|\bотсутств|\bникак|\bни\s+один",
+    re.IGNORECASE,
+)
+
+
+def _has_negation(text: str) -> bool:
+    return bool(_NEGATION_MARKERS_RE.search((text or "").lower()))
+
+
+def _shares_number(a: str, b: str) -> bool:
+    na = set(re.findall(r"\d+(?:[.,]\d+)?", a or ""))
+    nb = set(re.findall(r"\d+(?:[.,]\d+)?", b or ""))
+    return bool(na & nb)
+
+
+def _is_near_duplicate(a: str, b: str) -> bool:
+    a_norm, b_norm = (a or "").strip().lower(), (b or "").strip().lower()
+    if a_norm == b_norm:
+        return True
+    return _lexical_overlap(a, b) >= 0.8
+
+
+# Same "moderate shared content" bar for both mandatory rules below —
+# not a new number: matches CLAIM_CONFLICT_SIM_THRESHOLD's role
+# elsewhere in this codebase (a low bar meant to catch "same rough
+# topic", not "same claim") translated to lexical terms since this
+# check is cheaper than an extra embedding call per pair.
+_MANDATORY_OVERLAP_FLOOR = 0.15
+
+
+def _mandatory_routing_reason(
+    final_text: str,
+    pipeline_text: str,
+    final_role: "str | None" = None,
+    pipeline_role: "str | None" = None,
+) -> "str | None":
+    """
+    Returns a short reason string if this pair MUST be sent to NLI
+    regardless of embedding similarity/top-K, else None.
+
+    Deliberately conservative in the "include" direction — every rule
+    here is a cheap, domain-generic heuristic for "this pair might be
+    a real supports/contradicts relation", never a judgment about
+    truth or relation itself. Over-including costs a bit of NLI time;
+    under-including risks recall, which is the one thing this layer is
+    not allowed to trade away.
+    """
+    if _is_near_duplicate(final_text, pipeline_text):
+        return "exact_or_near_duplicate"
+
+    overlap = _lexical_overlap(final_text, pipeline_text)
+
+    if overlap >= _MANDATORY_OVERLAP_FLOOR:
+        if _has_negation(final_text) or _has_negation(pipeline_text):
+            return "negation_plus_overlap"
+
+        if _shares_number(final_text, pipeline_text):
+            return "shared_number_plus_overlap"
+
+    if final_role == "CORE" and pipeline_role == "CORE":
+        return "core_plus_core"
+
+    return None
+
+
+def _embed_texts_batch(texts: "List[str]") -> "Dict[str, Any]":
+    """
+    Batched, live embedding lookup — same pattern as the
+    extract_claim_from_source fix (one HTTP round-trip for N texts,
+    not N). Returns {text: normalized_vector}. Graceful degradation:
+    on any failure, returns {} — callers must treat a missing text as
+    "similarity unknown", never invent a similarity score.
+    """
+    import numpy as np
+
+    unique_texts = list(dict.fromkeys(t for t in texts if t))
+
+    if not unique_texts:
+        return {}
+
+    try:
+        resp = _session.post(
+            f"{OLLAMA_BASE}/api/embed",
+            json={
+                "model": "embeddinggemma:latest",
+                "input": [t[:2000] for t in unique_texts],
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+
+        vecs = np.array(resp.json()["embeddings"], dtype=np.float32)
+        norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        vecs = vecs / norms
+
+        return {t: vecs[i] for i, t in enumerate(unique_texts)}
+
+    except Exception as e:
+        print(f"[Candidate Routing] embedding batch failed, degrading to mandatory-only: {e}")
+        return {}
+
+
+def _route_candidate_pairs(
+    final_claims_text: "List[str]",
+    pipeline_claims_text: "List[str]",
+    query: str = "",
+) -> "tuple[Dict[int, Dict[int, str]], Dict[str, int]]":
+    """
+    High-recall candidate ROUTING for the final<->pipeline NLI step.
+
+    Returns (routing, stats):
+      routing[final_index][pipeline_index] = reason string
+        ("top_k" / "threshold" / one of the mandatory reasons)
+      stats = counters for the [Candidate Routing] diagnostic log.
+
+    NEVER returns a relation. NEVER marks anything unrelated/supports/
+    contradicts. A pipeline_index absent from routing[final_index]
+    means only "not selected for NLI this pass", tracked downstream as
+    NOT_SELECTED_FOR_NLI — never as a proxy for UNRELATED.
+    """
+    import numpy as np
+
+    routing: "Dict[int, Dict[int, str]]" = {
+        i: {} for i in range(len(final_claims_text))
+    }
+
+    stats = {
+        "mandatory": 0,
+        "top_k": 0,
+        "threshold": 0,
+    }
+
+    if not final_claims_text or not pipeline_claims_text:
+        return routing, stats
+
+    existence_query = bool(query) and _is_existence_question_safe(query)
+
+    final_roles = [
+        _classify_claim_role_safe(t, query) if existence_query else None
+        for t in final_claims_text
+    ]
+    pipeline_roles = [
+        _classify_claim_role_safe(t, query) if existence_query else None
+        for t in pipeline_claims_text
+    ]
+
+    vec_by_text = _embed_texts_batch(final_claims_text + pipeline_claims_text)
+
+    for fi, final_text in enumerate(final_claims_text):
+        sims = None
+
+        if vec_by_text:
+            fv = vec_by_text.get(final_text)
+            if fv is not None:
+                sims = [
+                    float(np.dot(fv, vec_by_text[pt]))
+                    if pt in vec_by_text else float("-inf")
+                    for pt in pipeline_claims_text
+                ]
+
+        if sims is not None:
+            ranked = sorted(
+                range(len(pipeline_claims_text)),
+                key=lambda i: -sims[i],
+            )
+
+            for pi in ranked[:COVERAGE_ROUTING_TOP_K]:
+                if sims[pi] > float("-inf"):
+                    routing[fi].setdefault(pi, "top_k")
+                    stats["top_k"] += 1
+
+            for pi, sim in enumerate(sims):
+                if sim >= COVERAGE_ROUTING_SIM_THRESHOLD and pi not in routing[fi]:
+                    routing[fi][pi] = "threshold"
+                    stats["threshold"] += 1
+
+        for pi, pipeline_text in enumerate(pipeline_claims_text):
+            reason = _mandatory_routing_reason(
+                final_text,
+                pipeline_text,
+                final_roles[fi],
+                pipeline_roles[pi],
+            )
+
+            if reason:
+                if pi not in routing[fi]:
+                    stats["mandatory"] += 1
+                routing[fi][pi] = reason
+
+        # Embedding unavailable for this final claim entirely -> fall
+        # back to "every pipeline claim is mandatory" rather than
+        # silently checking nothing. Soft-fails toward MORE NLI calls,
+        # never toward skipping a claim's coverage check outright.
+        if sims is None and not routing[fi]:
+            for pi in range(len(pipeline_claims_text)):
+                routing[fi][pi] = "embedding_unavailable_fallback"
+                stats["mandatory"] += 1
+
+    return routing, stats
+
+
+def _is_existence_question_safe(query: str) -> bool:
+    try:
+        from agent.claim_evidence_retriever import _is_existence_question
+        return _is_existence_question(query)
+    except Exception:
+        return False
+
+
+def _classify_claim_role_safe(text: str, query: str) -> "str | None":
+    try:
+        from agent.claim_evidence_retriever import _classify_claim_role
+        return _classify_claim_role(text, query)["role"]
+    except Exception:
+        return None
+
+
 def _extract_json(text: str) -> dict:
     """
     P1-C (YANDI_EVIDENCE_ELIGIBILITY_AND_REGISTRY_AUDIT.md): расширено
@@ -524,6 +805,7 @@ def _is_same_claim(
 def evaluate_final_claim_coverage(
     answer: str,
     pipeline_claims: List[Dict[str, Any]],
+    query: str = "",
 ) -> FinalClaimCoverageResult:
     """
     Сравнить factual claims финального ответа
@@ -537,8 +819,18 @@ def evaluate_final_claim_coverage(
     То есть 10 × 16 claims могли породить до 320
     последовательных LLM generation calls.
 
-    Теперь все необходимые направления NLI классифицируются
-    batch-вызовами через infer_claim_relations_batch().
+    Затем это стало ONE BATCH PIPELINE (infer_claim_relations_batch),
+    но по-прежнему строило ВСЕ final×pipeline×2 пары без разбора —
+    live run: 20 factual × 13 pipeline × 2 = 520 пар, 17 batch-вызовов,
+    220.57s generation. candidate routing (см. _route_candidate_pairs)
+    теперь решает, какие пары вообще стоит отправлять в NLI — это
+    ROUTING layer, не эпистемическое решение: пара, не выбранная
+    роутингом, не помечается unrelated/unsupported, а просто не
+    участвует в этом проходе (NOT_SELECTED_FOR_NLI).
+
+    query: опционально — используется только для CORE↔CORE mandatory
+    routing правила (existence-question claim role). Пустая строка =
+    правило неактивно, поведение как раньше для вызовов без query.
     """
 
     total_t0 = time.time()
@@ -689,32 +981,51 @@ def evaluate_final_claim_coverage(
             )
 
     # --------------------------------------------------------
-    # 3. BUILD BIDIRECTIONAL NLI PAIRS
+    # 3. CANDIDATE ROUTING, THEN BUILD BIDIRECTIONAL NLI PAIRS
     # --------------------------------------------------------
     #
-    # Сохраняем прежнюю семантику:
+    # Сохраняем прежнюю семантику для КАЖДОЙ пары, которую routing
+    # отобрал:
     #
     # final -> pipeline == supports
     # ИЛИ
     # pipeline -> final == supports
     #
-    # означает semantic identity / coverage.
+    # означает semantic identity / coverage. Routing решает только
+    # КАКИЕ (final, pipeline) пары стоит проверять — не их отношение.
     # --------------------------------------------------------
 
+    unmatched_final_texts = [
+        factual_claims[i]["claim_text"] for i in unmatched_final_indexes
+    ]
+    pipeline_texts_all = [
+        _pipeline_claim_text(c) for c in usable_pipeline_claims
+    ]
+
+    routing, routing_stats = _route_candidate_pairs(
+        unmatched_final_texts,
+        pipeline_texts_all,
+        query=query,
+    )
+
+    no_nli_candidates_final_indexes = set()
+
     pairs = []
+    total_candidate_slots = 0
 
-    for final_index in unmatched_final_indexes:
+    for local_i, final_index in enumerate(unmatched_final_indexes):
 
-        final_text = factual_claims[
-            final_index
-        ]["claim_text"]
+        final_text = unmatched_final_texts[local_i]
+        selected = routing.get(local_i, {})
 
-        for pipeline_index, pipeline_claim in enumerate(
-            usable_pipeline_claims
-        ):
-            pipeline_text = _pipeline_claim_text(
-                pipeline_claim
-            )
+        if not selected:
+            no_nli_candidates_final_indexes.add(final_index)
+            continue
+
+        total_candidate_slots += len(selected)
+
+        for pipeline_index in selected:
+            pipeline_text = pipeline_texts_all[pipeline_index]
 
             base_id = (
                 f"{final_index}:{pipeline_index}"
@@ -731,6 +1042,21 @@ def evaluate_final_claim_coverage(
                 "main_claim": pipeline_text,
                 "other_claim": final_text,
             })
+
+    _total_possible_pairs = len(unmatched_final_indexes) * len(usable_pipeline_claims) * 2
+
+    print(
+        "[Candidate Routing] "
+        f"final_claims={len(unmatched_final_indexes)} "
+        f"pipeline_claims={len(usable_pipeline_claims)} "
+        f"total_possible_pairs={_total_possible_pairs} "
+        f"routed_pairs={len(pairs)} "
+        f"reduction={(1 - len(pairs) / _total_possible_pairs) * 100 if _total_possible_pairs else 0:.1f}% "
+        f"mandatory={routing_stats['mandatory']} "
+        f"top_k={routing_stats['top_k']} "
+        f"threshold={routing_stats['threshold']} "
+        f"no_nli_candidates={len(no_nli_candidates_final_indexes)}"
+    )
 
     # --------------------------------------------------------
     # 4. ONE BATCH PIPELINE INSTEAD OF N×M×2 CALLS
@@ -827,9 +1153,23 @@ def evaluate_final_claim_coverage(
             covered.append(item)
 
         else:
-            uncovered.append(
-                dict(final_claim)
+            item = dict(final_claim)
+
+            # P0 (candidate routing follow-up): distinguish "we
+            # actually checked candidates and found no supports" from
+            # "routing gave this claim zero candidates to check at
+            # all" — NOT_SELECTED_FOR_NLI is a technical routing
+            # outcome, never an epistemic verdict. Coverage semantics
+            # UNCHANGED: this claim still counts as uncovered either
+            # way (conservative — a missing verdict is never upgraded
+            # to a positive one), only the diagnostic reason differs.
+            item["coverage_reason"] = (
+                "NO_NLI_CANDIDATES"
+                if final_index in no_nli_candidates_final_indexes
+                else "no_supporting_relation_found"
             )
+
+            uncovered.append(item)
 
     factual_count = len(factual_claims)
     covered_count = len(covered)

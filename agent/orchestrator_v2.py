@@ -4409,6 +4409,7 @@ def process(
             final_coverage = evaluate_final_claim_coverage(
                 synthesis_result.answer,
                 claims_data,
+                query=query_to_use,
             )
 
             cost["final_coverage_ms"] = (
