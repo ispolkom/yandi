@@ -9,8 +9,7 @@ node/target/
 
 # Manual backup snapshots (use git history instead)
 *.bak_*
-*.backup
-*.backup[0-9]*
+*.backup*
 
 # Local runtime/personal agent state (per README: not tracked)
 registry/
