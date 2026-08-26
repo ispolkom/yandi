@@ -37,6 +37,8 @@ from agent.orchestrator.claims.validation import apply_structural_claim_validati
 from agent.orchestrator.claims.lifecycle import setup_claim_and_evidence_lifecycle
 import agent.orchestrator.claims.mapping as mapping_mod
 from agent.orchestrator.claims.mapping import run_claim_evidence_batch
+import agent.orchestrator.claims.retrieval as retrieval_mod
+from agent.orchestrator.claims.retrieval import apply_claim_resolution_and_second_retrieval
 from agent.orchestrator_v2 import LocalSynthesisResult
 from agent.orch_tracer import Trace
 from agent.epistemic_router import EpistemicClassification
@@ -580,6 +582,129 @@ try:
 finally:
     mapping_mod.evaluate_evidence_directness = _orig_directness
     mapping_mod.classify_claim_evidence_batch = _orig_classify
+
+
+# ============================================================
+# 11. claims/retrieval.py — apply_claim_resolution_and_second_retrieval
+# ============================================================
+
+_orig_retrieve = retrieval_mod.retrieve_for_claims
+_orig_merge_r = retrieval_mod.merge_evidence
+_orig_map_r = retrieval_mod.map_claims_to_evidence
+_orig_batch_r = retrieval_mod.run_claim_evidence_batch
+
+captured_retrieve_calls = []
+
+
+def _fake_retrieve(claims, fetch_cache=None):
+    captured_retrieve_calls.append({"claims": [c["claim_id"] for c in claims], "fetch_cache": fetch_cache})
+    return [{"evidence_id": "new_ev1", "content_excerpt": "new evidence text"}]
+
+
+def _fake_merge_growth(base, extra):
+    return list(base) + list(extra)
+
+
+map_calls = []
+
+
+def _fake_map(claims, evidence):
+    map_calls.append(len(claims))
+    return [
+        SimpleNamespace(claim_id=c["claim_id"], derived_from_evidence_ids=["new_ev1"] if c["claim_id"] == "need1" else [])
+        for c in claims
+    ]
+
+
+batch_calls = []
+
+
+def _fake_batch(claims, evidence, batch_label, log, verbose):
+    batch_calls.append(batch_label)
+    return 1
+
+
+retrieval_mod.retrieve_for_claims = _fake_retrieve
+retrieval_mod.merge_evidence = _fake_merge_growth
+retrieval_mod.map_claims_to_evidence = _fake_map
+retrieval_mod.run_claim_evidence_batch = _fake_batch
+
+try:
+    claims_r = [
+        {"claim_id": "resolved1", "verification_status": "supported", "evidence_relations": [{"evidence_role": "direct", "evidence_eligible": True, "relation": "supports", "evidence_id": "e0"}]},
+        {"claim_id": "rejected1", "verification_status": "rejected", "evidence_relations": []},
+        {"claim_id": "need1", "verification_status": "unverified", "evidence_relations": []},
+    ]
+    evidence_r = [{"evidence_id": "e0", "content_excerpt": "x"}]
+    cost_r = {}
+    logged_r = []
+
+    out_evidence = apply_claim_resolution_and_second_retrieval(
+        claims_r, evidence_r, True, False, False, "FAKE_CACHE", cost_r, logged_r.append, True,
+    )
+
+    check("retrieval: resolved claim (effective evidence) excluded from retrieval set", captured_retrieve_calls[0]["claims"] == ["need1"], str(captured_retrieve_calls))
+    check("retrieval: rejected claim excluded from retrieval set", "rejected1" not in captured_retrieve_calls[0]["claims"])
+    check("retrieval: fetch_cache threaded through unchanged", captured_retrieve_calls[0]["fetch_cache"] == "FAKE_CACHE")
+    check("retrieval: cost[claim_retrieval_ms] recorded", "claim_retrieval_ms" in cost_r)
+    check("retrieval: evidence_data merged/grew by the retrieved evidence", len(out_evidence) == 2, str(out_evidence))
+    check("retrieval: mapper PASS2 triggered (added_count>0), called over ALL claims_data (not just retrieval_claims)", map_calls == [3], str(map_calls))
+    check("retrieval: PASS2 batch NLI triggered with label PASS2", batch_calls == ["PASS2"])
+    check("retrieval: cost[claim_pass2_mapping_nli_ms] recorded", "claim_pass2_mapping_nli_ms" in cost_r)
+    check("retrieval: derived_from_evidence_ids written for the retrieved claim", claims_r[2]["derived_from_evidence_ids"] == ["new_ev1"])
+    check("retrieval: [Claim Resolution Gate] log emitted", any("[Claim Resolution Gate]" in l for l in logged_r))
+    check("retrieval: [Claim Retrieval Pass 2] log emitted", any("[Claim Retrieval Pass 2]" in l for l in logged_r))
+    check("retrieval: [Claim Evidence NLI Pass 2] log emitted", any("[Claim Evidence NLI Pass 2]" in l for l in logged_r))
+
+    # enable_web=False -> gate still runs, but retrieval never fires.
+    captured_retrieve_calls.clear()
+    evidence_r2 = [{"evidence_id": "e0"}]
+    out2 = apply_claim_resolution_and_second_retrieval(claims_r, evidence_r2, False, False, False, None, {}, lambda m: None, False)
+    check("retrieval: enable_web=False -> retrieve_for_claims not called", captured_retrieve_calls == [])
+    check("retrieval: enable_web=False -> evidence_data returned unchanged (same object)", out2 is evidence_r2)
+
+    # skip_rag=True -> no retrieval.
+    out3 = apply_claim_resolution_and_second_retrieval(claims_r, evidence_r2, True, False, True, None, {}, lambda m: None, False)
+    check("retrieval: skip_rag=True -> retrieve_for_claims not called", captured_retrieve_calls == [])
+
+    # is_subjective_answer=True -> no retrieval.
+    out4 = apply_claim_resolution_and_second_retrieval(claims_r, evidence_r2, True, True, False, None, {}, lambda m: None, False)
+    check("retrieval: is_subjective_answer=True -> retrieve_for_claims not called", captured_retrieve_calls == [])
+
+    # No claims need retrieval (all resolved/rejected) -> no retrieval call.
+    claims_all_resolved = [claims_r[0], claims_r[1]]
+    out5 = apply_claim_resolution_and_second_retrieval(claims_all_resolved, evidence_r2, True, False, False, None, {}, lambda m: None, False)
+    check("retrieval: no claims need retrieval -> retrieve_for_claims not called", captured_retrieve_calls == [])
+
+    # added_count == 0 (merge doesn't grow the pool) -> mapper/PASS2 NOT triggered.
+    map_calls.clear()
+    batch_calls.clear()
+    retrieval_mod.merge_evidence = lambda base, extra: list(base)
+    claims_need = [{"claim_id": "need2", "verification_status": "unverified", "evidence_relations": []}]
+    cost6 = {}
+    apply_claim_resolution_and_second_retrieval(claims_need, [{"evidence_id": "e0"}], True, False, False, None, cost6, lambda m: None, False)
+    check("retrieval: added_count==0 -> mapper PASS2 NOT triggered", map_calls == [])
+    check("retrieval: added_count==0 -> claim_pass2_mapping_nli_ms NOT set", "claim_pass2_mapping_nli_ms" not in cost6)
+
+    # Exception in retrieve_for_claims is caught (the original inline
+    # try/except logs and swallows it — unlike run_claim_evidence_batch,
+    # which has no try/except at all and propagates). evidence_data must
+    # come back unchanged since the reassignment never runs.
+    def _raise_retrieve(claims, fetch_cache=None):
+        raise RuntimeError("retrieval boom")
+
+    retrieval_mod.retrieve_for_claims = _raise_retrieve
+    evidence_before_exc = [{"evidence_id": "e0"}]
+    logged_exc = []
+    out_exc = apply_claim_resolution_and_second_retrieval(claims_need, evidence_before_exc, True, False, False, None, {}, logged_exc.append, True)
+    check("retrieval: retrieve_for_claims exception is caught (swallowed), does not propagate", out_exc is evidence_before_exc)
+    check("retrieval: on exception, [Claim Retrieval Pass 2] error logged", any("[Claim Retrieval Pass 2] error=" in l for l in logged_exc))
+
+finally:
+    retrieval_mod.retrieve_for_claims = _orig_retrieve
+    retrieval_mod.merge_evidence = _orig_merge_r
+    retrieval_mod.map_claims_to_evidence = _orig_map_r
+    retrieval_mod.run_claim_evidence_batch = _orig_batch_r
 
 
 print()
