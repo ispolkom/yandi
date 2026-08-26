@@ -142,6 +142,15 @@ class SharedFetchCache:
             # is the safe fallback) -- fetch it ourselves rather than
             # return nothing.
 
+        # result must be bound before the try so that, if fetch_fn
+        # raises, the finally block below can still record a result
+        # (None) and set the event -- otherwise this UnboundLocalError
+        # would itself replace/mask the original exception AND leave
+        # any other thread waiting on `event` blocked for the full
+        # FETCH_TIMEOUT+10 instead of failing fast. The exception
+        # itself still propagates to this (owner) caller as before;
+        # only the bookkeeping is now crash-safe.
+        result = None
         try:
             self.network_fetches += 1
             result = fetch_fn(url)
