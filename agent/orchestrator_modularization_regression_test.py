@@ -44,6 +44,8 @@ import agent.orchestrator.claims.retrieval as retrieval_mod
 from agent.orchestrator.claims.retrieval import apply_claim_resolution_and_second_retrieval
 import agent.orchestrator.claims.disagreement as disagreement_mod
 from agent.orchestrator.claims.disagreement import apply_claim_claim_disagreement
+import agent.orchestrator.synthesis as synthesis_mod
+from agent.orchestrator.synthesis import build_frame_and_synthesize
 from agent.orchestrator_v2 import LocalSynthesisResult
 from agent.orch_tracer import Trace
 from agent.epistemic_router import EpistemicClassification
@@ -919,6 +921,164 @@ try:
 finally:
     _requests_mod.Session.post = _orig_session_post
     disagreement_mod.infer_claim_relations_batch = _orig_infer_batch
+
+
+# ============================================================
+# 14. synthesis.py — build_frame_and_synthesize
+# ============================================================
+#
+# blind_analysis's LLM call is only reached when >=2 candidate answers
+# exist; with search_result=web_result=None only the local answer
+# qualifies, so it deterministically takes the "not enough sources"
+# short-circuit — no need to mock the LLM call at all. build_hypothesis_graph,
+# synthesize, classify_sources/extract_main_claim/is_relevant, and scrape
+# are monkeypatched (module-level imports in agent.orchestrator.synthesis)
+# to avoid real network/LLM calls entirely.
+
+_orig_build_graph = synthesis_mod.build_hypothesis_graph
+_orig_synthesize = synthesis_mod.synthesize
+_orig_classify_sources = synthesis_mod.classify_sources
+_orig_extract_main_claim = synthesis_mod.extract_main_claim
+_orig_is_relevant = synthesis_mod.is_relevant
+_orig_scrape = synthesis_mod.scrape
+
+
+class _FakeGraph:
+    nodes = [1, 2, 3]
+
+
+captured_graph_calls = []
+
+
+def _fake_build_graph(question, texts, source_refs):
+    captured_graph_calls.append({"question": question, "texts": list(texts), "source_refs": source_refs})
+    return _FakeGraph()
+
+
+captured_synthesize_calls = []
+
+
+def _fake_synthesize(enrich_result, search_result=None, web_result=None, query_frame=None, response_mode=None):
+    captured_synthesize_calls.append({"query_frame_keys": list(query_frame.keys()), "response_mode": response_mode})
+    return LocalSynthesisResult(answer="ok", trust_level="SUPPORTED", confidence=0.7), {"claims": []}
+
+
+synthesis_mod.build_hypothesis_graph = _fake_build_graph
+synthesis_mod.synthesize = _fake_synthesize
+synthesis_mod.classify_sources = lambda main_claim, sources: {"supports": [], "contradicts": [], "unrelated": []}
+synthesis_mod.extract_main_claim = lambda answer, query: "main claim"
+synthesis_mod.is_relevant = lambda text, query, threshold=0.2: True
+
+
+class _FakeFuture:
+    def result(self, timeout=None):
+        return "локальный ответ модели"
+
+
+class _FakeExecutor:
+    def __init__(self):
+        self.shutdown_calls = []
+
+    def shutdown(self, wait=None, cancel_futures=None):
+        self.shutdown_calls.append((wait, cancel_futures))
+
+
+try:
+    query_frame_s = {}
+    cost_s = {}
+    logged_s = []
+    trace_s = make_trace()
+    fake_executor = _FakeExecutor()
+    fake_strategy_result = SimpleNamespace(strategy=SimpleNamespace(value="default"))
+
+    result = build_frame_and_synthesize(
+        query_frame_s, make_epistemic_result(), False, False, "science",
+        fake_strategy_result, False, SimpleNamespace(), None, None,
+        "тестовый запрос", _FakeFuture(), fake_executor, None,
+        SimpleNamespace(), trace_s, cost_s, logged_s.append, True,
+    )
+    (synthesis_result_s, reasoning_info_s, synthesis_timed_out_s,
+     refutation_snippets_s, entity_s, answer_mode_s, prof_synthesis_t0_s) = result
+
+    check("synthesis: no refutation_queries in query_frame -> refutation_snippets stays []", refutation_snippets_s == [])
+    check("synthesis: no request._entity -> entity is None", entity_s is None)
+    check("synthesis: answer_mode taken from epistemic_result.answer_mode", answer_mode_s == make_epistemic_result().answer_mode)
+    check("synthesis: synthesis_timed_out False on normal completion", synthesis_timed_out_s is False)
+    check("synthesis: synthesis_result returned from the (mocked) synthesize() call", synthesis_result_s.answer == "ok")
+    check("synthesis: prof_synthesis_t0 returned for the caller's cost[synthesize_ms] computation", isinstance(prof_synthesis_t0_s, float))
+    check("synthesis: query_frame[epistemic][domain] set from epistemic_result.domain", query_frame_s["epistemic"]["domain"] == "scientific")
+    check("synthesis: query_frame[local_answer] set from local_future.result()", query_frame_s["local_answer"] == "локальный ответ модели")
+    check("synthesis: <2 candidate answers -> blind_analysis short-circuits to not-enough-sources -> blind_status=undecided", query_frame_s["blind_status"] == "undecided")
+    check("synthesis: blind_selected_source forced to 'unknown' on the not-enough-sources short-circuit", query_frame_s["blind_selected_source"] == "unknown")
+    check("synthesis: best_answer falls back to local_answer", query_frame_s["best_answer"] == "локальный ответ модели")
+    check("synthesis: classified_sources set from the (mocked) classify_sources() call", query_frame_s["classified_sources"] == {"supports": [], "contradicts": [], "unrelated": []})
+    check("synthesis: all 5 profile cost buckets recorded", all(k in cost_s for k in ["profile_refutation_ms", "profile_hypothesis_graph_ms", "profile_local_wait_ms", "profile_blind_analysis_ms", "profile_source_classification_ms"]), str(cost_s))
+    check("synthesis: parallel_executor.shutdown(wait=False, cancel_futures=False) called exactly once", fake_executor.shutdown_calls == [(False, False)])
+    check("synthesis: synthesize() called with response_mode=answer_mode", captured_synthesize_calls[-1]["response_mode"] == answer_mode_s)
+    check("synthesis: [8] header logged", any("[8] Building hypothesis graph" in l for l in logged_s))
+    check("synthesis: [Local] Ответ готов logged", any("[Local] Ответ готов" in l for l in logged_s))
+    check("synthesis: [Blind] logged", any(l.startswith("[Blind]") for l in logged_s))
+    check("synthesis: [Graph] logged", any(l.startswith("[Graph]") for l in logged_s))
+
+    # Refutation branch: query_frame carries refutation_queries -> scrape()
+    # called, refutation_snippets populated and returned, trace.add_source
+    # invoked, folded into the hypothesis graph text.
+    def _fake_scrape(wq_result, fetch_cache=None):
+        return SimpleNamespace(queries=wq_result.queries, snippets=[SimpleNamespace(url="http://ref.example", text="refutation text", content="refutation text")])
+
+    synthesis_mod.scrape = _fake_scrape
+
+    query_frame_r = {"refutation_queries": ["опровержение X"]}
+    cost_r = {}
+    logged_r = []
+    trace_r = make_trace()
+    result_r = build_frame_and_synthesize(
+        query_frame_r, make_epistemic_result(), False, False, "science",
+        fake_strategy_result, False, SimpleNamespace(), None, None,
+        "тестовый запрос", _FakeFuture(), _FakeExecutor(), "FAKE_FETCH_CACHE",
+        SimpleNamespace(), trace_r, cost_r, logged_r.append, True,
+    )
+    refutation_snippets_r = result_r[3]
+    check("synthesis: refutation_queries present -> scrape() called, refutation_snippets populated", len(refutation_snippets_r) == 1)
+    check("synthesis: refutation snippet added to trace via add_source", len(trace_r.evidence) == 1 and trace_r.evidence[0].rejection_reason == "refutation")
+    check("synthesis: query_frame[refutation_snippets] mirrors the returned value", query_frame_r["refutation_snippets"] == refutation_snippets_r)
+
+    # Entity resolution: request._entity flows into both the return value
+    # and query_frame["entity"].
+    query_frame_e = {}
+    result_e = build_frame_and_synthesize(
+        query_frame_e, make_epistemic_result(), False, False, "science",
+        fake_strategy_result, False, SimpleNamespace(_entity={"title": "Film"}), None, None,
+        "тестовый запрос", _FakeFuture(), _FakeExecutor(), None,
+        SimpleNamespace(), make_trace(), {}, lambda m: None, False,
+    )
+    entity_e = result_e[4]
+    check("synthesis: request._entity flows into the returned entity", entity_e == {"title": "Film"})
+    check("synthesis: entity also written into query_frame[entity]", query_frame_e.get("entity") == {"title": "Film"})
+
+    # synthesize() TimeoutError -> synthesis_timed_out=True, result=None,
+    # reasoning_info={} (matches the original inline except TimeoutError).
+    def _raise_timeout(*a, **kw):
+        raise TimeoutError("synthesize timeout (test)")
+
+    synthesis_mod.synthesize = _raise_timeout
+    result_t = build_frame_and_synthesize(
+        {}, make_epistemic_result(), False, False, "science",
+        fake_strategy_result, False, SimpleNamespace(), None, None,
+        "тестовый запрос", _FakeFuture(), _FakeExecutor(), None,
+        SimpleNamespace(), make_trace(), {}, lambda m: None, False,
+    )
+    check("synthesis: synthesize() TimeoutError -> synthesis_timed_out=True", result_t[2] is True)
+    check("synthesis: synthesize() TimeoutError -> synthesis_result=None", result_t[0] is None)
+    check("synthesis: synthesize() TimeoutError -> reasoning_info={}", result_t[1] == {})
+
+finally:
+    synthesis_mod.build_hypothesis_graph = _orig_build_graph
+    synthesis_mod.synthesize = _orig_synthesize
+    synthesis_mod.classify_sources = _orig_classify_sources
+    synthesis_mod.extract_main_claim = _orig_extract_main_claim
+    synthesis_mod.is_relevant = _orig_is_relevant
+    synthesis_mod.scrape = _orig_scrape
 
 
 print()
