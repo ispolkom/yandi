@@ -17,44 +17,46 @@ of running the logic inline. There is one implementation per block, never two.
 
 ```
 ORCHESTRATOR MODULARIZATION STATUS: PARTIAL
-LEGACY orchestrator_v2.py:           PRIMARY (still owns process(), the CLI, and ~85% of pipeline logic)
-BEHAVIORAL EQUIVALENCE:              CONFIRMED (13/13 pre-existing regression suites green after every commit; 48/48 new equivalence checks green)
-READY FOR EPISTEMIC ARCHITECTURE WORK: PARTIALLY (boundaries exist for epistemic/*, more extraction needed before it's comfortable)
+LEGACY orchestrator_v2.py:           PRIMARY (still owns process(), the CLI, and ~80% of pipeline logic)
+BEHAVIORAL EQUIVALENCE:              CONFIRMED (14/14 regression suites green after every commit; 83/83 modularization equivalence checks green)
+READY FOR EPISTEMIC ARCHITECTURE WORK: PARTIALLY (boundaries exist for epistemic/* and most of claims/*; [8] synthesis/frame-construction and [10] write-back still monolithic)
 ```
 
 ## MILESTONE 1 — package skeleton + first low-risk extractions
 
 **Result: DONE.**
 
-- `agent/orchestrator/` created with `epistemic/`, `runtime/`, `response/`,
-  `claims/` subpackages (no `registry/` subpackage yet — nothing extracted
-  into it so far; not created empty per the "no files just to match a
-  template" rule).
-- 7 blocks extracted (see MOVED COMPONENTS below).
-- `orchestrator_v2.py`: 5620 → 4660 lines (−960, −17.1%).
-- `agent/orchestrator/`: 1198 lines across 12 files.
-- All 13 pre-existing regression suites green before and after every single
-  commit (never batched — one extraction, one full regression run, one
-  commit).
-- New `agent/orchestrator_modularization_regression_test.py`: 48 deterministic
-  checks pinning the extracted units' behavior (see EQUIVALENCE STATUS below
-  for why this is a behavioral pin, not an old-vs-new branch comparison).
+## MILESTONE 2 — claims/* lifecycle (identity → validation → mapping)
+
+**Result: DONE.** `_run_claim_evidence_batch` de-closured (was the audit's
+flagged P1 prerequisite — it closed over `process()`'s `log`/`verbose`,
+called from 2 sites) and extracted as an explicit-dependency function.
+
+- 9 blocks extracted total (see MOVED COMPONENTS below).
+- `orchestrator_v2.py`: 5620 → 4302 lines (−1318, −23.4%).
+- `agent/orchestrator/`: 1639 lines across 14 files.
+- All 14 regression suites (13 pre-existing + the modularization equivalence
+  suite) green before and after every single commit (never batched — one
+  extraction, one full regression run, one commit).
+- `agent/orchestrator_modularization_regression_test.py`: 83 deterministic
+  checks (see EQUIVALENCE STATUS below for methodology).
 - No duplicate implementations introduced.
-- Live sanity check (`python3 agent/orchestrator_v2.py "какая масса у планеты
-  Юпитер" --web -v`) ran the full pipeline end-to-end through 6 of the 7
-  extracted modules (existence contract, final coverage, profiling, trust
-  gate, response assembly, claim status) and returned a normal response
-  (Trust: WEAKLY_SUPPORTED, 180s latency, sources cited).
+- Two live sanity runs with `--web -v`: one covering existence contract/
+  final coverage/profiling/trust gate/response assembly/claim status
+  (Trust: WEAKLY_SUPPORTED, 180s), one specifically exercising the
+  de-closured PASS1/PASS2 batch NLI (`[Claim Evidence Batch PASS1]
+  claims=8 pairs=7 relations=7`, `[Claim Evidence Batch PASS2] claims=8
+  pairs=15 relations=15`, Trust: UNVERIFIED, 357s) — both completed
+  normally end-to-end.
 - `git status` clean after each commit.
 
 ## CURRENT LEGACY STRUCTURE
 
 ```
-agent/orchestrator_v2.py (4660 lines)
-    lines 1-568   top-level helpers (mostly pure; a few still to extract)
-    lines ~570-750  process() body starts around here (was 843 pre-extraction)
-    process()     still one unbroken function, ~3800 lines
-                  (was 4703 lines / 84% of the file before this milestone)
+agent/orchestrator_v2.py (4302 lines)
+    lines 1-~520  top-level helpers (mostly pure; a few still to extract)
+    process()     still one unbroken function, ~3700 lines
+                  (was 4703 lines / 84% of the file before milestone 1)
     interactive() + CLI entrypoint (untouched, P3 per the migration brief)
 ```
 
@@ -69,15 +71,19 @@ agent/orchestrator/
                              modules are proven out)
     pre_pipeline.py         (not yet created — P1/P2 candidate)
     discovery.py            (not yet created — P2 candidate)
-    synthesis.py             (not yet created — P1/P2 candidate)
+    synthesis.py             (not yet created — P1/P2 candidate: frame
+                             construction, evidence-pool-adjacent steps,
+                             the synthesize() call itself)
     claims/
         __init__.py
-        status.py           ✅ DONE (this milestone)
-        validation.py       ✅ DONE (this milestone)
-        lifecycle.py        (not yet created — P1)
-        mapping.py          (not yet created — P1, needs _run_claim_evidence_batch de-closured first)
-        retrieval.py        (not yet created — P2, thin wrapper over claim_evidence_retriever.py)
-        disagreement.py     (not yet created — P2/P3, large, self-contained)
+        status.py           ✅ DONE (milestone 1)
+        validation.py       ✅ DONE (milestone 1)
+        lifecycle.py        ✅ DONE (milestone 2)
+        mapping.py          ✅ DONE (milestone 2 — de-closured run_claim_evidence_batch)
+        retrieval.py        (not yet created — P2, thin wrapper over claim_evidence_retriever.py;
+                             owns the Claim Resolution Gate + PASS2 retrieval, which currently
+                             sits between the two run_claim_evidence_batch call sites)
+        disagreement.py     (not yet created — P2/P3, large, self-contained, own raw HTTP session)
     epistemic/
         __init__.py
         existence_contract.py  ✅ DONE
@@ -98,7 +104,7 @@ agent/orchestrator/
         assembly.py          ✅ DONE
 ```
 
-## MOVED COMPONENTS (this milestone, in commit order)
+## MOVED COMPONENTS (in commit order)
 
 | # | Commit | Extracted | From (orig. lines, pre-migration) | To |
 |---|---|---|---|---|
@@ -109,12 +115,17 @@ agent/orchestrator/
 | 5 | `1cf3fa7` | `build_self_answer`, `_generate_character_response`, `_generate_apology_response`, `_adapt_answer_to_style`, `_generate_vulgar_response` (dead, moved with siblings) | 618-773 | `agent/orchestrator/response/assembly.py` |
 | 6 | `f37be5f` | Claim epistemic status classification (`---- CLAIM EPISTEMIC STATUS ----` block) | 3267-3476 | `agent/orchestrator/claims/status.py` |
 | 7 | `0cbf172` | Structural claim validation (`STRUCTURAL CLAIM VALIDATION` block) | 2543-2648 | `agent/orchestrator/claims/validation.py` |
+| 8 | `b94ed9f` | Claim & evidence lifecycle setup (CANONICAL EVIDENCE POOL + claim normalization + CLAIM IDENTITY + CLAIM QUERY CONTEXT) | 2409-2542 | `agent/orchestrator/claims/lifecycle.py` |
+| 9 | `7926f2e` | `_run_claim_evidence_batch` de-closured (PASS1/PASS2 batch NLI) | 2526-2764 (nested closure) | `agent/orchestrator/claims/mapping.py` |
 
 Each row was verified against the pre-move source with an exact whitespace-
 normalized diff before the call site was rewired (see each commit body for
 the specific diff notes — e.g. free-variable renames like `_belief_manager`
-→ `belief_manager` parameter, or module-level constant hoisting for
-`HARD_BLOCKED_SOURCE_CLASSES`/`DIRECTNESS_SUPPORT_THRESHOLD`).
+→ `belief_manager` parameter, module-level constant hoisting for
+`HARD_BLOCKED_SOURCE_CLASSES`/`DIRECTNESS_SUPPORT_THRESHOLD`, or the full
+free-variable audit for `_run_claim_evidence_batch` — it captured exactly
+two names, `verbose` and `log`, everything else was already a module-level
+import re-imported identically in the new module).
 
 ## REMAINING COMPONENTS (still inline in `process()`)
 
@@ -126,12 +137,18 @@ highest risk first:
   reflection/dataset write-back (8+ ordered side-effecting calls in one
   try/except), trust banner selection, final `OrchestratorResponse` return.
   HIGH risk — dense side-effect ordering, forward-reads from earlier phases.
-- **`[8]` Synthesize + claim/evidence lifecycle** (~2500 lines): frame
-  construction, `synthesize()` call, evidence pool assembly, claim identity/
-  validation/mapping (pass1+pass2), claim retrieval, belief update,
-  claim↔answer linking, claim↔claim disagreement (own raw HTTP session).
-  Contains the still-closured `_run_claim_evidence_batch` (2 call sites,
-  must be de-closured before extraction — P1 prerequisite, not yet done).
+- **`[8]` Synthesize + frame construction** (~800 lines, upstream of the now-
+  extracted claims/* modules): refutation scan, hypothesis graph, local-
+  answer wait, blind analysis, source classification, the `synthesize()`
+  call itself. Not yet touched — candidate `synthesis.py`.
+- **Claim Resolution Gate + PASS2 retrieval** (~250 lines, between the two
+  `run_claim_evidence_batch` call sites): `retrieve_for_claims(...)` for
+  unresolved claims, re-run mapper. Candidate `claims/retrieval.py`.
+- **Claim↔claim disagreement** (~500 lines): embedding-prefilter + batch NLI
+  over claim pairs, own raw HTTP session to the embed endpoint. Candidate
+  `claims/disagreement.py` — self-contained but large.
+- **Belief update, claim↔answer linking, personality cycle** (~30 lines):
+  small, thin wrappers, easy P1/P2 candidates once picked up.
 - **Pre-pipeline** (~600 lines, 13 short-circuit early-return branches):
   scene/target/intent/self-query/entity/strategy/swear/criticism/boundary/
   song-social-reflection/context/early-gate. MEDIUM risk — each branch is
@@ -150,10 +167,14 @@ agent.orchestrator_v2
     → agent.orchestrator.response.assembly
     → agent.orchestrator.claims.status
     → agent.orchestrator.claims.validation
+    → agent.orchestrator.claims.lifecycle
+    → agent.orchestrator.claims.mapping
         (each of the above → existing domain modules only:
          agent.claim_evidence_retriever, agent.final_claim_coverage,
-         agent.orch_registry_search; no orchestrator.* module imports
-         another orchestrator.* module yet, and none import orchestrator_v2)
+         agent.orch_registry_search, agent.evidence_pool,
+         agent.claim_relation, agent.source_quality; no orchestrator.*
+         module imports another orchestrator.* module yet, and none
+         import orchestrator_v2)
 ```
 
 No circular imports found or introduced. Direction holds cleanly:
@@ -162,13 +183,13 @@ No circular imports found or introduced. Direction holds cleanly:
 
 ## GLOBAL/SINGLETON HANDLING
 
-No global/singleton ownership changed in this milestone. `_belief_manager`
-(V6 singleton, owned by `_init_v3()` in orchestrator_v2.py) is passed into
-`trust_gate.apply_epistemic_trust_adjustment()` and `claims/status.py`'s
-counting logic as an explicit parameter rather than read as a module global
-inside the new modules — this is the only structural change needed to make
-the extracted code independent of orchestrator_v2.py's module globals, and
-it does not change how many times any singleton is constructed or when.
+No global/singleton ownership changed. `_belief_manager` (V6 singleton,
+owned by `_init_v3()` in orchestrator_v2.py) is passed into
+`trust_gate.apply_epistemic_trust_adjustment()` as an explicit parameter
+rather than read as a module global inside the new modules — this is the
+only structural change needed to make the extracted code independent of
+orchestrator_v2.py's module globals, and it does not change how many times
+any singleton is constructed or when.
 
 ## EQUIVALENCE STATUS
 
@@ -176,26 +197,30 @@ it does not change how many times any singleton is constructed or when.
 code (single source of truth) rather than duplicating it, there is no
 separate "old" implementation left to diff against once a block is
 extracted — the old inline code is gone, replaced by a call into the new
-module. So equivalence is established two ways:
+module. So equivalence is established three ways:
 
 1. **At extraction time**: an exact whitespace-normalized diff between the
    pre-move inline source and the new module's function body, done before
    the call site is rewired (documented per-block in each commit message).
 2. **After extraction**: the full 13-suite pre-existing regression baseline,
    run end-to-end through `orchestrator_v2.py` (which now delegates to the
-   new modules), green before and after every commit — this is the
-   behavioral-equivalence proof for the system as a whole.
+   new modules), green before and after every commit.
 3. **Ongoing regression net**: `agent/orchestrator_modularization_regression_test.py`
-   (48 checks) pins each extracted unit's behavior going forward, so future
-   changes to `agent/orchestrator/*` get caught the same way the other 13
-   suites catch domain-module regressions.
+   (83 checks) pins each extracted unit's behavior going forward — including,
+   for `claims/mapping.py`, deterministic checks (via monkeypatched
+   `classify_claim_evidence_batch`/`evaluate_evidence_directness`) on
+   claim_id handling, evidence-id linking, relation counts, NLI field
+   mapping, PASS1/PASS2 batch_size and log-label threading, and unswallowed
+   exception propagation.
+4. **Live sanity checks**: real `--web -v` runs after milestone-level
+   changes, confirmed normal end-to-end completion with correct log-marker
+   shapes (not offline-mocked).
 
 ## NEXT EXTRACTION TARGET
 
-`claims/lifecycle.py` (claim identity assignment + evidence pool assembly,
-just upstream of validation) is the next similarly-bounded P1 candidate
-that doesn't require a prerequisite step. After that: de-closure
-`_run_claim_evidence_batch` (2 call sites already prove its needed
-signature: explicit `log`/`verbose` params instead of closing over
-`process()`'s locals) as a standalone step, then extract `claims/mapping.py`
-around it.
+`claims/retrieval.py`: the Claim Resolution Gate + PASS2 retrieval block
+sitting between the two `run_claim_evidence_batch` call sites
+(`retrieve_for_claims(...)` for unresolved claims + re-running the mapper) —
+thin wrapper over `agent.claim_evidence_retriever.py`, similarly bounded to
+`claims/validation.py`. After that: `synthesis.py` (frame construction
+through the `synthesize()` call) and `claims/disagreement.py`.
