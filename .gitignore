@@ -1,0 +1,19 @@
+proxy.txt
+
+# Rust build artifacts
+node/target/
+
+# Python
+**/__pycache__/
+*.pyc
+
+# Manual backup snapshots (use git history instead)
+*.bak_*
+*.backup
+*.backup[0-9]*
+
+# Local runtime/personal agent state (per README: not tracked)
+registry/
+
+# Local tool config (machine-specific, not project source)
+.claude/

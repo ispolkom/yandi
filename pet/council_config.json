@@ -1,0 +1,8 @@
+{
+  "claude_web_url": "https://claude.ai/",
+  "gpt_web_url": "https://chatgpt.com/",
+  "deepseek_url": "https://chat.deepseek.com/",
+  "kimi_url": "https://www.kimi.com/",
+  "qwen_url": "https://chat.qwen.ai/",
+  "proxy": "193.41.87.47:8000:tDs9NR:wUeN4g"
+}

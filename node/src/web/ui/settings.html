@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Настройки - YANDI</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="/chat.css">
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <h1 class="logo"><img src="/media/logo.png" alt="YANDI" style="height:42px;width:auto;display:block;"></h1>
+                <nav class="nav">
+                    <a href="/" class="nav-link">Главная</a>
+                    <a href="/chat" class="nav-link">Чат</a>
+                    <a href="/groups" class="nav-link">Группы</a>
+                    <a href="/gateways" class="nav-link">Шлюзы</a>
+                    <a href="/relay" class="nav-link">Relay</a>
+                    <a href="/settings" class="nav-link active">Настройки</a>
+                </nav>
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <button id="langToggle" class="btn btn-sm btn-secondary">🌐 EN / RU</button>
+                    <button id="soundToggle" class="btn btn-sm btn-secondary">🔔</button>
+                    <button class="mobile-menu-btn" id="mobileMenuBtn"><span></span><span></span><span></span></button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="container">
+            <div class="page-header">
+                <h2>⚙️ Настройки</h2>
+            </div>
+
+            <div class="settings-container">
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">Режим работы ноды</h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="p2pEnabled" checked>
+                                <span>Включить P2P (связь)</span>
+                            </label>
+                            <p class="form-help">Разрешить P2P соединения для чата, звонков и передачи файлов</p>
+                        </div>
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="gatewayEnabled" checked>
+                                <span>Включить Gateway (шлюз для других)</span>
+                            </label>
+                            <p class="form-help">Позволить другим нодам использовать эту ноду как gateway для интернета</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">Настройки шлюза</h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="autoStartGateway" checked>
+                                <span>Автозапуск по запросу</span>
+                            </label>
+                            <p class="form-help">Автоматически запускать gateway когда клиент подключается</p>
+                        </div>
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="multiPortEnabled">
+                                <span>Мульти-порт (10000-10010)</span>
+                            </label>
+                            <p class="form-help">Выделять отдельный порт для каждого клиента (до 11 клиентов)</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="maxClients">Максимум клиентов</label>
+                            <input type="number" id="maxClients" class="form-input" value="11" min="1" max="100">
+                            <p class="form-help">Максимальное количество одновременно подключённых клиентов</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">Сеть</h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="form-group">
+                            <label for="discoveryPort">Discovery порт</label>
+                            <input type="number" id="discoveryPort" class="form-input" value="9000" min="1024" max="65535">
+                            <p class="form-help">Порт для обнаружения пиров (Hello packets)</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="dataPort">Data порт</label>
+                            <input type="number" id="dataPort" class="form-input" value="10000" min="1024" max="65535">
+                            <p class="form-help">Порт для передачи данных между нодами (зашифрованные wagons)</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="mobileGatewayPort">Mobile Gateway порт</label>
+                            <input type="number" id="mobileGatewayPort" class="form-input" value="9111" min="1024" max="65535">
+                            <p class="form-help">Порт для подключения мобильных клиентов (Мобильный → Шлюз → Интернет)</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="mobileP2PPort">Mobile P2P порт</label>
+                            <input type="number" id="mobileP2PPort" class="form-input" value="9112" min="1024" max="65535">
+                            <p class="form-help">Порт для P2P связи между мобильными клиентами (Мобильный ↔ Мобильный)</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="httpProxyPort">HTTP Proxy порт</label>
+                            <input type="number" id="httpProxyPort" class="form-input" value="8080" min="1024" max="65535">
+                            <p class="form-help">Порт для HTTP прокси (настраивается в браузере)</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="webUIPort">Web UI порт</label>
+                            <input type="number" id="webUIPort" class="form-input" value="9999" min="1024" max="65535">
+                            <p class="form-help">Порт для веб-интерфейса (требуется перезапуск)</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-actions">
+                    <button class="btn btn-secondary" id="resetBtn">🔄 Сбросить</button>
+                    <button class="btn btn-primary btn-large" id="saveSettingsBtn">💾 Сохранить настройки</button>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="footer">
+        <div class="container">
+            <p>YANDI v2.0 | P2P VPN Network<br><small>Powered by Mudriy Gudwin &amp; AI</small></p>
+        </div>
+    </footer>
+    <script>
+        function escapeHTML(str) {
+            if (!str) return '';
+            return str.replace(/[&<>]/g, function(m) {
+                if (m === '&') return '&amp;';
+                if (m === '<') return '&lt;';
+                if (m === '>') return '&gt;';
+                return m;
+            });
+        }
+
+        function showModal(title, message, onConfirm, onCancel, confirmText, cancelText) {
+            confirmText = confirmText || 'OK';
+            cancelText = cancelText || 'Отмена';
+            
+            const existingModal = document.querySelector('.custom-modal');
+            if (existingModal) existingModal.remove();
+            
+            const modal = document.createElement('div');
+            modal.className = 'custom-modal active';
+            modal.innerHTML = `
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>${escapeHTML(title)}</h3>
+                        <button class="modal-close" onclick="this.closest('.custom-modal').remove()">✖</button>
+                    </div>
+                    <div class="modal-body">
+                        <p>${escapeHTML(message)}</p>
+                        <div class="modal-actions">
+                            ${onConfirm ? `<button class="btn btn-primary" id="modalConfirmBtn">${escapeHTML(confirmText)}</button>` : ''}
+                            ${onCancel !== false ? `<button class="btn btn-secondary" id="modalCancelBtn">${escapeHTML(cancelText)}</button>` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            
+            if (onConfirm) {
+                modal.querySelector('#modalConfirmBtn')?.addEventListener('click', () => {
+                    modal.remove();
+                    onConfirm();
+                });
+            }
+            
+            const cancelBtn = modal.querySelector('#modalCancelBtn');
+            if (cancelBtn && onCancel !== false) {
+                cancelBtn.addEventListener('click', () => {
+                    modal.remove();
+                    if (onCancel) onCancel();
+                });
+            }
+            
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) modal.remove();
+            });
+        }
+
+        function showConfirm(title, message, onConfirm, onCancel) {
+            showModal(title, message, onConfirm, onCancel, 'Да', 'Нет');
+        }
+
+        function showAlert(title, message) {
+            showModal(title, message, null, false, 'OK', null);
+        }
+
+        window.originalAlert = window.alert;
+        window.originalConfirm = window.confirm;
+        
+        window.alert = function(message) {
+            console.log('📢 Overridden alert:', message);
+            showAlert('Уведомление', message);
+        };
+        
+        window.confirm = function(message) {
+            console.log('❓ Overridden confirm:', message);
+            showConfirm('Подтверждение', message, () => {}, () => {});
+            return true;
+        };
+
+        console.log('✅ Alert/Confirm overridden');
+    </script>
+    
+    <script src="/app.js"></script>
+    
+    <script>
+        // === Логика настроек ===
+        async function loadSettings() {
+            try {
+                const response = await fetch('/api/settings');
+                if (response.ok) {
+                    const settings = await response.json();
+                    document.getElementById('p2pEnabled').checked = settings.node_mode?.p2p_enabled ?? true;
+                    document.getElementById('gatewayEnabled').checked = settings.node_mode?.gateway_enabled ?? true;
+                    document.getElementById('autoStartGateway').checked = settings.gateway?.auto_start ?? true;
+                    document.getElementById('multiPortEnabled').checked = settings.gateway?.multi_port ?? false;
+                    document.getElementById('maxClients').value = settings.gateway?.max_clients ?? 11;
+                    document.getElementById('discoveryPort').value = settings.network?.discovery_port ?? 9000;
+                    document.getElementById('dataPort').value = settings.network?.data_port ?? 10000;
+                    document.getElementById('mobileGatewayPort').value = settings.network?.mobile_gateway ?? 9111;
+                    document.getElementById('mobileP2PPort').value = settings.network?.mobile_p2p ?? 9112;
+                    document.getElementById('httpProxyPort').value = settings.network?.http_proxy ?? 8080;
+                    document.getElementById('webUIPort').value = settings.network?.web_ui ?? 9999;
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        async function saveSettings() {
+            const settings = {
+                node_mode: {
+                    p2p_enabled: document.getElementById('p2pEnabled').checked,
+                    gateway_enabled: document.getElementById('gatewayEnabled').checked
+                },
+                gateway: {
+                    auto_start: document.getElementById('autoStartGateway').checked,
+                    multi_port: document.getElementById('multiPortEnabled').checked,
+                    max_clients: parseInt(document.getElementById('maxClients').value)
+                },
+                network: {
+                    discovery_port: parseInt(document.getElementById('discoveryPort').value),
+                    data_port: parseInt(document.getElementById('dataPort').value),
+                    mobile_gateway: parseInt(document.getElementById('mobileGatewayPort').value),
+                    mobile_p2p: parseInt(document.getElementById('mobileP2PPort').value),
+                    http_proxy: parseInt(document.getElementById('httpProxyPort').value),
+                    web_ui: parseInt(document.getElementById('webUIPort').value)
+                }
+            };
+            
+            try {
+                const response = await fetch('/api/settings', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(settings)
+                });
+                if (response.ok) {
+                    const result = await response.json();
+                    showAlert('✅ Успешно', result.requires_restart ? 'Настройки сохранены. Перезапустите ноду для применения портов.' : 'Настройки сохранены');
+                } else {
+                    showAlert('❌ Ошибка', 'Не удалось сохранить настройки');
+                }
+            } catch(e) {
+                showAlert('❌ Ошибка', e.message);
+            }
+        }
+
+        function resetSettings() {
+            showConfirm('🔄 Сброс настроек', 'Сбросить настройки к значениям по умолчанию?', () => {
+                document.getElementById('p2pEnabled').checked = true;
+                document.getElementById('gatewayEnabled').checked = true;
+                document.getElementById('autoStartGateway').checked = true;
+                document.getElementById('multiPortEnabled').checked = false;
+                document.getElementById('maxClients').value = 11;
+                document.getElementById('discoveryPort').value = 9000;
+                document.getElementById('dataPort').value = 10000;
+                document.getElementById('mobileGatewayPort').value = 9111;
+                document.getElementById('mobileP2PPort').value = 9112;
+                document.getElementById('httpProxyPort').value = 8080;
+                document.getElementById('webUIPort').value = 9999;
+                showAlert('✅ Успешно', 'Настройки сброшены');
+            });
+        }
+
+        document.getElementById('saveSettingsBtn')?.addEventListener('click', saveSettings);
+        document.getElementById('resetBtn')?.addEventListener('click', resetSettings);
+
+        document.addEventListener('DOMContentLoaded', () => {
+            loadSettings();
+            
+            const langToggle = document.getElementById('langToggle');
+            if (langToggle) {
+                langToggle.onclick = () => {
+                    const newLang = currentLang === 'ru' ? 'en' : 'ru';
+                    if (window.setLanguage) window.setLanguage(newLang);
+                    else location.reload();
+                };
+            }
+        });
+    </script>
+</body>
+</html>

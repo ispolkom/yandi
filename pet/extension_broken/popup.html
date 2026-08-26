@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 320px; background: #0f1117; color: #e8e8e8;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 13px;
+  }
+  .header {
+    padding: 14px 16px; background: #1a1d2e;
+    border-bottom: 1px solid #2a2d3a;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .logo { color: #7c8cf8; font-size: 20px; }
+  .title { font-weight: 700; font-size: 15px; color: #e8e8e8; }
+  .subtitle { font-size: 11px; color: #666; margin-top: 2px; }
+  .section { padding: 12px 16px; border-bottom: 1px solid #1a1d2e; }
+  .label { color: #666; font-size: 11px; text-transform: uppercase;
+           letter-spacing: 0.5px; margin-bottom: 8px; }
+  .model { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dot.on { background: #4ade80; }
+  .dot.off { background: #374151; }
+  .model-name { color: #ccc; }
+  .last-seen { color: #555; font-size: 11px; margin-left: auto; }
+  textarea {
+    width: 100%; background: #1a1d2e; border: 1px solid #2a2d3a;
+    border-radius: 8px; color: #e8e8e8; font-size: 13px;
+    padding: 8px 10px; resize: vertical; min-height: 60px;
+    font-family: inherit; outline: none;
+  }
+  textarea:focus { border-color: #7c8cf8; }
+  .ask-btn {
+    width: 100%; margin-top: 8px; padding: 8px;
+    background: #7c8cf8; color: #fff; border: none;
+    border-radius: 8px; font-size: 13px; cursor: pointer;
+    font-weight: 600;
+  }
+  .ask-btn:hover { background: #6b7cf0; }
+  .ask-btn:disabled { background: #374151; cursor: default; }
+  .tip {
+    padding: 10px 16px; color: #555; font-size: 11px; line-height: 1.5;
+  }
+  .open-link {
+    display: block; padding: 10px 16px; color: #7c8cf8;
+    font-size: 12px; text-decoration: none;
+  }
+  .open-link:hover { color: #a5b4fc; }
+  #result {
+    padding: 12px 16px; display: none;
+    border-top: 1px solid #1a1d2e;
+  }
+  .trust-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600; margin-bottom: 6px;
+  }
+  .answer-text { color: #e0e0e0; line-height: 1.5; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <span class="logo">⬡</span>
+  <div>
+    <div class="title">YANDI</div>
+    <div class="subtitle">Verified AI · Private · Local</div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">Council Status</div>
+  <div id="models-list">
+    <div style="color:#555; font-size:12px;">Checking…</div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">Quick Ask</div>
+  <textarea id="query" placeholder="Ask anything…"></textarea>
+  <button class="ask-btn" id="ask-btn">Ask YANDI</button>
+</div>
+
+<div id="result">
+  <div class="label">Answer</div>
+  <div id="trust-badge"></div>
+  <div class="answer-text" id="answer-text"></div>
+</div>
+
+<div class="tip">
+  💡 Select any text on a webpage, right-click → <strong>Verify with YANDI</strong>
+</div>
+
+<a class="open-link" href="http://127.0.0.1:9010" target="_blank">
+  Open YANDI Dashboard →
+</a>
+
+<script src="popup.js"></script>
+</body>
+</html>
