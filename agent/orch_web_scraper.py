@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import concurrent.futures
 import re
+import threading
 import time
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 from typing import Optional, List, Dict, Any
 
 import requests as _requests
@@ -45,6 +46,125 @@ _session.trust_env = False
 # Proxy используется только для retry queue.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROXY_FILE = PROJECT_ROOT / "proxy.txt"
+
+
+# ------------------------------------------------------------
+# SHARED FETCH CACHE (P0, performance architecture pass)
+# ------------------------------------------------------------
+#
+# FUNDAMENTAL INVARIANT: computation may be shared, epistemic
+# ownership must not be shared implicitly. This cache stores ONLY the
+# raw physical fetch result (HTTP GET + HTML text extraction + title)
+# — never a per-claim/per-query decision. Confirmed by reading every
+# call site in this file: _fetch_url()/_fetch_url_proxy() are ALWAYS
+# invoked with query="" here (their query-keyword relevance branch is
+# dead code on this path), so caching their whole return value carries
+# no risk of leaking one claim's relevance judgement into another's.
+# Each claim still independently runs directness/NLI/eligibility
+# against this same shared raw content downstream — this cache never
+# decides supports/contradicts/eligible, only "don't re-download".
+#
+# Request-scoped: one instance is meant to live for the duration of
+# one retrieve_for_claims() call (one user query), not persisted
+# across queries or users. Thread-safe in-flight dedup (not just a
+# plain dict) — with claim workers running in a ThreadPoolExecutor,
+# two threads can race to fetch the same URL at nearly the same
+# instant; a plain dict would let both through.
+class SharedFetchCache:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._results: Dict[str, tuple] = {}
+        self._events: Dict[str, threading.Event] = {}
+        self.requests = 0
+        self.hits = 0
+        self.inflight_waits = 0
+        self.network_fetches = 0
+
+    @staticmethod
+    def canonicalize(url: str) -> str:
+        """
+        Minimal, conservative canonicalization: lowercase scheme/host,
+        drop the fragment. Deliberately does NOT strip or reorder query
+        params — the task's own instruction warns that a query string
+        (e.g. Nature's ?error=cookies_not_supported&code=...) may or
+        may not indicate the same content; blind stripping is unproven
+        and not done here.
+        """
+        try:
+            parsed = urlsplit(url)
+            return urlunsplit((
+                parsed.scheme.lower(),
+                parsed.netloc.lower(),
+                parsed.path,
+                parsed.query,
+                "",
+            ))
+        except Exception:
+            return url
+
+    def get_or_fetch(self, url: str, transport: str, fetch_fn):
+        """
+        fetch_fn: callable(url) -> (result, reason). Called AT MOST
+        ONCE per (transport, canonical_url) for this cache instance's
+        lifetime — transport is part of the key because direct and
+        proxy fetches of the same URL can legitimately have different
+        outcomes (e.g. direct blocked by Cloudflare, proxy succeeds).
+        """
+        key = f"{transport}:{self.canonicalize(url)}"
+
+        with self._lock:
+            self.requests += 1
+
+            if key in self._results:
+                self.hits += 1
+                return self._results[key]
+
+            existing_event = self._events.get(key)
+
+            if existing_event is None:
+                event = threading.Event()
+                self._events[key] = event
+                is_owner = True
+            else:
+                event = existing_event
+                is_owner = False
+
+        if not is_owner:
+            self.inflight_waits += 1
+            event.wait(timeout=FETCH_TIMEOUT + 10)
+
+            with self._lock:
+                if key in self._results:
+                    self.hits += 1
+                    return self._results[key]
+            # Owner never populated a result (crashed before the
+            # finally block below, which should not happen, but this
+            # is the safe fallback) -- fetch it ourselves rather than
+            # return nothing.
+
+        try:
+            self.network_fetches += 1
+            result = fetch_fn(url)
+        finally:
+            with self._lock:
+                self._results[key] = result
+                event.set()
+
+        return result
+
+    def summary(self) -> Dict[str, Any]:
+        saved = self.hits
+        total = self.requests
+
+        return {
+            "requests": total,
+            "unique": self.network_fetches,
+            "hits": self.hits,
+            "inflight_waits": self.inflight_waits,
+            "network_fetches": self.network_fetches,
+            "saved": saved,
+            "hit_ratio": (saved / total) if total else 0.0,
+        }
 
 
 def _load_proxy_url() -> Optional[str]:
@@ -561,9 +681,20 @@ def scrape(
     web_query: WebQueryResult,
     max_results: int = MAX_RESULTS,
     domain_diversity: bool = True,
+    fetch_cache: "Optional[SharedFetchCache]" = None,
 ) -> WebScrapeResult:
     if not web_query or not web_query.queries:
         return WebScrapeResult(snippets=[], total_chars=0, urls=[])
+
+    # P0 (performance architecture pass): fetch_cache is request-scoped
+    # and shared ACROSS claims by the caller (retrieve_for_claims) when
+    # provided, so a URL discovered independently by two different
+    # claims' searches is only physically downloaded once. When no
+    # cache is passed in (other callers of scrape() not part of that
+    # flow), a fresh one-off instance still dedupes duplicate URLs
+    # within this single call — same code path either way.
+    if fetch_cache is None:
+        fetch_cache = SharedFetchCache()
     
     # 1. Собираем URL через DuckDuckGo
     all_urls = []
@@ -722,7 +853,12 @@ def scrape(
     )
 
     futures = {
-        executor.submit(_fetch_url, url, ""): url
+        executor.submit(
+            fetch_cache.get_or_fetch,
+            url,
+            "direct",
+            lambda u: _fetch_url(u, ""),
+        ): url
         for url in urls
     }
 
@@ -872,9 +1008,10 @@ def scrape(
 
             proxy_futures = {
                 proxy_executor.submit(
-                    _fetch_url_proxy,
+                    fetch_cache.get_or_fetch,
                     url,
-                    "",
+                    "proxy",
+                    lambda u: _fetch_url_proxy(u, ""),
                 ): url
                 for url in proxy_retry_urls
             }
@@ -1181,7 +1318,20 @@ def scrape(
     )
     setattr(result, "_rejected", rejected)
     setattr(result, "_total_found", len(urls) + rejected_count)
-    
+
+    # Cumulative snapshot of the (possibly cross-claim-shared) cache
+    # as of THIS call finishing — the caller that owns the shared
+    # instance (retrieve_for_claims) prints the final aggregate once
+    # after all claim workers complete; this one is intentionally
+    # per-call for live progress visibility, not the summary metric.
+    fc = fetch_cache.summary()
+    print(
+        f"[Shared Fetch Cache] (running) "
+        f"requests={fc['requests']} "
+        f"network_fetches={fc['network_fetches']} "
+        f"saved={fc['saved']}"
+    )
+
     return result
 
 

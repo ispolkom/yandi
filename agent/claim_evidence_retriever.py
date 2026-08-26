@@ -34,7 +34,7 @@ from typing import Any, Dict, List
 
 from agent.orch_schemas import WebQueryResult
 from agent.orch_web_query import _call_ollama
-from agent.orch_web_scraper import scrape
+from agent.orch_web_scraper import scrape, SharedFetchCache
 from agent.source_quality import evaluate_source_quality
 from agent.claim_relation import (
     is_relevant,
@@ -392,6 +392,7 @@ def _snippet_text(snippet: Any) -> str:
 
 def retrieve_claim_evidence(
     claim: Dict[str, Any],
+    fetch_cache: "SharedFetchCache | None" = None,
 ) -> List[Dict[str, Any]]:
     """
     Выполнить evidence retrieval для одного accepted claim.
@@ -400,6 +401,13 @@ def retrieve_claim_evidence(
 
     НИКАКИХ derived_from_evidence_ids здесь не создаётся.
     НИКАКИХ relations здесь не создаётся.
+
+    fetch_cache: request-scoped, передаётся от retrieve_for_claims()
+    и разделяется МЕЖДУ claims в рамках одного запроса пользователя —
+    чтобы один и тот же URL, независимо найденный разными claims, не
+    скачивался физически дважды. Это НЕ меняет evidence ownership:
+    каждый claim по-прежнему получает СВОЮ evidence-запись с
+    retrieval_claim_id=этот claim — см. SharedFetchCache docstring.
     """
 
     claim_text = (
@@ -521,6 +529,7 @@ def retrieve_claim_evidence(
             #
             # И только затем можно ограничивать финальный набор.
             domain_diversity=False,
+            fetch_cache=fetch_cache,
         )
     except Exception as exc:
         print(
@@ -1474,6 +1483,15 @@ def retrieve_for_claims(
 
     retrieval_started = time.time()
 
+    # P0 (performance architecture pass): ONE fetch cache shared
+    # across ALL claim workers for this call — a URL discovered
+    # independently by two different claims' search queries gets
+    # physically fetched only once. Request-scoped: created fresh
+    # here, per retrieve_for_claims() call, never persisted across
+    # separate user queries. See SharedFetchCache docstring for the
+    # epistemic-ownership invariant this preserves.
+    shared_fetch_cache = SharedFetchCache()
+
     def _retrieve_one(claim, submitted_at):
         claim_id = claim.get(
             "claim_id",
@@ -1497,7 +1515,7 @@ def retrieve_for_claims(
         )
 
         try:
-            records = retrieve_claim_evidence(claim)
+            records = retrieve_claim_evidence(claim, fetch_cache=shared_fetch_cache)
             error = None
         except Exception as exc:
             records = []
@@ -1666,6 +1684,18 @@ def retrieve_for_claims(
         f"effective_parallelism={_effective_parallelism:.2f} "
         f"queue_wait_sum={sum(per_claim_queue_waits):.2f}s "
         f"queue_wait_max={max(per_claim_queue_waits, default=0.0):.2f}s"
+    )
+
+    _fc = shared_fetch_cache.summary()
+    print(
+        f"[Shared Fetch Cache] "
+        f"requests={_fc['requests']} "
+        f"unique={_fc['unique']} "
+        f"hits={_fc['hits']} "
+        f"inflight_waits={_fc['inflight_waits']} "
+        f"network_fetches={_fc['network_fetches']} "
+        f"saved={_fc['saved']} "
+        f"hit_ratio={_fc['hit_ratio']:.2f}"
     )
 
     direct_count = sum(
