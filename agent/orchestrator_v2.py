@@ -41,7 +41,6 @@ from agent.orch_reputation import add_decision_event, get_trace, get_ledger
 from agent.orch_tag_tree import update_tree as tag_tree_update
 from agent.orch_unanswered import record_unanswered, start_listener_daemon as _start_unanswered_listener
 
-from agent.claim_evidence_mapper import map_claims_to_evidence, get_claim_grounding_score
 from agent.orchestrator.epistemic.existence_contract import apply_existence_query_contract
 from agent.orchestrator.epistemic.final_coverage import evaluate_and_record_final_coverage
 from agent.orchestrator.epistemic.trust_gate import (
@@ -54,13 +53,14 @@ from agent.orchestrator.response.assembly import (
 from agent.orchestrator.claims.status import (
     classify_claim_epistemic_status,
     evaluate_claim_status_gate,
+    finalize_claim_trace_and_grounding,
 )
 from agent.orchestrator.claims.validation import apply_structural_claim_validation
 from agent.orchestrator.claims.lifecycle import (
     setup_claim_and_evidence_lifecycle,
     update_beliefs_link_answer_and_personality_cycle,
 )
-from agent.orchestrator.claims.mapping import run_claim_evidence_batch
+from agent.orchestrator.claims.mapping import run_claim_evidence_batch, run_claim_evidence_mapping_pass1
 from agent.orchestrator.claims.retrieval import apply_claim_resolution_and_second_retrieval
 from agent.orchestrator.claims.disagreement import apply_claim_claim_disagreement
 from agent.orchestrator.synthesis import build_frame_and_synthesize
@@ -427,90 +427,11 @@ def process(
             claims_data, _claim_validator, reasoning_info, trace, log, verbose
         )
 
-        # ============================================================
-        # EVIDENCE MAPPING
-        # ============================================================
-        #
-        # Mapper видит:
-        #
-        #   initial evidence
-        #       +
-        #   claim-specific evidence
-        #
-        # но сам решает semantic candidate links.
-        mapped_claims = map_claims_to_evidence(
-            claims_data,
-            evidence_data,
-        )
-
-        # ------------------------------------------------------------
-        # CLAIM <-> EVIDENCE SINGLE SOURCE OF TRUTH
-        # ------------------------------------------------------------
-        #
-        # map_claims_to_evidence() — единственный компонент,
-        # который имеет право назначать derived_from_evidence_ids.
-        #
-        # Важно вернуть результат mapping обратно в claims_data.
-        # Иначе trace видел бы правильные связи, а Validator,
-        # BeliefManager и Linker продолжали бы работать со старой
-        # версией claims.
-        # ------------------------------------------------------------
-
-        mapped_by_id = {
-            mc.claim_id: mc
-            for mc in mapped_claims
-            if getattr(mc, "claim_id", None)
-        }
-
-        for claim in claims_data:
-            claim_id = claim.get("claim_id")
-            mapped = mapped_by_id.get(claim_id)
-
-            if mapped is None:
-                # Если mapper не смог обработать claim,
-                # связь не выдумываем.
-                claim["derived_from_evidence_ids"] = []
-                claim["verification_status"] = "candidate"
-                continue
-
-            claim["derived_from_evidence_ids"] = list(
-                mapped.derived_from_evidence_ids or []
-            )
-
-            # candidate означает:
-            # evidence тематически привязан, но истинность claim
-            # ещё НЕ установлена.
-            claim["verification_status"] = (
-                mapped.verification_status or "candidate"
-            )
-
-        # ВАЖНО:
-        # mapped_claims здесь ещё имеют промежуточный status=candidate.
-        # В trace они будут записаны ПОСЛЕ Claim Evidence NLI
-        # и вычисления окончательного epistemic status.
-
-        semantic_grounding_score = get_claim_grounding_score(
-            mapped_claims
-        )
-
-        mapped_with_evidence = sum(
-            1
-            for mc in mapped_claims
-            if getattr(mc, "derived_from_evidence_ids", None)
-        )
-
-        total_candidate_links = sum(
-            len(getattr(mc, "derived_from_evidence_ids", None) or [])
-            for mc in mapped_claims
-        )
-
-        log(
-            f"[Evidence Mapper] "
-            f"claims={len(claims_data)}, "
-            f"processed={len(mapped_claims)}, "
-            f"linked_claims={mapped_with_evidence}, "
-            f"candidate_links={total_candidate_links}, "
-            f"semantic_grounding={semantic_grounding_score:.2f}"
+        # Evidence mapping PASS1 — extracted to
+        # agent/orchestrator/claims/mapping.py (structural extraction;
+        # behavior unchanged).
+        semantic_grounding_score = run_claim_evidence_mapping_pass1(
+            claims_data, evidence_data, log, verbose
         )
 
         # Structural validation уже выполнена ДО Mapper.
@@ -561,103 +482,11 @@ def process(
         # behavior unchanged).
         classify_claim_epistemic_status(claims_data, log, verbose)
 
-        # ============================================================
-        # FINAL CLAIM TRACE
-        # ============================================================
-        #
-        # Trace получает claim только ПОСЛЕ:
-        #
-        #   structural validation
-        #   semantic mapping
-        #   Claim ↔ Evidence NLI
-        #   Source Quality Gate
-        #   epistemic status calculation
-        #
-        # Поэтому trace больше не хранит устаревший candidate status
-        # вместо supported/contradicted/disputed/unverified.
-        traced_claim_ids = set()
-
-        for claim in claims_data:
-            claim_id = claim.get("claim_id")
-
-            if claim_id and claim_id in traced_claim_ids:
-                continue
-
-            trace.add_claim_raw(claim)
-
-            if claim_id:
-                traced_claim_ids.add(claim_id)
-
-        if verbose:
-            log(
-                f"[Claim Trace] final={len(claims_data)} "
-                f"rejected={len(rejected_structural_claims)}"
-            )
-
-        # ====================================================
-        # EPISTEMIC GROUNDING
-        # ====================================================
-        #
-        # В denominator не включаем structural rejected claims:
-        # они не являются содержательными claims ответа,
-        # пригодными для evidence-проверки.
-        #
-        # epistemic_grounding:
-        #   direct+eligible supports ИЛИ contradicts.
-        #
-        # support_grounding:
-        #   direct+eligible supports.
-        #
-        # ВАЖНО:
-        # высокий epistemic_grounding сам по себе НЕ повышает
-        # Trust. Evidence может полностью противоречить ответу.
-        effective_claims = [
-            claim
-            for claim in claims_data
-            if claim.get("verification_status") != "rejected"
-        ]
-
-        if effective_claims:
-            epistemically_grounded_claims = sum(
-                1
-                for claim in effective_claims
-                if (
-                    int(claim.get("support_count", 0) or 0) > 0
-                    or
-                    int(
-                        claim.get(
-                            "contradiction_count",
-                            0,
-                        ) or 0
-                    ) > 0
-                )
-            )
-
-            support_grounded_claims = sum(
-                1
-                for claim in effective_claims
-                if int(claim.get("support_count", 0) or 0) > 0
-            )
-
-            epistemic_grounding_score = (
-                epistemically_grounded_claims
-                / len(effective_claims)
-            )
-
-            support_grounding_score = (
-                support_grounded_claims
-                / len(effective_claims)
-            )
-
-        else:
-            epistemic_grounding_score = 0.0
-            support_grounding_score = 0.0
-
-        log(
-            "[Grounding] "
-            f"semantic={semantic_grounding_score:.2f} "
-            f"epistemic={epistemic_grounding_score:.2f} "
-            f"support={support_grounding_score:.2f}"
+        # Final claim trace + epistemic grounding — extracted to
+        # agent/orchestrator/claims/status.py (structural extraction;
+        # behavior unchanged).
+        epistemic_grounding_score, support_grounding_score = finalize_claim_trace_and_grounding(
+            claims_data, trace, rejected_structural_claims, semantic_grounding_score, log, verbose
         )
 
         # Belief update + claim<->answer linker + personality cycle —

@@ -24,7 +24,103 @@ Never mutates `evidence`. Returns the total relation count written.
 import time
 
 from agent.claim_relation import classify_claim_evidence_batch
+from agent.claim_evidence_mapper import map_claims_to_evidence, get_claim_grounding_score
 from agent.source_quality import evaluate_evidence_directness
+
+
+def run_claim_evidence_mapping_pass1(claims_data, evidence_data, log, verbose):
+    """
+    Evidence mapping PASS1 — extracted from agent/orchestrator_v2.py [8]
+    ("EVIDENCE MAPPING" block, immediately before the PASS1 NLI batch
+    call). Thin wrapper around agent.claim_evidence_mapper.map_claims_to_evidence
+    / get_claim_grounding_score — does not reimplement mapper logic.
+
+    Mapper видит initial evidence + claim-specific evidence, но сам решает
+    semantic candidate links. map_claims_to_evidence() — единственный
+    компонент, который имеет право назначать derived_from_evidence_ids;
+    важно вернуть результат mapping обратно в claims_data, иначе trace
+    видел бы правильные связи, а Validator/BeliefManager/Linker продолжали
+    бы работать со старой версией claims.
+
+    Mutates each claim in claims_data in place (derived_from_evidence_ids,
+    verification_status). Returns semantic_grounding_score.
+    """
+    mapped_claims = map_claims_to_evidence(
+        claims_data,
+        evidence_data,
+    )
+
+    # ------------------------------------------------------------
+    # CLAIM <-> EVIDENCE SINGLE SOURCE OF TRUTH
+    # ------------------------------------------------------------
+    #
+    # map_claims_to_evidence() — единственный компонент,
+    # который имеет право назначать derived_from_evidence_ids.
+    #
+    # Важно вернуть результат mapping обратно в claims_data.
+    # Иначе trace видел бы правильные связи, а Validator,
+    # BeliefManager и Linker продолжали бы работать со старой
+    # версией claims.
+    # ------------------------------------------------------------
+
+    mapped_by_id = {
+        mc.claim_id: mc
+        for mc in mapped_claims
+        if getattr(mc, "claim_id", None)
+    }
+
+    for claim in claims_data:
+        claim_id = claim.get("claim_id")
+        mapped = mapped_by_id.get(claim_id)
+
+        if mapped is None:
+            # Если mapper не смог обработать claim,
+            # связь не выдумываем.
+            claim["derived_from_evidence_ids"] = []
+            claim["verification_status"] = "candidate"
+            continue
+
+        claim["derived_from_evidence_ids"] = list(
+            mapped.derived_from_evidence_ids or []
+        )
+
+        # candidate означает:
+        # evidence тематически привязан, но истинность claim
+        # ещё НЕ установлена.
+        claim["verification_status"] = (
+            mapped.verification_status or "candidate"
+        )
+
+    # ВАЖНО:
+    # mapped_claims здесь ещё имеют промежуточный status=candidate.
+    # В trace они будут записаны ПОСЛЕ Claim Evidence NLI
+    # и вычисления окончательного epistemic status.
+
+    semantic_grounding_score = get_claim_grounding_score(
+        mapped_claims
+    )
+
+    mapped_with_evidence = sum(
+        1
+        for mc in mapped_claims
+        if getattr(mc, "derived_from_evidence_ids", None)
+    )
+
+    total_candidate_links = sum(
+        len(getattr(mc, "derived_from_evidence_ids", None) or [])
+        for mc in mapped_claims
+    )
+
+    log(
+        f"[Evidence Mapper] "
+        f"claims={len(claims_data)}, "
+        f"processed={len(mapped_claims)}, "
+        f"linked_claims={mapped_with_evidence}, "
+        f"candidate_links={total_candidate_links}, "
+        f"semantic_grounding={semantic_grounding_score:.2f}"
+    )
+
+    return semantic_grounding_score
 
 
 def run_claim_evidence_batch(claims, evidence, batch_label, log, verbose):
