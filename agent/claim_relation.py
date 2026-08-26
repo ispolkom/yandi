@@ -479,10 +479,20 @@ def infer_claim_relations_batch(
     """
     import json
     import os
+    import time
     import requests
 
     if not pairs:
         return []
+
+    # P0 (autonomous fix pass, final_claim_coverage NLI=125.57s
+    # investigation): per-batch-call timing so the aggregate cost can
+    # be attributed to generation vs parsing instead of staying one
+    # opaque number. Diagnostic only — does not change batching,
+    # thresholds, or the supports/contradicts/unrelated/uncertain
+    # semantics below.
+    _call_generation_ms: List[float] = []
+    _call_parse_ms: List[float] = []
 
     allowed = {
         ClaimRelation.SUPPORTS,
@@ -594,6 +604,8 @@ uncertain
             for item in batch
         }
 
+        _t0_generation = time.time()
+
         try:
             resp = session.post(
                 "http://127.0.0.1:11434/api/generate",
@@ -623,14 +635,20 @@ uncertain
                 "",
             ).strip()
 
+            _generation_ms = (time.time() - _t0_generation) * 1000
+            _call_generation_ms.append(_generation_ms)
+
             print(
                 f"[NLI Batch Response] "
                 f"chars={len(raw)} "
+                f"generation={_generation_ms:.0f}ms "
                 f"preview={raw[:1000]!r}"
                 + ("...(truncated)" if len(raw) > 1000 else "")
             )
 
+            _t0_parse = time.time()
             parsed = json.loads(raw)
+            _call_parse_ms.append((time.time() - _t0_parse) * 1000)
 
             returned = parsed.get(
                 "results",
@@ -719,6 +737,7 @@ uncertain
             # получим старые N последовательных LLM calls.
             #
             # Также fallback НЕ имеет права создавать contradiction.
+            _call_generation_ms.append((time.time() - _t0_generation) * 1000)
             error_text = str(e)[:200]
 
             # DIAGNOSTIC ONLY.
@@ -779,6 +798,21 @@ uncertain
                     "method": "batch_missing",
                     "error": "pair missing from batch response",
                 }
+
+    _gen_sum = sum(_call_generation_ms)
+    _parse_sum = sum(_call_parse_ms)
+    _n_calls = len(_call_generation_ms)
+
+    print(
+        "[NLI Batch Aggregate] "
+        f"candidate_pairs={len(pairs)} "
+        f"nli_calls={_n_calls} "
+        f"batch_size={batch_size} "
+        f"generation_time_sum={_gen_sum / 1000:.2f}s "
+        f"parse_time_sum={_parse_sum / 1000:.3f}s "
+        f"average_call={(_gen_sum / _n_calls / 1000) if _n_calls else 0.0:.2f}s "
+        f"max_call={(max(_call_generation_ms) / 1000) if _call_generation_ms else 0.0:.2f}s"
+    )
 
     return [
         results_by_id.get(

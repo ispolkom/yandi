@@ -153,6 +153,78 @@ check(
     f"got {len(call_log)} calls",
 )
 
+# ============================================================
+# P0 — final_claim_coverage NLI=125.57s investigation
+# ============================================================
+#
+# Root cause traced from the live log + code: [Final Coverage Batch]
+# factual=11 pipeline=14 exact=0 pairs=308 generation_calls<=10 — every
+# unmatched final claim is paired bidirectionally against EVERY
+# pipeline claim (11*14*2=308), already batched (batch_size=32, 10
+# real generation calls, not 308 individual ones). The NLI batch
+# itself is one real /api/generate call per up to 32 pairs, at
+# num_predict=max(160, len(batch)*32). This section verifies the new
+# per-call generation/parse timing instrumentation added to
+# infer_claim_relations_batch() — diagnostic only, does not change
+# batching, thresholds, or relation semantics.
+
+import agent.claim_relation as cr
+
+_generate_call_log = []
+
+
+def _mock_generate_post(self, url, json=None, timeout=None):
+    _generate_call_log.append(json)
+    batch_pairs = json["prompt"]  # not parsed here, just counted via len(batch) below
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    # Echo back "supports" for every pair_id the batch actually asked about.
+    import re as _re
+    pair_ids = _re.findall(r'"pair_id":\s*"([^"]+)"', json["prompt"])
+    resp.json.return_value = {
+        "response": __import__("json").dumps({
+            "results": [{"pair_id": pid, "relation": "supports"} for pid in pair_ids]
+        })
+    }
+    return resp
+
+
+_generate_call_log.clear()
+pairs = [
+    {"pair_id": f"F:{i}:0", "main_claim": f"Final claim {i}", "other_claim": "Pipeline claim"}
+    for i in range(70)
+]  # 70 pairs, batch_size=32 -> ceil(70/32)=3 calls
+
+with patch("requests.Session.post", _mock_generate_post):
+    results = cr.infer_claim_relations_batch(pairs, batch_size=32)
+
+check(
+    "infer_claim_relations_batch: correct number of batch calls for 70 pairs/batch_size=32",
+    len(_generate_call_log) == 3,
+    f"got {len(_generate_call_log)} calls",
+)
+check(
+    "infer_claim_relations_batch: all 70 pairs resolved (order preserved)",
+    len(results) == 70 and all(r["relation"] == "supports" for r in results),
+    f"count={len(results)}",
+)
+
+# ── Aggregate instrumentation must not crash on a failing batch either ──
+
+def _mock_generate_post_fails(self, url, json=None, timeout=None):
+    raise ConnectionError("simulated Ollama outage")
+
+
+with patch("requests.Session.post", _mock_generate_post_fails):
+    results_fail = cr.infer_claim_relations_batch(pairs[:5], batch_size=32)
+
+check(
+    "infer_claim_relations_batch: batch failure -> conservative 'uncertain' "
+    "fallback for all pairs, no crash, no per-pair individual retry",
+    len(results_fail) == 5 and all(r["relation"] == "uncertain" for r in results_fail),
+    f"{results_fail}",
+)
+
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")
 if FAIL:
