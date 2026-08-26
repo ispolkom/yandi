@@ -487,3 +487,95 @@ def evaluate_claim_status_gate(claims_data, synthesis_result, log):
         )
 
     return claims_accepted, total_claims, claims_rejected
+
+
+def finalize_claim_trace_and_grounding(claims_data, trace, rejected_structural_claims, semantic_grounding_score, log, verbose):
+    """
+    Extracted from agent/orchestrator_v2.py [8] ("FINAL CLAIM TRACE" +
+    "EPISTEMIC GROUNDING" blocks, run right after claim epistemic status
+    classification).
+
+    Trace получает claim только ПОСЛЕ: structural validation, semantic
+    mapping, Claim ↔ Evidence NLI, Source Quality Gate, epistemic status
+    calculation — поэтому trace больше не хранит устаревший candidate
+    status вместо supported/contradicted/disputed/unverified.
+
+    Grounding: в denominator не включаем structural rejected claims — они
+    не являются содержательными claims ответа, пригодными для evidence-
+    проверки. epistemic_grounding: direct+eligible supports ИЛИ
+    contradicts. support_grounding: direct+eligible supports. ВАЖНО:
+    высокий epistemic_grounding сам по себе НЕ повышает Trust — evidence
+    может полностью противоречить ответу.
+
+    Mutates trace in place (add_claim_raw per unique claim_id). Returns
+    (epistemic_grounding_score, support_grounding_score).
+    """
+    traced_claim_ids = set()
+
+    for claim in claims_data:
+        claim_id = claim.get("claim_id")
+
+        if claim_id and claim_id in traced_claim_ids:
+            continue
+
+        trace.add_claim_raw(claim)
+
+        if claim_id:
+            traced_claim_ids.add(claim_id)
+
+    if verbose:
+        log(
+            f"[Claim Trace] final={len(claims_data)} "
+            f"rejected={len(rejected_structural_claims)}"
+        )
+
+    effective_claims = [
+        claim
+        for claim in claims_data
+        if claim.get("verification_status") != "rejected"
+    ]
+
+    if effective_claims:
+        epistemically_grounded_claims = sum(
+            1
+            for claim in effective_claims
+            if (
+                int(claim.get("support_count", 0) or 0) > 0
+                or
+                int(
+                    claim.get(
+                        "contradiction_count",
+                        0,
+                    ) or 0
+                ) > 0
+            )
+        )
+
+        support_grounded_claims = sum(
+            1
+            for claim in effective_claims
+            if int(claim.get("support_count", 0) or 0) > 0
+        )
+
+        epistemic_grounding_score = (
+            epistemically_grounded_claims
+            / len(effective_claims)
+        )
+
+        support_grounding_score = (
+            support_grounded_claims
+            / len(effective_claims)
+        )
+
+    else:
+        epistemic_grounding_score = 0.0
+        support_grounding_score = 0.0
+
+    log(
+        "[Grounding] "
+        f"semantic={semantic_grounding_score:.2f} "
+        f"epistemic={epistemic_grounding_score:.2f} "
+        f"support={support_grounding_score:.2f}"
+    )
+
+    return epistemic_grounding_score, support_grounding_score
