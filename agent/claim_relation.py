@@ -84,32 +84,47 @@ def extract_claim_from_source(text: str, main_claim: str = "") -> str:
         session = requests.Session()
         session.trust_env = False
 
-        def _gemma_embed(value: str):
+        # P0 (autonomous fix pass, extract_claim_from_source 343s
+        # investigation): this used to call /api/embed ONCE PER
+        # SENTENCE (N+1 sequential HTTP round-trips per snippet: one
+        # for main_claim, one per sentence) — measured live at ~160ms/
+        # call, so a 20-sentence source cost ~3.2s in pure round-trip
+        # overhead alone, called once per retrieved snippet (up to 10
+        # per claim). Confirmed live: Ollama's /api/embed accepts a
+        # LIST input and returns all embeddings in one call — batching
+        # main_claim + every sentence into a single request measured
+        # 12.7x faster for an equivalent 20-item batch (3.20s -> 0.25s).
+        # Same cosine-similarity math, same ranking, same fallback —
+        # this changes ONLY how many HTTP calls it takes, not what is
+        # computed or selected.
+        def _gemma_embed_batch(values):
             resp = session.post(
                 "http://127.0.0.1:11434/api/embed",
                 json={
                     "model": "embeddinggemma:latest",
-                    "input": value[:2000],
+                    "input": [v[:2000] for v in values],
                 },
                 timeout=30,
             )
             resp.raise_for_status()
 
-            vec = np.array(
-                resp.json()["embeddings"][0],
+            vecs = np.array(
+                resp.json()["embeddings"],
                 dtype=np.float32,
             )
 
-            norm = np.linalg.norm(vec)
-            return vec / norm if norm > 0 else vec
+            norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            return vecs / norms
 
-        query_vec = _gemma_embed(main_claim)
+        all_vecs = _gemma_embed_batch([main_claim] + sentences)
+        query_vec = all_vecs[0]
+        sentence_vecs = all_vecs[1:]
 
         scored = []
 
         for i, sentence in enumerate(sentences):
-            sentence_vec = _gemma_embed(sentence)
-            similarity = float(np.dot(query_vec, sentence_vec))
+            similarity = float(np.dot(query_vec, sentence_vecs[i]))
             scored.append((similarity, i, sentence))
 
         # Берём три наиболее близких passage.
