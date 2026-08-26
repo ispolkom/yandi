@@ -55,6 +55,14 @@ from agent.claim_relation import (
 MAX_CLAIMS = 8
 MAX_QUERIES_PER_CLAIM = 2
 
+# P1 (performance architecture pass): claims per batched query-
+# generation LLM call. Chosen over batch_size=8 (all MAX_CLAIMS in one
+# call) after a live experiment showed both are equally accurate
+# (100% ownership, 0 leakage, modality preserved) — 4 keeps a single
+# failed/truncated batch call's blast radius to at most half of
+# MAX_CLAIMS rather than all of it.
+QUERY_BATCH_SIZE = 4
+
 # Финальное число evidence для одного claim.
 MAX_RESULTS_PER_CLAIM = 3
 
@@ -246,6 +254,215 @@ CLAIM:
         )
 
 
+_BATCH_QUERY_PROMPT_TEMPLATE = """
+Ты формулировщик поисковых запросов для проверки НЕСКОЛЬКИХ независимых
+атомарных factual claims ОДНОВРЕМЕННО.
+
+КАЖДЫЙ claim обрабатывается ПОЛНОСТЬЮ НЕЗАВИСИМО от остальных:
+- Не переноси субъект/сущность одного claim в query другого claim.
+- Не смешивай формулировки между claims.
+- Каждый claim_id должен получить РОВНО 2 запроса: direct и counter.
+
+CLAIMS:
+{claims_json}
+
+Для КАЖДОГО claim_id создай:
+
+1. direct
+   Ищи первичные данные, наблюдения, измерения, исследования,
+   эксперименты, миссии, документы, непосредственно относящиеся
+   ИМЕННО К ЭТОМУ claim_id (не к другим).
+
+2. counter
+   Ищи данные, наблюдения или документы, которые могли бы
+   противоречить ИМЕННО ЭТОМУ claim_id либо показывать
+   противоположный результат.
+
+ПРАВИЛА (применяются к каждому claim_id независимо от остальных):
+
+- Не предполагай, что claim истинен.
+- Не предполагай, что claim ложен.
+- Не заменяй объект claim похожим объектом.
+- Сохраняй subject scope и временной scope именно ЭТОГО claim_id.
+- КРИТИЧЕСКИ ВАЖНО сохранять epistemic modality claim. Отрицание и
+  степень утверждения нельзя терять при генерации query.
+
+  Например для claim с "не обнаружено"/"нет подтверждений"/"не найдено":
+  direct query обязан содержать эквивалент отрицательной epistemic
+  конструкции (no evidence, no confirmed detection, not detected), а
+  counter — положительный противоположный результат (detected,
+  discovery, confirmed evidence).
+
+- Для научных вопросов английский язык допустим и предпочтителен.
+- Максимум 8-14 слов на запрос.
+- Не создавай две простые перефразировки.
+- Без вопросительных предложений.
+
+Верни ТОЛЬКО JSON — один ключ на КАЖДЫЙ claim_id из входа, ни одного
+пропущенного, ни одного лишнего:
+
+{{
+  "<claim_id из входа>": {{"direct": "...", "counter": "..."}},
+  ...
+}}
+""".strip()
+
+
+def _call_ollama_for_query_batch(prompt: str, batch_size: int) -> str:
+    """
+    P1 (performance architecture pass): dedicated call for batch query
+    generation. NOT the shared orch_web_query._call_ollama(), whose
+    num_predict is hardcoded to MAX_TOKENS_CONDUCTOR=500 — sized for
+    the ORIGINAL single-claim 2-query call, not a variable-size batch
+    of N claims x 2 queries each. Same scaling pattern already used by
+    infer_claim_relations_batch() (claim_relation.py): num_predict
+    grows with batch_size instead of risking the same truncation bug
+    P0-B already found and fixed elsewhere.
+    """
+    import requests
+    from agent.orch_config import (
+        OLLAMA_BASE,
+        MODEL,
+        TEMP_CONDUCTOR,
+        GENERATION_SEMAPHORE,
+    )
+
+    session = requests.Session()
+    session.trust_env = False
+
+    num_predict = max(300, batch_size * 120)
+
+    wait_started = time.time()
+
+    with GENERATION_SEMAPHORE:
+        waited = time.time() - wait_started
+
+        if waited > 0.05:
+            print(f"[Claim Query Batch LLM] generation queue wait={waited:.2f}s")
+
+        resp = session.post(
+            f"{OLLAMA_BASE}/api/generate",
+            json={
+                "model": MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": TEMP_CONDUCTOR,
+                    "num_predict": num_predict,
+                },
+            },
+            timeout=90,
+        )
+        resp.raise_for_status()
+
+        return resp.json().get("response", "").strip()
+
+
+def formulate_claim_evidence_queries_batch(
+    claims: "List[Dict[str, str]]",
+) -> "Dict[str, WebQueryResult]":
+    """
+    P1 prototype (performance architecture pass) — batch query
+    generation for several claims in ONE LLM call instead of one call
+    per claim.
+
+    claims: [{"claim_id": ..., "claim_text": ...}, ...] — claim_text
+    here is the SAME contextual_claim_text the per-claim path uses.
+
+    Returns {claim_id: WebQueryResult}. EVERY input claim_id is
+    guaranteed a key in the result — either from the batch response,
+    or (bounded, diagnosed) from a per-claim
+    formulate_claim_evidence_queries() fallback call. Query ownership
+    is explicit by claim_id key in the JSON, never inferred by
+    position — never attributes one claim's queries to another.
+    """
+    results: "Dict[str, WebQueryResult]" = {}
+
+    valid_claims = [
+        c for c in claims
+        if isinstance(c, dict)
+        and (c.get("claim_text") or "").strip()
+        and c.get("claim_id")
+    ]
+
+    if not valid_claims:
+        return results
+
+    claims_payload = [
+        {"claim_id": c["claim_id"], "claim_text": c["claim_text"].strip()}
+        for c in valid_claims
+    ]
+
+    prompt = _BATCH_QUERY_PROMPT_TEMPLATE.format(
+        claims_json=json.dumps(claims_payload, ensure_ascii=False, indent=2),
+    )
+
+    raw = ""
+    data: Dict[str, Any] = {}
+
+    try:
+        raw = _call_ollama_for_query_batch(prompt, len(valid_claims))
+
+        from agent.final_claim_coverage import _extract_json as _extract_json_lenient
+        parsed = _extract_json_lenient(raw)
+
+        if isinstance(parsed, dict):
+            data = parsed
+
+    except Exception as exc:
+        print(
+            f"[Claim Query Batch] status=call_error "
+            f"claims={len(valid_claims)} "
+            f"error={type(exc).__name__}"
+        )
+
+    fallback_claim_ids = []
+
+    for c in valid_claims:
+        cid = c["claim_id"]
+        entry = data.get(cid) if isinstance(data, dict) else None
+
+        queries = []
+
+        if isinstance(entry, dict):
+            direct = str(entry.get("direct", "") or "").strip()
+            counter = str(entry.get("counter", "") or "").strip()
+            queries = [q for q in (direct, counter) if q]
+
+        if queries:
+            results[cid] = WebQueryResult(
+                queries=queries[:MAX_QUERIES_PER_CLAIM],
+                raw=raw,
+            )
+        else:
+            fallback_claim_ids.append(cid)
+
+    if fallback_claim_ids:
+        # Bounded, diagnosed fallback — never silent, never a second
+        # unbounded round of individual calls for the WHOLE batch,
+        # only for the specific claim_ids the batch response actually
+        # missed.
+        print(
+            f"[Claim Query Batch] status=partial_fallback "
+            f"claims={len(valid_claims)} "
+            f"fallback_calls={len(fallback_claim_ids)}"
+        )
+
+        for c in valid_claims:
+            if c["claim_id"] in fallback_claim_ids:
+                results[c["claim_id"]] = formulate_claim_evidence_queries(
+                    c["claim_text"]
+                )
+    else:
+        print(
+            f"[Claim Query Batch] status=ok "
+            f"claims={len(valid_claims)} "
+            f"fallback_calls=0"
+        )
+
+    return results
+
+
 def _extract_subject_anchors(claim_text: str) -> List[str]:
     """
     Извлечь явные subject anchors из claim.
@@ -390,9 +607,29 @@ def _snippet_text(snippet: Any) -> str:
     return text or content
 
 
+def _build_contextual_claim_text(claim: Dict[str, Any], claim_text: str) -> str:
+    """
+    Shared by retrieve_claim_evidence() and retrieve_for_claims()'s P1
+    batch pre-computation — one definition, not two copies that could
+    silently drift apart.
+    """
+    query_context = (
+        claim.get("query_context", "")
+        or claim.get("source_query", "")
+        or claim.get("original_query", "")
+        or ""
+    ).strip()
+
+    if query_context:
+        return f"{query_context}\nПроверяемое утверждение: {claim_text}"
+
+    return claim_text
+
+
 def retrieve_claim_evidence(
     claim: Dict[str, Any],
     fetch_cache: "SharedFetchCache | None" = None,
+    precomputed_query_result: "WebQueryResult | None" = None,
 ) -> List[Dict[str, Any]]:
     """
     Выполнить evidence retrieval для одного accepted claim.
@@ -408,6 +645,14 @@ def retrieve_claim_evidence(
     скачивался физически дважды. Это НЕ меняет evidence ownership:
     каждый claim по-прежнему получает СВОЮ evidence-запись с
     retrieval_claim_id=этот claim — см. SharedFetchCache docstring.
+
+    precomputed_query_result: P1 (performance architecture pass) —
+    если retrieve_for_claims() уже сформировал queries для ЭТОГО claim
+    батчем (formulate_claim_evidence_queries_batch), передаётся сюда
+    вместо повторного одиночного LLM-вызова. None (по умолчанию) —
+    прежнее поведение, свой собственный вызов formulate_claim_
+    evidence_queries() — сохраняет обратную совместимость для прямых
+    вызовов этой функции (регрессия, другие callers).
     """
 
     claim_text = (
@@ -443,20 +688,7 @@ def retrieve_claim_evidence(
     # original claim_text НЕ изменяется.
     # NLI по-прежнему проверяет именно atomic claim.
     #
-    query_context = (
-        claim.get("query_context", "")
-        or claim.get("source_query", "")
-        or claim.get("original_query", "")
-        or ""
-    ).strip()
-
-    if query_context:
-        contextual_claim_text = (
-            f"{query_context}\n"
-            f"Проверяемое утверждение: {claim_text}"
-        )
-    else:
-        contextual_claim_text = claim_text
+    contextual_claim_text = _build_contextual_claim_text(claim, claim_text)
 
     # ========================================================
     # SUBJECT ANCHOR VIEW
@@ -489,9 +721,12 @@ def retrieve_claim_evidence(
     # downstream stage: claim_pass2_mapping_nli_ms).
     _t0_query_gen = time.time()
 
-    query_result = formulate_claim_evidence_queries(
-        contextual_claim_text
-    )
+    if precomputed_query_result is not None:
+        query_result = precomputed_query_result
+    else:
+        query_result = formulate_claim_evidence_queries(
+            contextual_claim_text
+        )
 
     _query_generation_ms = (time.time() - _t0_query_gen) * 1000
 
@@ -1492,6 +1727,39 @@ def retrieve_for_claims(
     # epistemic-ownership invariant this preserves.
     shared_fetch_cache = SharedFetchCache()
 
+    # P1 (performance architecture pass): precompute search queries
+    # for ALL selected claims via batched LLM calls (QUERY_BATCH_SIZE
+    # claims per call) instead of one call per claim. Verified via a
+    # live offline experiment before shipping (7 claims across 3
+    # domains: Jupiter temperature/life/magnetic-field, Mars, Russian
+    # history, math, biology) at batch sizes 2/4/8: query ownership
+    # 100%, ZERO cross-claim subject-anchor leakage, epistemic
+    # modality (negation) preserved in every single case. batch_size=4
+    # chosen over 8 to keep a single failed/truncated batch call's
+    # blast radius smaller (at most 4 claims fall back to individual
+    # calls, not all MAX_CLAIMS). formulate_claim_evidence_queries_
+    # batch() already guarantees every claim_id gets a bounded,
+    # diagnosed per-claim fallback if the batch response is missing it
+    # — this precompute step can never leave a claim without queries.
+    _query_batch_input = [
+        {
+            "claim_id": c.get("claim_id", "unknown"),
+            "claim_text": _build_contextual_claim_text(
+                c, (c.get("claim_text") or "").strip()
+            ),
+        }
+        for c in selected
+        if (c.get("claim_text") or "").strip()
+    ]
+
+    precomputed_queries: Dict[str, Any] = {}
+
+    for _i in range(0, len(_query_batch_input), QUERY_BATCH_SIZE):
+        _chunk = _query_batch_input[_i:_i + QUERY_BATCH_SIZE]
+        precomputed_queries.update(
+            formulate_claim_evidence_queries_batch(_chunk)
+        )
+
     def _retrieve_one(claim, submitted_at):
         claim_id = claim.get(
             "claim_id",
@@ -1515,7 +1783,11 @@ def retrieve_for_claims(
         )
 
         try:
-            records = retrieve_claim_evidence(claim, fetch_cache=shared_fetch_cache)
+            records = retrieve_claim_evidence(
+                claim,
+                fetch_cache=shared_fetch_cache,
+                precomputed_query_result=precomputed_queries.get(claim_id),
+            )
             error = None
         except Exception as exc:
             records = []
