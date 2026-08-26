@@ -13,6 +13,7 @@ from __future__ import annotations
 import sys
 import json
 import re
+import time
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -135,7 +136,14 @@ def _create_plan_step(step_name: str, priority: int = 1) -> PlanStep:
 def _get_reflection_policies(query: str = "", domain: str = "") -> List[Dict[str, Any]]:
     """Получить активные политики из рефлексии и уроки из опыта."""
     policies = []
-    
+
+    # P1 (autonomous fix pass, plan=76.19s live-run investigation):
+    # sub-profile the two real internal phases so a future live run can
+    # attribute build_plan's wall-clock instead of leaving it as one
+    # opaque "plan" bucket. Names match the actual code paths below,
+    # not invented generic labels.
+    _t0_reflection_policies = time.time()
+
     # 1. Политики из рефлексии
     if REFLECTION_AVAILABLE:
         try:
@@ -144,7 +152,10 @@ def _get_reflection_policies(query: str = "", domain: str = "") -> List[Dict[str
                 policies = reflection.get_policies()
         except Exception:
             pass
-    
+
+    _reflection_policies_ms = (time.time() - _t0_reflection_policies) * 1000
+    _t0_experience_memory = time.time()
+
     # 2. Уроки из опыта
     # Ограничиваем количество политик из уроков
     lesson_policy_count = 0
@@ -178,6 +189,16 @@ def _get_reflection_policies(query: str = "", domain: str = "") -> List[Dict[str
                         lesson_confidence = lesson.get("confidence", 0.0)
                         if lesson_confidence < 0.6:
                             continue
+                        # P1 bug fix (autonomous fix pass): lesson_text was
+                        # referenced below but never defined anywhere in
+                        # this function — any lesson with confidence>=0.6
+                        # raised NameError here, silently swallowed by the
+                        # broad except below, abandoning the rest of
+                        # lesson processing for this call. Never observed
+                        # in prior live logs only because confidence
+                        # happened to stay <0.6 (the `continue` above fired
+                        # first) — not because the path was safe.
+                        lesson_text = " ".join(lesson.get("lessons", []) or [])
                         if "прошли валидацию" in lesson_text:
                             policies.append({
                                 "type": "policy",
@@ -202,9 +223,15 @@ def _get_reflection_policies(query: str = "", domain: str = "") -> List[Dict[str
     except Exception as e:
         import sys
         sys.stderr.write(f"[Planner] Ошибка загрузки уроков: {e}\n")
-    except Exception:
-        pass
-    
+
+    _experience_memory_ms = (time.time() - _t0_experience_memory) * 1000
+
+    sys.stderr.write(
+        "[Plan SubProfile] "
+        f"reflection_policies={_reflection_policies_ms:.1f}ms "
+        f"experience_memory={_experience_memory_ms:.1f}ms\n"
+    )
+
     return policies
 
 
@@ -338,10 +365,14 @@ def build_plan(query: str, risk: RiskResult, use_llm: bool = False) -> PlanResul
     # Загружаем политики рефлексии
     import sys; sys.stderr.write(f"[BuildPlan] Начало планирования, use_llm={use_llm}\n")
     policies = _get_reflection_policies(query)
-    
+
     # По умолчанию — дефолтный план по уровню риска (без LLM, мгновенно)
     if not use_llm:
-        return _default_plan(risk, query, policies)
+        _t0_planner_core = time.time()
+        result = _default_plan(risk, query, policies)
+        _planner_core_ms = (time.time() - _t0_planner_core) * 1000
+        sys.stderr.write(f"[Plan SubProfile] planner_core={_planner_core_ms:.1f}ms\n")
+        return result
 
     # LLM-план (более гибкий, но медленнее)
     prompt = (
