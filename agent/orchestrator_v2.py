@@ -86,10 +86,8 @@ from agent.evidence_pool import (
     build_canonical_evidence_pool,
     merge_evidence,
 )
-from agent.final_claim_coverage import evaluate_final_claim_coverage
 from agent.orchestrator.epistemic.existence_contract import apply_existence_query_contract
-from agent.final_claim_coverage import evaluate_final_claim_coverage
-from agent.final_claim_coverage import evaluate_final_claim_coverage
+from agent.orchestrator.epistemic.final_coverage import evaluate_and_record_final_coverage
 
 # ---- YANDI V3: SELF-AWARE SYSTEM ----
 from agent.self_model import get_self_model
@@ -4450,119 +4448,17 @@ def process(
                         f"[V6] Ошибка batch спора: {e}"
                     )
 
-        # ============================================================
-        # FINAL CLAIM COVERAGE
-        # ============================================================
-        #
-        # Claim lifecycle до этого момента проверял claims,
-        # извлечённые во время synthesis.
-        #
-        # Но финальный answer может содержать дополнительные factual
-        # утверждения, которые вообще не попали в lifecycle.
-        #
-        # Этот gate отвечает только на вопрос:
-        #
-        #   "Какую долю factual claims финального ответа
-        #    YANDI вообще проверяла?"
-        #
-        # coverage НЕ означает truth/support и никогда
-        # не повышает Trust.
-        try:
-            _t0_final_coverage = time.time()
-
-            final_coverage = evaluate_final_claim_coverage(
-                synthesis_result.answer,
-                claims_data,
-                query=query_to_use,
-            )
-
-            cost["final_coverage_ms"] = (
-                (time.time() - _t0_final_coverage) * 1000
-            )
-
-            final_claim_coverage_score = (
-                final_coverage.coverage_score
-            )
-
-            final_claims_count = (
-                final_coverage.factual_count
-            )
-
-            final_claims_covered = (
-                final_coverage.covered_count
-            )
-
-            final_claims_uncovered = list(
-                final_coverage.uncovered_claims
-            )
-
-            log(
-                "[Final Claim Coverage] "
-                f"factual={final_claims_count} "
-                f"covered={final_claims_covered} "
-                f"uncovered={len(final_claims_uncovered)} "
-                f"coverage={final_claim_coverage_score:.2f} "
-                f"status={final_coverage.coverage_status}"
-            )
-
-            # P0-C (YANDI_FINAL_EPISTEMIC_AUDIT_AND_FIX.md): переиспользует
-            # уже вычисленные covered/uncovered — никакой новой extraction
-            # machinery. "novel" = factual claims финального ответа, не
-            # найденные нигде в claim lifecycle (uncovered); "speculative"
-            # = extracted claims (любого типа), которые сам extractor
-            # опознал как гипотезу/возможность, а не факт.
-            _leakage_speculative = sum(
-                1
-                for c in final_coverage.final_claims
-                if c.get("claim_type") == "speculative"
-            )
-
-            log(
-                "[Final Claim Leakage] "
-                f"extracted={len(final_coverage.final_claims)} "
-                f"known={final_claims_covered} "
-                f"novel={len(final_claims_uncovered)} "
-                f"speculative={_leakage_speculative}"
-            )
-
-            if verbose and final_claims_uncovered:
-                for uncovered in final_claims_uncovered[:8]:
-                    log(
-                        "[Final Claim Coverage] UNCOVERED: "
-                        f"{uncovered.get('claim_text', '')[:180]}"
-                    )
-
-            trace.add_observation(
-                "final_claim_coverage_score",
-                final_claim_coverage_score,
-            )
-
-            trace.add_observation(
-                "final_claims_count",
-                final_claims_count,
-            )
-
-            trace.add_observation(
-                "final_claims_covered",
-                final_claims_covered,
-            )
-
-            trace.add_observation(
-                "final_claims_uncovered",
-                len(final_claims_uncovered),
-            )
-
-        except Exception as e:
-            # Ошибка coverage-анализатора НЕ должна поднимать Trust.
-            #
-            # Но и не превращаем технический сбой автоматически
-            # в epistemic failure существующего pipeline.
-            final_claim_coverage_score = 1.0
-
-            if verbose:
-                log(
-                    f"[Final Claim Coverage] error={e}"
-                )
+        # Final Claim Coverage — extracted to
+        # agent/orchestrator/epistemic/final_coverage.py (structural
+        # extraction; behavior unchanged).
+        (
+            final_claim_coverage_score,
+            final_claims_count,
+            final_claims_covered,
+            final_claims_uncovered,
+        ) = evaluate_and_record_final_coverage(
+            synthesis_result, claims_data, query_to_use, cost, trace, log, verbose
+        )
 
         # ── Эпистемическая корректировка trust (v3) ─────────────────────
         label = "UNVERIFIED"
