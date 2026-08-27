@@ -84,18 +84,84 @@ def _counts_toward_status(rel):
     return False, None
 
 
-def classify_claim_epistemic_status(claims_data, log, verbose):
+def _distinct_cluster_count(direct_relations, relation_type, evidence_by_id):
+    """
+    Epistemic Core v1 Phase 7: count DISTINCT independent source clusters
+    among direct_relations of the given relation_type, instead of raw
+    relation count. N syndicated copies of one story (same
+    source_cluster_id, per agent/source_clustering.py) count once, not N
+    times.
+
+    "unknown cluster не должен искусственно уничтожать evidence": an
+    evidence item with no resolvable source_cluster_id (missing
+    evidence_data entry, or the field itself is None/absent — e.g. older
+    data predating Phase 6) is treated as its OWN singleton cluster, not
+    dropped and not silently merged with anything else. This is the same
+    fail-open principle as agent/source_clustering.py itself: uncertainty
+    about independence must never reduce evidence, only leave items
+    ungrouped.
+    """
+    clusters_seen = set()
+    count = 0
+
+    for rel in direct_relations:
+        if rel.get("relation") != relation_type:
+            continue
+
+        ev_id = rel.get("evidence_id")
+        ev = evidence_by_id.get(ev_id) if evidence_by_id else None
+        cluster_id = ev.get("source_cluster_id") if ev else None
+
+        if not cluster_id:
+            # Unknown/unclustered: own singleton, keyed by evidence_id so
+            # it never collides with a real cluster or another unknown.
+            cluster_id = f"__unclustered__{ev_id}"
+
+        if cluster_id in clusters_seen:
+            continue
+
+        clusters_seen.add(cluster_id)
+        count += 1
+
+    return count
+
+
+def classify_claim_epistemic_status(claims_data, log, verbose, evidence_data=None):
     """
     Mutates each claim in claims_data in place: verification_status,
     support_count, contradiction_count, secondary_relation_count,
     context_relation_count (and rel["counted_via"] on each direct-counted
     evidence relation).
 
+    Epistemic Core v1 Phase 7: support_count/contradiction_count now count
+    DISTINCT INDEPENDENT SOURCE CLUSTERS (see _distinct_cluster_count
+    above), not raw qualifying-relation count — an intentional, documented
+    semantic change (previously: N syndicated copies of one story each
+    counted separately toward support_count). claim["support_count_raw_relations"]
+    /["contradiction_count_raw_relations"] keep the OLD (pre-Phase-7)
+    formula alongside the new one, for transparency and so a live A/B
+    comparison doesn't need two separate non-deterministic live runs — see
+    the [Claim Status] log line for both side by side.
+
+    evidence_data is optional (default None) for backward compatibility
+    with any caller that predates Phase 6/7 (e.g. a test that only passes
+    claims_data): with no evidence_data, no source_cluster_id can be
+    resolved for anything, so every relation degrades to its own
+    singleton cluster — which makes the new formula numerically identical
+    to the old one. Passing evidence_data is what actually activates
+    cluster-aware counting.
+
     Returns the claim_status_counts dict (supported/disputed/contradicted/
     unverified/rejected tallies) — purely local to this block in the
     original code (never read afterward there), returned here in case a
     future caller wants it.
     """
+    evidence_by_id = {
+        ev.get("evidence_id"): ev
+        for ev in (evidence_data or [])
+        if ev.get("evidence_id")
+    }
+
     claim_status_counts = {
         "supported": 0,
         "disputed": 0,
@@ -143,16 +209,29 @@ def classify_claim_epistemic_status(claims_data, log, verbose):
                         f"counted=True"
                     )
 
-        supports_count = sum(
+        # Phase 7: OLD formula kept for A/B transparency (see docstring),
+        # never used for status/gating decisions anymore.
+        supports_count_raw_relations = sum(
             1
             for rel in direct_relations
             if rel.get("relation") == "supports"
         )
 
-        contradicts_count = sum(
+        contradicts_count_raw_relations = sum(
             1
             for rel in direct_relations
             if rel.get("relation") == "contradicts"
+        )
+
+        # Phase 7: NEW formula — distinct independent source clusters,
+        # symmetric for supports and contradicts. This is what actually
+        # drives verification_status below.
+        supports_count = _distinct_cluster_count(
+            direct_relations, "supports", evidence_by_id
+        )
+
+        contradicts_count = _distinct_cluster_count(
+            direct_relations, "contradicts", evidence_by_id
         )
 
         secondary_count = sum(
@@ -192,9 +271,15 @@ def classify_claim_epistemic_status(claims_data, log, verbose):
         claim["verification_status"] = new_status
 
         # Эти два счётчика означают только epistemically effective
-        # DIRECT evidence.
+        # DIRECT evidence. Phase 7: now counted per distinct independent
+        # source cluster, not per raw relation — see _distinct_cluster_count.
         claim["support_count"] = supports_count
         claim["contradiction_count"] = contradicts_count
+
+        # Phase 7: OLD (pre-Phase-7) formula, kept alongside for
+        # transparency/A-B comparison — not read by any status/gating logic.
+        claim["support_count_raw_relations"] = supports_count_raw_relations
+        claim["contradiction_count_raw_relations"] = contradicts_count_raw_relations
 
         # Диагностика неавторитетных/вторичных отношений.
         claim["secondary_relation_count"] = secondary_count
@@ -207,8 +292,8 @@ def classify_claim_epistemic_status(claims_data, log, verbose):
                 f"[Claim Status] "
                 f"claim={claim.get('claim_id')} "
                 f"{current_status}->{new_status} "
-                f"supports={supports_count} "
-                f"contradicts={contradicts_count} "
+                f"supports={supports_count} (raw_relations={supports_count_raw_relations}) "
+                f"contradicts={contradicts_count} (raw_relations={contradicts_count_raw_relations}) "
                 f"secondary={secondary_count} "
                 f"context={context_count}"
             )

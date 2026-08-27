@@ -478,9 +478,10 @@ def process(
 
 
         # Claim epistemic status classification — extracted to
-        # agent/orchestrator/claims/status.py (structural extraction;
-        # behavior unchanged).
-        classify_claim_epistemic_status(claims_data, log, verbose)
+        # agent/orchestrator/claims/status.py. Epistemic Core v1 Phase 7:
+        # now cluster-aware (evidence_data passed in) — see that
+        # function's docstring for the semantic change this activates.
+        classify_claim_epistemic_status(claims_data, log, verbose, evidence_data)
 
         # Final claim trace + epistemic grounding — extracted to
         # agent/orchestrator/claims/status.py (structural extraction;

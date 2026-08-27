@@ -178,14 +178,22 @@ check(
     f"{by_id.get('ev_rt2')}",
 )
 
-# ── 8. Scope containment: claims/status.py does NOT read source_cluster_id this phase ──
+# ── 8. Scope containment, historical note: this suite originally pinned
+# claims/status.py NOT reading source_cluster_id (Phase 6 was metadata-
+# only, per the plan's "NOT change support_count in this commit").
+# Phase 7 (agent/epistemic_independent_support_counting_regression_test.py)
+# is the deliberate, separate step that crosses this boundary on purpose
+# — classify_claim_epistemic_status() now takes evidence_data and reads
+# source_cluster_id from it by design. This check is inverted accordingly
+# rather than deleted, so the phase history stays legible: it now asserts
+# the wiring Phase 7 added is actually present, not its absence.
 
 import agent.orchestrator.claims.status as status_mod
 status_src = inspect.getsource(status_mod)
 check(
-    "claims/status.py does not reference source_cluster_id — metadata-only this phase, "
-    "per the plan ('NOT change support_count in this commit'); Phase 7 is the separate step",
-    "source_cluster_id" not in status_src,
+    "claims/status.py NOW references source_cluster_id (Phase 7 deliberately wired this in — "
+    "see epistemic_independent_support_counting_regression_test.py for that phase's own suite)",
+    "source_cluster_id" in status_src,
 )
 
 print()
