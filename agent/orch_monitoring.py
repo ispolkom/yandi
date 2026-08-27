@@ -4,6 +4,7 @@ assistant/orch_monitoring.py — Monitoring.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import time
 from collections import defaultdict
@@ -49,6 +50,35 @@ def flush():
         for e in _buffer:
             f.write(json.dumps(e, ensure_ascii=False) + "\n")
     _buffer.clear()
+
+
+# Foundation Repair (YANDI_SELF_LEARNING_RECONCILIATION_AUDIT.md P1
+# "orch_metrics.jsonl silently near-dead"): record() only ever flushed
+# every _flush_every events — proven root cause of data loss: any process
+# restart (frequent during active development, confirmed by this repo's
+# own commit history) drops up to _flush_every - 1 buffered events
+# silently, with no error. Registering flush() at interpreter exit closes
+# this for a plain script/CLI process exiting normally (proven: covered
+# by this module's own regression test, a real subprocess that records
+# under _flush_every events and exits cleanly).
+#
+# IMPORTANT, verified by direct isolated reproduction (a minimal
+# standalone FastAPI+uvicorn app: register this exact flush() via atexit,
+# record one event, uvicorn.run(), then `kill -TERM` the process) — this
+# atexit registration does NOT fire when the real production process
+# (pet/council_chat_server.py, run via uvicorn.run(..., reload=False))
+# receives SIGTERM. uvicorn's graceful-shutdown path does not go through
+# a route that triggers atexit handlers in this setup. So for the actual
+# production server, this fix is INCOMPLETE: it correctly fixes the
+# mechanism this module owns, but does not fully close the loop for the
+# real deployment's shutdown path. A complete fix needs an explicit
+# shutdown hook wired into pet/council_chat_server.py (e.g. a FastAPI
+# `@app.on_event("shutdown")` handler calling this module's flush()) —
+# that file is outside agent/, outside this Foundation Repair's audited
+# scope. Left as documented, verified-incomplete P1 debt rather than
+# silently claimed fixed; see
+# YANDI_SELF_LEARNING_FOUNDATION_REPAIR_REPORT.md.
+atexit.register(flush)
 
 
 def get_stats(last_n: int = 1000) -> dict:
