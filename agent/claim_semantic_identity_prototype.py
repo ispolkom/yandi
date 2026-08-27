@@ -42,6 +42,7 @@ from typing import Optional
 
 from agent.belief_manager import BeliefManager, get_belief_manager
 from agent.claim_identity import canonicalize_claim_text
+from agent.claim_semantic_identity_hardening import hardening_guard
 
 # Same threshold belief_manager.py already uses and calibrated — reused,
 # not re-derived. See belief_manager.py:234-243 for the original
@@ -51,45 +52,68 @@ from agent.claim_identity import canonicalize_claim_text
 EMBEDDING_PREFILTER_THRESHOLD = 0.70
 
 
-def classify_claim_pair(claim_a: str, claim_b: str) -> str:
+def classify_claim_pair_detailed(claim_a: str, claim_b: str) -> dict:
     """
-    Returns one of: "exact", "equivalent", "contradicts", "different".
+    Full pipeline with diagnostics, for evaluation/reporting. Returns:
+        {
+            "outcome": "exact"|"equivalent"|"contradicts"|"different",
+            "raw_verdict": the verdict BEFORE Phase 9B's hardening guard
+                           (same value as "outcome" unless the guard
+                           downgraded an "equivalent"),
+            "similarity": embedding cosine similarity, or None if the
+                          exact-match path was taken / embedding failed,
+            "guard_reason": the hardening_guard() reason string if it
+                            fired, else None.
+        }
 
     Pipeline, identical in shape to belief_manager.py::_find_similar():
         1. exact match on normalized text (no network call)
         2. embedding cosine similarity prefilter (one batch call)
         3. LLM equivalence judge, only for pairs that pass the prefilter
-
-    "exact" is returned separately from "equivalent" so a caller can
-    tell "byte-identical (modulo normalization)" apart from "judged
-    equivalent by the LLM" — useful for this phase's evaluation, where
-    the exact-match path never touches the network and is trivially
-    100% precise by construction.
+        4. Phase 9B: deterministic hardening guard — downgrades an
+           "equivalent" verdict to "different" if a dangerous marker
+           mismatch is found (see agent/claim_semantic_identity_hardening.py).
+           Never touches "contradicts"/"different"/"exact".
     """
     norm_a = canonicalize_claim_text(claim_a)
     norm_b = canonicalize_claim_text(claim_b)
 
     if norm_a and norm_a == norm_b:
-        return "exact"
+        return {"outcome": "exact", "raw_verdict": "exact", "similarity": None, "guard_reason": None}
 
     if not norm_a or not norm_b:
-        return "different"
+        return {"outcome": "different", "raw_verdict": "different", "similarity": None, "guard_reason": None}
 
     vectors = BeliefManager._embed_batch([claim_a, claim_b])
     if vectors is None:
         # Fail-safe, same as belief_manager.py: embedding failure never
         # fabricates an equivalence.
-        return "different"
+        return {"outcome": "different", "raw_verdict": "different", "similarity": None, "guard_reason": None}
 
     import numpy as np
     similarity = float(np.dot(vectors[0], vectors[1]))
 
     if similarity < EMBEDDING_PREFILTER_THRESHOLD:
-        return "different"
+        return {"outcome": "different", "raw_verdict": "different", "similarity": similarity, "guard_reason": None}
 
     bm = get_belief_manager()
     relation = bm._llm_judge_relation(claim_a, claim_b)
 
-    if relation in ("equivalent", "contradicts"):
-        return relation
-    return "different"
+    raw_verdict = relation if relation in ("equivalent", "contradicts") else "different"
+
+    if raw_verdict == "equivalent":
+        guard_reason = hardening_guard(claim_a, claim_b)
+        if guard_reason:
+            return {"outcome": "different", "raw_verdict": raw_verdict, "similarity": similarity, "guard_reason": guard_reason}
+
+    return {"outcome": raw_verdict, "raw_verdict": raw_verdict, "similarity": similarity, "guard_reason": None}
+
+
+def classify_claim_pair(claim_a: str, claim_b: str) -> str:
+    """
+    Returns one of: "exact", "equivalent", "contradicts", "different".
+    Thin wrapper over classify_claim_pair_detailed() for callers that
+    only need the final outcome — see that function for the full
+    pipeline description and Phase 9B's hardening guard step.
+    """
+    return classify_claim_pair_detailed(claim_a, claim_b)["outcome"]
