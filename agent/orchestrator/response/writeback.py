@@ -57,7 +57,7 @@ from agent.orch_schemas import OrchestratorResponse, OutcomeRecord
 from agent.experience_memory import get_experience_memory
 from agent.dataset_builder import get_dataset_builder
 from agent.orchestrator.epistemic.trust_gate import _calculate_delta_factors
-from agent.orchestrator.epistemic.canonical_trust import compute_canonical_trust_shadow
+from agent.orchestrator.epistemic.canonical_trust import compute_canonical_trust
 from agent.orchestrator.runtime.profiling import report_pipeline_profile
 
 _DOMAIN_TAG: dict[str, str] = {
@@ -606,26 +606,36 @@ def run_optimistic_respond(
             if verbose:
                 log(f"[V3] Ошибка V3: {e}")
 
-    # Epistemic Core v1 Phase 13: canonical Trust, SHADOW MODE ONLY. Computed
-    # here — after EVERY existing mutation of synthesis_result.trust_level
-    # (claim status gate, existence contract, and this function's own
+    # Epistemic Core v1 Phase 14: canonical Trust CUTOVER — the single
+    # point where the final user-facing Trust is decided. Computed here —
+    # after EVERY existing mutation of synthesis_result.trust_level (claim
+    # status gate, existence contract, and this function's own
     # reflection-mistake downgrade above — all already applied by this
-    # point) and right before the trace is saved, so the shadow observation
-    # is persisted alongside the real outcome. See canonical_trust.py's
-    # module docstring for the full audit and why this is a MIN over two
-    # already-existing, already-monotonic Trust strands — not a new
-    # formula. The result is stored as trace metadata ONLY: it is never
-    # assigned to synthesis_result.trust_level or to the OrchestratorResponse
-    # returned below, so it cannot affect this request's own answer/Trust.
-    _canonical_shadow = compute_canonical_trust_shadow(
-        synthesis_result.trust_level if synthesis_result else None,
-        epistemic_trust_gate_label,
-        log,
-        verbose,
-    )
-    trace.add_observation("canonical_trust_shadow", _canonical_shadow["canonical_trust"])
-    trace.add_observation("canonical_trust_shadow_diverged", _canonical_shadow["diverged"])
-    trace.add_observation("canonical_trust_shadow_stricter_strand", _canonical_shadow["stricter_strand"])
+    # point) — and assigned back onto synthesis_result.trust_level, which
+    # is exactly what the OrchestratorResponse constructed at the end of
+    # this function reads. Nothing downstream of this line recomputes
+    # Trust again. See canonical_trust.py's module docstring for the full
+    # audit and why this is a MIN over two already-existing, already-
+    # monotonic Trust strands — not a new formula — and
+    # YANDI_EPISTEMIC_TRUST_CONSOLIDATION_REPORT.md's "Legacy paths
+    # remaining" section for the consumers (OutcomeRecord, archive_query,
+    # self_model/memory/reflection inputs above) that read
+    # synthesis_result.trust_level EARLIER than this point and therefore
+    # still see the pre-cutover value — a deliberate, documented scope
+    # limit, not an oversight.
+    if synthesis_result:
+        _canonical_result = compute_canonical_trust(
+            synthesis_result.trust_level,
+            epistemic_trust_gate_label,
+            log,
+            verbose,
+        )
+        synthesis_result.trust_level = _canonical_result["canonical_trust"]
+        trace.trust = _canonical_result["canonical_trust"]
+        trace.trust_reason = _canonical_result["reason"]
+        trace.add_observation("canonical_trust", _canonical_result["canonical_trust"])
+        trace.add_observation("canonical_trust_diverged", _canonical_result["diverged"])
+        trace.add_observation("canonical_trust_stricter_strand", _canonical_result["stricter_strand"])
 
     tracer.save_trace(trace)
     log(f"  · Трейс сохранен: {trace_id}")
