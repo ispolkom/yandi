@@ -233,6 +233,7 @@ def run_standard_pipeline(
                         is_meta_pipeline_output=ev_data.get("is_meta_pipeline_output", False),
                         is_subject_matter_evidence=ev_data.get("is_subject_matter_evidence", True),
                         rejection_reason=ev_data.get("rejection_reason"),
+                        source_cluster_id=ev_data.get("source_cluster_id"),
                     ))
         if cache_result.epistemic:
             trace.set_epistemic(cache_result.epistemic)
