@@ -99,6 +99,7 @@ class FamilyDependencyGraph:
         self.storage_file = storage_file or DEFAULT_STORE_PATH
         self.edges: List[Dict[str, Any]] = []
         self.family_state: Dict[str, Dict[str, Any]] = {}
+        self.recheck_log: Dict[str, Dict[str, Any]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -108,6 +109,7 @@ class FamilyDependencyGraph:
                     data = json.load(f)
                 self.edges = data.get("edges", []) or []
                 self.family_state = data.get("family_state", {}) or {}
+                self.recheck_log = data.get("recheck_log", {}) or {}
             except Exception:
                 # Fail-safe: a corrupt/unreadable graph must never crash the
                 # pipeline. Start empty in memory; the on-disk file is left
@@ -115,19 +117,45 @@ class FamilyDependencyGraph:
                 # blindly overwritten before a real write happens).
                 self.edges = []
                 self.family_state = {}
+                self.recheck_log = {}
 
     def _save(self) -> None:
         try:
             self.storage_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self.storage_file, "w", encoding="utf-8") as f:
                 json.dump(
-                    {"edges": self.edges, "family_state": self.family_state},
+                    {
+                        "edges": self.edges,
+                        "family_state": self.family_state,
+                        "recheck_log": self.recheck_log,
+                    },
                     f,
                     ensure_ascii=False,
                     indent=2,
                 )
         except Exception:
             pass
+
+    def can_recheck(self, family_id: str, cooldown_seconds: float) -> bool:
+        """
+        Epistemic Core v1 Phase 12: retry-bound / self-trigger protection.
+        A family that was actually rechecked (a real retrieval attempt was
+        made, regardless of outcome) within the last `cooldown_seconds` is
+        not eligible again yet — prevents a family sitting at the
+        intersection of several changed dependencies from being
+        re-fetched over and over in a short span.
+        """
+        entry = self.recheck_log.get(family_id)
+        if not entry:
+            return True
+        return (time.time() - entry.get("last_rechecked_at", 0)) >= cooldown_seconds
+
+    def record_recheck(self, family_id: str, outcome: str) -> None:
+        entry = self.recheck_log.get(family_id, {"recheck_count": 0})
+        entry["last_rechecked_at"] = time.time()
+        entry["last_outcome"] = outcome
+        entry["recheck_count"] = entry.get("recheck_count", 0) + 1
+        self.recheck_log[family_id] = entry
 
     def _find_edge(self, from_family: str, to_family: str, edge_type: str) -> Optional[Dict[str, Any]]:
         for e in self.edges:
@@ -312,16 +340,28 @@ def apply_family_dependency_shadow(
     graph: Optional[FamilyDependencyGraph] = None,
 ) -> Dict[str, Any]:
     """
-    SHADOW ONLY: builds/updates the persisted family-level dependency graph
-    from the SAME claim<->claim NLI results agent/claim_graph_shadow.py
-    already reuses (zero additional NLI calls), projected onto
+    Builds/updates the persisted family-level dependency graph from the
+    SAME claim<->claim NLI results agent/claim_graph_shadow.py already
+    reuses (zero additional NLI calls), projected onto
     `semantic_family_id` (Phase 10) instead of `claim_id`. Detects
     family-level status transitions and logs bounded RECHECK_CANDIDATE
-    diagnostics. Callers MUST NOT capture this into a decision-bearing
-    variable — call as a bare statement, exactly like
-    run_claim_graph_shadow().
+    diagnostics.
 
-    Returns a stats dict for logging only.
+    This function itself remains pure shadow with respect to the CURRENT
+    request: it only ever reads claims_data (never assigns into a claim
+    dict) and takes no synthesis_result/trust/belief_manager/evidence_data
+    parameter, so it is structurally incapable of influencing this
+    request's own answer, Trust, claim verification_status, retrieval, or
+    coverage — see the regression suite's structural checks.
+
+    Epistemic Core v1 Phase 12 (additive): the returned stats dict now
+    ALSO includes `recheck_candidate_details` (the flat list of every
+    RECHECK_CANDIDATE found this call, across all changed families) so
+    agent/dependency_recheck.py can read it and decide what to actually
+    re-verify. That is a SEPARATE actor reading this function's output on
+    purpose — not a violation of this function's own inertness, which is
+    about what THIS function does, not about who may consume its return
+    value afterward.
     """
     t0 = time.time()
     graph = graph or get_family_dependency_graph()
@@ -395,7 +435,7 @@ def apply_family_dependency_shadow(
         if outcome["changed"]:
             changed_families.append((fam, outcome["previous_status"], status))
 
-    recheck_candidates_total = []
+    recheck_candidate_details = []
     cycles_total = 0
     duplicates_suppressed_total = 0
     max_depth_reached = 0
@@ -413,7 +453,7 @@ def apply_family_dependency_shadow(
                 "new_status": new_status,
                 **cand,
             }
-            recheck_candidates_total.append(entry)
+            recheck_candidate_details.append(entry)
             if verbose:
                 log(
                     "[Family Dependency Shadow] RECHECK_CANDIDATE "
@@ -431,7 +471,8 @@ def apply_family_dependency_shadow(
         "nodes": len(families_seen),
         "dependency_edges_recorded": edges_recorded,
         "families_changed": len(changed_families),
-        "recheck_candidates": len(recheck_candidates_total),
+        "recheck_candidates": len(recheck_candidate_details),
+        "recheck_candidate_details": recheck_candidate_details,
         "cycles": cycles_total,
         "duplicates_suppressed": duplicates_suppressed_total,
         "max_depth_reached": max_depth_reached,
