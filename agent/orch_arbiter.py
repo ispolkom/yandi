@@ -119,7 +119,7 @@ def arbitrate(
             verdict=rule_verdict,
             explanation=exp.get(rule_verdict, ""),
             final_answer=None,
-            raw="[rule-based]",
+            details={"raw": "[rule-based]"},
         )
 
     # LLM арбитраж для сложных случаев
@@ -147,14 +147,14 @@ def arbitrate(
             verdict=verdict,
             explanation=data.get("explanation", ""),
             final_answer=data.get("corrected_answer"),
-            raw=raw,
+            details={"raw": raw},
         )
     except Exception as e:
         return ArbiterResult(
             verdict=rule_verdict,
             explanation=f"LLM недоступен: {e}. Вердикт по правилам.",
             final_answer=None,
-            raw=f"[error: {e}]",
+            details={"raw": f"[error: {e}]"},
         )
 
 
