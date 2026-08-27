@@ -590,6 +590,13 @@ def run_optimistic_respond(
             try:
                 dataset_builder = get_dataset_builder()
                 dataset_builder.record_episode({
+                    # Foundation Repair (episode<->trace identity): reuse the
+                    # existing Trace identity (trace_id, already generated
+                    # upstream and threaded through this whole function) as
+                    # the join key back to registry/dataset/orch_traces/*.jsonl
+                    # instead of leaving episodes unlinkable except by fragile
+                    # timestamp proximity (proven ~309s drift in the audit).
+                    "trace_id": trace_id,
                     "query": query_to_use,
                     "intent": intent_result.intent if intent_result else "unknown",
                     "domain": epistemic_result.domain if not is_subjective_answer else "subjective",
