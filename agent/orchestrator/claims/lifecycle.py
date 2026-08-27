@@ -16,6 +16,7 @@ import uuid
 from agent.evidence_pool import build_canonical_evidence_pool, merge_evidence
 from agent.claim_identity import compute_claim_content_hash
 from agent.source_clustering import assign_source_clusters
+from agent.claim_family_registry import get_claim_family_registry
 
 
 def setup_claim_and_evidence_lifecycle(
@@ -320,6 +321,34 @@ def update_beliefs_link_answer_and_personality_cycle(
             f"candidates={min(len(claims_data), 3) if claims_data else 0} "
             f"total={cost['belief_update_ms'] / 1000:.2f}s"
         )
+
+    # ---- Epistemic Core v1 Phase 10: cross-request claim linking ----
+    #
+    # Same [:3] cap as the belief-update loop above, for the same reason
+    # (bounded per-claim network cost) — reusing that established
+    # precedent rather than inventing a new number.
+    if claims_data:
+        _t0_family_link = time.time()
+        try:
+            registry = get_claim_family_registry()
+            domain = (
+                epistemic_result.domain
+                if not is_subjective_answer
+                else "subjective"
+            )
+            for claim in claims_data[:3]:
+                claim_text = (claim.get("claim_text") or "").strip()
+                claim_id = claim.get("claim_id")
+                if not claim_text or not claim_id:
+                    continue
+                family_id = registry.find_or_link_claim(
+                    claim_text, claim_id, domain, log=log, verbose=verbose,
+                )
+                claim["semantic_family_id"] = family_id
+        except Exception as e:
+            if verbose:
+                log(f"[Claim Family] Ошибка линковки семей: {e}")
+        cost["claim_family_link_ms"] = (time.time() - _t0_family_link) * 1000
 
     # ---- YANDI V6: LINKER ----
     supporting_ids = []
