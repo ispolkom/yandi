@@ -312,6 +312,7 @@ class Trace:
                 claim_confidence=claim_data.get("claim_confidence", 0.7),
                 verification_status=claim_data.get("verification_status", "unverified"),
                 evidence_relations=evidence_relations,
+                content_hash=claim_data.get("content_hash"),
             )
             self.claims.append(claim_record)
         else:
@@ -412,6 +413,7 @@ class Trace:
                     # candidate_sources is built from derived_from_evidence_ids),
                     # so the same truncation reasoning applies.
                     "evidence_relations": c.evidence_relations[:3],
+                    "content_hash": c.content_hash,
                 }
                 for c in self.claims[:15]
             ],

@@ -14,6 +14,7 @@ import time
 import uuid
 
 from agent.evidence_pool import build_canonical_evidence_pool, merge_evidence
+from agent.claim_identity import compute_claim_content_hash
 
 
 def setup_claim_and_evidence_lifecycle(
@@ -142,6 +143,15 @@ def setup_claim_and_evidence_lifecycle(
     for claim in claims_data:
         if not claim.get("claim_id"):
             claim["claim_id"] = f"cl_{uuid.uuid4().hex[:8]}"
+
+        # Epistemic Core v1 Phase 2: deterministic content identity,
+        # alongside (not instead of) the random occurrence claim_id above.
+        # See agent/claim_identity.py for the exact canonicalization
+        # policy and why this is NOT semantic/paraphrase identity.
+        if "content_hash" not in claim:
+            claim["content_hash"] = compute_claim_content_hash(
+                claim.get("claim_text", "")
+            )
 
         if not claim.get("claim_type"):
             claim["claim_type"] = "factual"
