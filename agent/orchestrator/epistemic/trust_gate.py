@@ -39,6 +39,29 @@ _TRUST_ORDER = {
     "ONTOLOGICAL_INQUIRY": 2,
     "NORMATIVE_POSITION": 2,
     "CONTESTED": 2,
+    # Bugfix (Epistemic Core v1 Phase 13 audit,
+    # YANDI_EPISTEMIC_TRUST_CONSOLIDATION_REPORT.md): this table was
+    # missing "WEAKLY_SUPPORTED" — a real, actively-assigned label
+    # (agent/orchestrator/claims/status.py, this module's own
+    # apply_epistemic_trust_adjustment, response/writeback.py's
+    # reflection downgrade). A missing key silently defaulted to
+    # _TRUST_ORDER.get(label, 0) == 0 in _apply_trust_cap — BELOW
+    # UNVERIFIED's rank of 1 — which inverted the intended ordering and
+    # broke _apply_trust_cap's "caps only ever lower, never raise"
+    # invariant in both directions: a WEAKLY_SUPPORTED current value
+    # could never be capped down by anything (0 can't exceed any real
+    # rank), and using WEAKLY_SUPPORTED as a cap against an UNVERIFIED
+    # current value would incorrectly UPGRADE it (1 > 0 was read as
+    # "current exceeds the cap"). Rank 2 matches where this label
+    # already sits, uncontested, in this exact module's own two local
+    # `trust_rank` copies (apply_epistemic_trust_adjustment's disputed-
+    # claims and verified==0 branches: UNVERIFIED=0 < WEAKLY_SUPPORTED=1
+    # < PARTIALLY_SUPPORTED=2 < ...) — this is not a new value invented
+    # for this fix, it is the value the codebase already agreed on
+    # elsewhere, now made consistent here too. Found via a live Phase 13
+    # canonical-trust run, not synthetic testing alone (see the
+    # consolidation report's live-results section).
+    "WEAKLY_SUPPORTED": 2,
 }
 
 

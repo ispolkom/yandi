@@ -663,6 +663,7 @@ def process(
         claims_accepted=claims_accepted if 'claims_accepted' in locals() else None,
         claims_rejected=claims_rejected if 'claims_rejected' in locals() else None,
         total_claims=total_claims if 'total_claims' in locals() else None,
+        epistemic_trust_gate_label=label if 'label' in locals() else None,
     )
 
 
