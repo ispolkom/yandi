@@ -253,6 +253,59 @@ check(
     "",
 )
 
+# ── Foundation Repair P0-2: trace.outcome.trust_label must be patched to
+# canonical too, not just trace.trust — the audit's concrete proven
+# divergence (trace.trust == canonical, trace.outcome.trust_label == stale
+# pre-cutover value, because OutcomeRecord is built and attached to trace
+# well before the cutover and nothing touched it afterward). ──
+check(
+    "trace.outcome.trust_label is patched to the canonical value at "
+    "cutover, before tracer.save_trace() persists the trace (Foundation "
+    "Repair P0-2 — previously only trace.trust was reconciled, leaving "
+    "trace.outcome.trust_label permanently stale in the persisted trace)",
+    'trace.outcome.trust_label = _canonical_result["canonical_trust"]' in wb_src,
+    "",
+)
+_outcome_patch_idx = next(
+    (i for i, l in enumerate(_lines)
+     if 'trace.outcome.trust_label = _canonical_result["canonical_trust"]' in l),
+    -1,
+)
+_save_trace_idx = next(i for i, l in enumerate(_lines) if "tracer.save_trace(trace)" in l)
+check(
+    "the outcome.trust_label patch happens after the canonical assignment "
+    "and before the trace is actually persisted to disk",
+    _assign_idx < _outcome_patch_idx < _save_trace_idx,
+    f"assign={_assign_idx} outcome_patch={_outcome_patch_idx} save={_save_trace_idx}",
+)
+
+# ── Foundation Repair P0-2: dataset/experience consumers (future
+# ExperienceRecord material) must read a canonical-trust-derived value, not
+# the pre-cutover synthesizer-strand snapshot. ──
+check(
+    "a canonical trust value is computed before the experience_memory / "
+    "dataset_builder writes (not just at the tail-end response cutover)",
+    "_canonical_trust_for_learning = _canonical_result[\"canonical_trust\"]" in wb_src,
+    "",
+)
+_learning_canonical_idx = next(
+    (i for i, l in enumerate(_lines) if "_canonical_trust_for_learning = _canonical_result" in l),
+    -1,
+)
+_dataset_write_idx = next(
+    (i for i, l in enumerate(_lines) if 'dataset_builder.record_episode(' in l),
+    -1,
+)
+check(
+    "experience_memory.add_experience() and dataset_builder.record_episode() "
+    "both consume the canonical trust value, computed before either call, "
+    "not synthesis_result.trust_level's pre-reflection-downgrade snapshot",
+    0 <= _learning_canonical_idx < _dataset_write_idx
+    and wb_src.count('"trust": _canonical_trust_for_learning,') == 2,
+    f"canonical_computed={_learning_canonical_idx} dataset_write={_dataset_write_idx} "
+    f"occurrences={wb_src.count(chr(34) + 'trust' + chr(34) + ': _canonical_trust_for_learning,')}",
+)
+
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")
 if FAIL:
