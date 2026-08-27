@@ -185,6 +185,11 @@ async def orchestrator_ask(payload: dict):
         "_question":   enriched_query,
         "domain":      frame.domain,
         "missing":     frame.missing,
+        # PET_AGENT_BOUNDARY_AUDIT.md Phase 4C: carried through so a later
+        # delayed validation result can be linked back to the trace that
+        # produced this answer (agent.orch_external_evidence), instead of
+        # only ever mutating this UI-history record in place.
+        "trace_id":    getattr(resp, "trace_id", ""),
         "frame": {
             "intent":      frame.intent,
             "object":      frame.obj,
@@ -246,6 +251,7 @@ async def orchestrator_ask(payload: dict):
         lambda: _bg_validate(
             msg_id, enriched_query, answer_snap, resp.trust_level, loop,
             frame=frame_snap, sources=sources_for_validate,
+            trace_id=getattr(resp, "trace_id", ""),
         ),
     )
     loop.run_in_executor(
@@ -269,16 +275,15 @@ async def orchestrator_ask(payload: dict):
 
 
 def _p2p_available() -> bool:
-    """Проверить слушается ли порт 9999 (YANDI P2P нода)."""
-    import socket
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.3)
-        s.connect(("127.0.0.1", 9999))
-        s.close()
-        return True
-    except Exception:
-        return False
+    """Проверить слушается ли порт 9999 (YANDI P2P нода).
+
+    PET_AGENT_BOUNDARY_AUDIT.md Phase 4C: was its own independent copy of
+    this check; now delegates to agent.orch_node_selector.yandi_connected()
+    (the canonical owner, added this same phase) instead of duplicating
+    the TCP-connect logic here.
+    """
+    from agent.orch_node_selector import yandi_connected
+    return yandi_connected()
 
 
 
@@ -311,12 +316,25 @@ def _local_validate(query: str, answer: str) -> str:
 
 
 def _bg_validate(msg_id: str, query: str, answer: str, prev_trust: str, loop,
-                 frame: dict | None = None, sources: list | None = None):
+                 frame: dict | None = None, sources: list | None = None,
+                 trace_id: str = ""):
     """
     Фоновая проверка.
     Приоритет: YANDI P2P → Orch AI (DeepSeek отдельный канал) → локальная модель.
+
+    PET_AGENT_BOUNDARY_AUDIT.md Phase 4C: PET performs the transport
+    (talking to P2P/DeepSeek/local model, via existing agent/ functions -
+    orch_node_selector/orch_validator/orch_arbiter/orch_ai_validator) and
+    used to ALSO be the sole owner of the resulting verdict, mutating only
+    a Redis-cached UI history record with no link back to the trace that
+    produced the original answer. Now the raw result is additionally
+    handed to agent.orch_external_evidence.record_delayed_validation(),
+    linked by trace_id - agent owns the persisted, trace-linked record;
+    PET's Redis mutation below remains only a UI projection of it.
     """
-    ds_corr = ""  # коррекция DeepSeek, передаём во фронтенд для dataset
+    ds_corr   = ""  # коррекция DeepSeek, передаём во фронтенд для dataset
+    source    = "unknown"
+    raw_text  = ""
     try:
         from agent.orch_node_selector import yandi_connected
 
@@ -326,11 +344,13 @@ def _bg_validate(msg_id: str, query: str, answer: str, prev_trust: str, loop,
             from agent.orch_validator     import validate_parallel
             from agent.orch_arbiter       import arbitrate
 
+            source = "yandi_p2p"
             risk   = assess_risk(query)
             nodes  = select_nodes(risk)
             val    = validate_parallel(query, answer, nodes, domain="general")
             result = arbitrate(query, answer, val)
             trust  = result.verdict
+            raw_text = result.explanation or ""
             if trust == "VERIFIED":
                 upd_text = "✅ Проверено через YANDI-ноды — ответ актуален."
             elif trust == "PARTIALLY_VERIFIED":
@@ -344,6 +364,7 @@ def _bg_validate(msg_id: str, query: str, answer: str, prev_trust: str, loop,
             # ── Orch AI: DeepSeek через отдельный канал ───────────────────
             try:
                 from agent.orch_ai_validator import push_validation_task, get_validation_result, log_validation
+                source  = "deepseek"
                 task_id = push_validation_task(
                     query=query,
                     frame=frame or {},
@@ -358,6 +379,7 @@ def _bg_validate(msg_id: str, query: str, answer: str, prev_trust: str, loop,
                     adds    = result.get("additions", "").strip()
                     raw     = result.get("raw", "").strip()
                     ds_corr = corr
+                    raw_text = raw
                     log_validation(task_id, query, frame or {}, answer, result)
 
                     ds_link = "https://chat.deepseek.com"
@@ -383,17 +405,35 @@ def _bg_validate(msg_id: str, query: str, answer: str, prev_trust: str, loop,
                     # DeepSeek не ответил за 5 минут → локальная модель
                     raise TimeoutError("DeepSeek timeout")
             except Exception:
+                source = "local_ollama"
                 reply = _local_validate(query, answer)
                 if reply:
                     trust    = "PARTIALLY_VERIFIED"
                     upd_text = f"🤖 Локальная проверка: {reply[:300]}"
+                    raw_text = reply
                 else:
                     trust    = prev_trust
                     upd_text = "ℹ Проверка недоступна."
 
     except Exception as e:
+        source   = "error"
         trust    = prev_trust
         upd_text = f"ℹ Проверка завершена ({e.__class__.__name__})."
+
+    # PET_AGENT_BOUNDARY_AUDIT.md Phase 4C: hand the raw delayed-validation
+    # result to agent - agent owns interpretation/persistence of this
+    # event (linked to the original trace_id), not just a Redis UI patch.
+    # Best-effort: if this fails, the UI projection below still runs -
+    # this must never block the user-visible update on an internal
+    # persistence detail.
+    try:
+        from agent.orch_external_evidence import record_delayed_validation
+        record_delayed_validation(
+            trace_id=trace_id, source=source, verdict=trust,
+            reason=upd_text, raw=raw_text,
+        )
+    except Exception:
+        pass
 
     # Иконка и текст замены строки "🔄 Отправлен на проверку..."
     icons = {"VERIFIED": "✅", "PARTIALLY_VERIFIED": "⚠", "REJECTED": "❌"}

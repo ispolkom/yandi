@@ -717,4 +717,5 @@ def run_optimistic_respond(
         steps_taken=[],
         latency_total=total,
         session_id=request.session_id,
+        trace_id=trace_id,
     )

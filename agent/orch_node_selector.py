@@ -10,6 +10,31 @@ from dataclasses import dataclass
 from agent.orch_reputation import get_best_nodes as _get_best_nodes, list_nodes as _list_nodes
 
 
+def yandi_connected() -> bool:
+    """Проверить, слушается ли порт 9999 (YANDI P2P нода).
+
+    PET_AGENT_BOUNDARY_AUDIT.md Phase 4C finding: this function did not
+    exist at all before, even though chat_orch.py::_bg_validate has
+    imported it (`from agent.orch_node_selector import yandi_connected`)
+    since that code was written - every single call raised ImportError
+    immediately, caught by _bg_validate's own outer try/except, silently
+    skipping BOTH the intended P2P branch AND the DeepSeek/local-model
+    fallback branch nested inside its `else`. Minimal fix: the same
+    TCP-connect check pet/chat_orch.py::_p2p_available() already performs
+    independently, moved to its correct owner (agent decides P2P
+    availability, pet does not need its own separate copy of this check).
+    """
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.3)
+        s.connect(("127.0.0.1", 9999))
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
 @dataclass
 class NodeInfo:
     node_id: str
