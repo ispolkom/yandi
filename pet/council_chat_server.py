@@ -121,7 +121,22 @@ async def _inet_ready_after(seconds: int):
 
 
 async def _inet_collect_responses():
-    """Собрать финальные ответы всех моделей, синтезировать через локальную модель."""
+    """Собрать финальные ответы всех моделей и разослать сырую сводку.
+
+    PET_AGENT_BOUNDARY_AUDIT.md Phase 4B: this used to also call
+    _synthesize_council() (a local Ollama model reading all responses and
+    producing an interpretive "🧠 Синтез совета" verdict-like summary,
+    persisted to chat history) - exactly the "PET declares consensus
+    truth" pattern the boundary refactor removes. Per the customer's
+    Phase 4B decision ("Убрать epistemic authority... PET может лишь
+    собирать inputs"): PET now only collects and broadcasts the raw
+    per-model responses (already visible as individual chat messages from
+    each model, plus the `summary` field below) - no auto-generated
+    interpretive synthesis. Building a proper AGENT-owned synthesis
+    service for this UX is legitimate future work, intentionally not
+    invented here (the customer's own fallback: "PET показывает raw
+    opinions ... без epistemic verdict").
+    """
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
     raw = await r.lrange(INET_MSGS_KEY, 0, 20)
     await r.aclose()
@@ -161,79 +176,19 @@ async def _inet_collect_responses():
         f"[{frm.upper()}]\n{text[:500]}" for frm, text in responses.items()
     )
 
-    # Синтез через локальную модель
-    synthesis = await asyncio.get_event_loop().run_in_executor(
-        None, _synthesize_council, question, responses
-    )
-
-    # Сохраняем синтез в историю и сразу показываем в чате
-    if synthesis and not synthesis.startswith("[синтез недоступен"):
-        # Чистим артефакты модели
-        import re as _re
-        synthesis = _re.sub(r"<\|.*?\|>", "", synthesis).strip()
-
-        r2 = aioredis.from_url(REDIS_URL, decode_responses=True)
-        synth_msg = {
-            "type": "message", "from": "council", "tab": "inet",
-            "text": f"🧠 Синтез совета:\n\n{synthesis}",
-            "ts": datetime.now().strftime("%H:%M"),
-            "_ts": datetime.now().timestamp(),
-            "id": str(uuid.uuid4()),
-        }
-        await r2.lpush(INET_MSGS_KEY, json.dumps(synth_msg))
-        await r2.ltrim(INET_MSGS_KEY, 0, MAX_MESSAGES - 1)
-        await r2.aclose()
-        # Отправляем сообщение в чат как обычное message — фронт его отобразит
-        await broadcast(synth_msg)
-
-        # Передаём знание в YANDI ноду (AI-mesh) - see _push_to_node's own
-        # docstring: best-effort, not part of the epistemic knowledge
-        # boundary (a different node's own store, not pet's or agent's).
-        asyncio.create_task(_push_to_node(question, synthesis, list(responses.keys())))
-
     await broadcast({
-        "type":      "inet_parse_ready",
-        "count":     len(responses),
-        "models":    list(responses.keys()),
-        "summary":   raw_summary,
-        "synthesis": synthesis,
+        "type":    "inet_parse_ready",
+        "count":   len(responses),
+        "models":  list(responses.keys()),
+        "summary": raw_summary,
     })
 
 
-def _synthesize_council(question: str, responses: dict) -> str:
-    """Локальная модель читает все ответы совета и даёт итоговый вывод."""
-    import requests as _req, re
-    answers_block = "\n\n".join(
-        f"[{frm.upper()}]: {text[:600]}" for frm, text in responses.items()
-    )
-    prompt = f"""Ты синтезатор мнений AI-совета. Тебе дан вопрос и ответы нескольких AI-моделей.
-
-Вопрос: {question}
-
-Ответы моделей:
-{answers_block}
-
-Задача:
-1. Найди в чём модели СОГЛАСНЫ — это скорее всего правда
-2. Найди ПРОТИВОРЕЧИЯ — отметь их
-3. Дай ИТОГОВЫЙ ВЫВОД — краткий, точный, на русском
-
-Верни только итоговый вывод без преамбул."""
-
-    try:
-        s = _req.Session()
-        s.trust_env = False
-        r = s.post(
-            f"{_OLLAMA_URL}/api/generate",
-            json={"model": _OLLAMA_MOD, "prompt": prompt, "stream": False,
-                  "options": {"temperature": 0.2, "num_predict": 600}},
-            timeout=90,
-        )
-        text = r.json().get("response", "").strip()
-        text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
-        return text
-    except Exception as e:
-        return f"[синтез недоступен: {e}]"
+# PET_AGENT_BOUNDARY_AUDIT.md Phase 4B: _synthesize_council() deleted -
+# its only caller was the "🧠 Синтез совета" interpretive-summary step
+# removed from _inet_collect_responses() above. See that function's own
+# docstring for the reasoning (PET no longer produces an epistemic-
+# flavored consensus verdict).
 
 
 # PET_AGENT_BOUNDARY_AUDIT.md Phase 3 (store_synthesis() finding):
@@ -249,20 +204,11 @@ def _synthesize_council(question: str, responses: dict) -> str:
 # knowledge directly (see the removed _write_knowledge() above) - so
 # delete the dead caller instead of building the missing store_synthesis().
 
-_NODE_KB_URL = "http://127.0.0.1:18082/api/ai-rpc/knowledge/store"
-
-async def _push_to_node(question: str, synthesis: str, models: list[str]):
-    """Отправить синтез совета в YANDI ноду для сохранения в AI-mesh."""
-    try:
-        import aiohttp as _aiohttp
-        payload = {"question": question, "synthesis": synthesis, "models": models}
-        async with _aiohttp.ClientSession(trust_env=False) as session:
-            async with session.post(_NODE_KB_URL, json=payload, timeout=_aiohttp.ClientTimeout(total=5)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    print(f"  [node] знание сохранено в AI-mesh: id={data.get('id','?')[:8]}")
-    except Exception:
-        pass  # Нода не запущена — не страшно, работаем без неё
+# PET_AGENT_BOUNDARY_AUDIT.md Phase 4B: _push_to_node() (forwarded the
+# now-removed synthesis text to a separate P2P AI-mesh node's own
+# knowledge store) and _NODE_KB_URL deleted along with it - its only
+# caller was the removed synthesis step above, so it became unreachable
+# dead code as a direct consequence of that removal.
 
 
 # ── HTML (embedded) ───────────────────────────────────────────────────────────
@@ -2915,9 +2861,6 @@ async def council_broadcast(payload: dict):
 
 
 # ── LLM helpers для датасетов и перевода ─────────────────────────────────────
-
-_OLLAMA_URL = "http://127.0.0.1:11434"
-_OLLAMA_MOD = "heretic:q8"
 
 
 def _gen_slug(question: str) -> str:
