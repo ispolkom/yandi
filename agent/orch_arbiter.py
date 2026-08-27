@@ -124,7 +124,7 @@ def arbitrate(
 
     # LLM арбитраж для сложных случаев
     node_reports = "\n".join(
-        f"- {v.node_id}: {v.verdict} — {v.reason[:100]}"
+        f"- {v.node_id}: {v.verdict} — {v.explanation[:100]}"
         for v in validation.validations
     )
     prompt = (
@@ -162,9 +162,9 @@ if __name__ == "__main__":
     from agent.orch_schemas import NodeValidation, ValidationResult
     val = ValidationResult(
         validations=[
-            NodeValidation(node_id="a", verdict="agree",    reason="Ответ верный", latency=8.0),
-            NodeValidation(node_id="b", verdict="agree",    reason="Согласен",     latency=10.0),
-            NodeValidation(node_id="c", verdict="partial",  reason="Неполно",      latency=12.0),
+            NodeValidation(node_id="a", verdict="agree",    confidence=0.7, explanation="Ответ верный", latency=8.0),
+            NodeValidation(node_id="b", verdict="agree",    confidence=0.7, explanation="Согласен",     latency=10.0),
+            NodeValidation(node_id="c", verdict="partial",  confidence=0.7, explanation="Неполно",      latency=12.0),
         ],
         agree_count=2, disagree_count=0, timed_out=[],
     )
