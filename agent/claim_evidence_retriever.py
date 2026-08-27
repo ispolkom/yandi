@@ -607,18 +607,41 @@ def _snippet_text(snippet: Any) -> str:
     return text or content
 
 
+def _resolve_query_context(claim: Dict[str, Any]) -> str:
+    """
+    Single source of truth for resolving a claim's query context.
+
+    Root-cause fix (query_context NameError, see
+    YANDI_EPISTEMIC_DEPENDENCY_REEVALUATION_REPORT.md §14 item 1):
+    commit 61279fe ("perf: batch claim-specific query generation")
+    extracted this exact precedence chain out of retrieve_claim_evidence()
+    into _build_contextual_claim_text(), but only carried the DERIVED
+    contextual_claim_text value into the new helper. retrieve_claim_
+    evidence() had a SECOND, independent use of the same raw query_context
+    local further down (the SUBJECT ANCHOR VIEW block's `elif
+    query_context:`), which the extraction left behind, referencing a name
+    that no longer existed in that scope. Meanwhile _claim_retrieval_
+    priority() already had its own independent, correct copy of this exact
+    precedence chain — so by the time this was found, the logic existed
+    in two places that could have silently drifted apart, plus one broken
+    call site. This helper is the single definition now; both existing
+    copies and the missing call site all resolve through it.
+    """
+    return (
+        claim.get("query_context", "")
+        or claim.get("source_query", "")
+        or claim.get("original_query", "")
+        or ""
+    ).strip()
+
+
 def _build_contextual_claim_text(claim: Dict[str, Any], claim_text: str) -> str:
     """
     Shared by retrieve_claim_evidence() and retrieve_for_claims()'s P1
     batch pre-computation — one definition, not two copies that could
     silently drift apart.
     """
-    query_context = (
-        claim.get("query_context", "")
-        or claim.get("source_query", "")
-        or claim.get("original_query", "")
-        or ""
-    ).strip()
+    query_context = _resolve_query_context(claim)
 
     if query_context:
         return f"{query_context}\nПроверяемое утверждение: {claim_text}"
@@ -702,6 +725,13 @@ def retrieve_claim_evidence(
     #
     # Если atomic claim уже содержит явный subject — используем его.
     # Если subject потерян при atomization — наследуем его из query.
+    #
+    # query_context здесь ДОЛЖЕН быть тем же значением, что уже
+    # использовал _build_contextual_claim_text() выше (single source
+    # of truth — см. _resolve_query_context()'s docstring про root
+    # cause утерянной переменной после коммита 61279fe).
+    query_context = _resolve_query_context(claim)
+
     claim_subject_anchors = _extract_subject_anchors(
         claim_text
     )
@@ -1419,12 +1449,7 @@ def _claim_retrieval_priority(
     # --------------------------------------------------------
     RELEVANCE_WEIGHT = 8.0
 
-    query_context = (
-        claim.get("query_context", "")
-        or claim.get("source_query", "")
-        or claim.get("original_query", "")
-        or ""
-    ).strip()
+    query_context = _resolve_query_context(claim)
 
     relevance = _query_relevance_score(
         text,
