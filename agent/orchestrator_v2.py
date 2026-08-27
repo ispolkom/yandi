@@ -64,6 +64,7 @@ from agent.orchestrator.claims.mapping import run_claim_evidence_batch, run_clai
 from agent.orchestrator.claims.retrieval import apply_claim_resolution_and_second_retrieval
 from agent.orchestrator.claims.disagreement import apply_claim_claim_disagreement
 from agent.claim_graph_shadow import run_claim_graph_shadow
+from agent.family_dependency_graph import apply_family_dependency_shadow
 from agent.orchestrator.synthesis import build_frame_and_synthesize
 from agent.orchestrator.pre_pipeline import run_pre_pipeline
 from agent.orchestrator.pipeline import run_standard_pipeline
@@ -519,6 +520,19 @@ def process(
         # belief status, retrieval, or coverage.
         run_claim_graph_shadow(
             claims_data, _disagreement_result, _claim_status_counts, log, verbose,
+        )
+
+        # Epistemic Core v1 Phase 11: cross-request semantic-family
+        # dependency graph, SHADOW MODE. Purely observational — see
+        # apply_family_dependency_shadow()'s docstring for the exact
+        # contract. Reuses the SAME claim<->claim NLI results as Phase 8
+        # above (zero additional NLI calls), projected onto
+        # semantic_family_id (Phase 10) instead of claim_id, and persisted
+        # across requests. Its return value is logged only, never read by
+        # anything that affects the answer, Trust, belief status,
+        # retrieval, or coverage.
+        apply_family_dependency_shadow(
+            claims_data, _disagreement_result, log, verbose,
         )
 
         # Final Claim Coverage — extracted to
