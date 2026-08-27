@@ -313,6 +313,8 @@ class Trace:
                 verification_status=claim_data.get("verification_status", "unverified"),
                 evidence_relations=evidence_relations,
                 content_hash=claim_data.get("content_hash"),
+                evidence_search_attempted=claim_data.get("evidence_search_attempted"),
+                evidence_search_error=claim_data.get("evidence_search_error"),
             )
             self.claims.append(claim_record)
         else:
@@ -414,6 +416,8 @@ class Trace:
                     # so the same truncation reasoning applies.
                     "evidence_relations": c.evidence_relations[:3],
                     "content_hash": c.content_hash,
+                    "evidence_search_attempted": c.evidence_search_attempted,
+                    "evidence_search_error": c.evidence_search_error,
                 }
                 for c in self.claims[:15]
             ],

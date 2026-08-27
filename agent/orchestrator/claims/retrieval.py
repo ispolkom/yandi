@@ -76,6 +76,27 @@ def apply_claim_resolution_and_second_retrieval(
         and not _claim_has_effective_evidence(claim)
     ]
 
+    # Epistemic Core v1 Phase 3: search-outcome disambiguation. Does NOT
+    # change verification_status or its vocabulary — these are companion
+    # fields answering a different question ("was a search even
+    # attempted for this claim, and did it error"), not "what did the
+    # search find". A claim already resolved via PASS1 (not in
+    # retrieval_claims) is left at None/None — PASS2 simply isn't
+    # applicable to it, this function has no opinion on PASS1's own
+    # (query-wide, not per-claim) search attempt.
+    _retrieval_claim_ids = {
+        c.get("claim_id") for c in retrieval_claims if c.get("claim_id")
+    }
+    for claim in claims_data:
+        if claim.get("claim_id") in _retrieval_claim_ids:
+            # Needs PASS2. Defaults to "gate blocked it" (False); flipped
+            # to True below only if the retrieval call actually runs.
+            claim["evidence_search_attempted"] = False
+            claim["evidence_search_error"] = None
+        else:
+            claim["evidence_search_attempted"] = None
+            claim["evidence_search_error"] = None
+
     if verbose:
         resolved_count = (
             len(claims_data) - len(retrieval_claims)
@@ -104,6 +125,15 @@ def apply_claim_resolution_and_second_retrieval(
             # хотя в реальном прогоне занимала 47% total latency
             # ([Claim Retrieval Timing] wall=240.74s из 509.74s).
             _claim_retrieval_t0 = time.time()
+
+            # Phase 3: retrieve_for_claims() is one batch call for all of
+            # retrieval_claims — mark them attempted up front, since
+            # reaching this line means the HTTP/search attempt is really
+            # being made for all of them (not per-claim granularity;
+            # matches what the code actually does, not an invented finer
+            # signal).
+            for claim in retrieval_claims:
+                claim["evidence_search_attempted"] = True
 
             claim_retrieved_evidence = retrieve_for_claims(
                 retrieval_claims,
@@ -286,6 +316,13 @@ def apply_claim_resolution_and_second_retrieval(
                     )
 
         except Exception as e:
+            # Phase 3: ERROR != NOT FOUND. The batch call itself failed
+            # (network/timeout/etc) — every claim that was part of this
+            # attempt gets that recorded, distinct from "attempted,
+            # found nothing" (evidence_search_error is None in that case).
+            for claim in retrieval_claims:
+                claim["evidence_search_error"] = str(e)
+
             if verbose:
                 log(
                     f"[Claim Retrieval Pass 2] error={e}"

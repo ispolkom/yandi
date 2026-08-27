@@ -394,6 +394,16 @@ class ClaimRecord:
     # semantic/paraphrase identity. None when absent/not computable
     # (old traces, or empty claim text), never a fabricated value.
     content_hash: Optional[str] = None
+    # Epistemic Core v1 Phase 3: search-outcome disambiguation, companion
+    # to verification_status (which is NOT touched/renamed — see
+    # claims/retrieval.py). evidence_search_attempted: None = PASS2 not
+    # applicable (claim already resolved by PASS1), True = PASS2 retrieval
+    # was actually attempted, False = PASS2 was needed but never ran
+    # (skip_rag/enable_web=False/subjective gate). evidence_search_error:
+    # set only when the attempt itself failed (network/timeout/etc) —
+    # distinct from "attempted, found nothing" (error stays None).
+    evidence_search_attempted: Optional[bool] = None
+    evidence_search_error: Optional[str] = None
 
 
 @dataclass
