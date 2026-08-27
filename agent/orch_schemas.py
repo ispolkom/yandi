@@ -79,6 +79,13 @@ class OrchestratorResponse:
     steps_taken: List[str] = field(default_factory=list)
     latency_total: float = 0.0
     session_id: str = ""
+    # PET_AGENT_BOUNDARY_AUDIT.md Phase 4C: without this, callers outside
+    # agent/ (pet/) had no way to reference the trace that produced a
+    # response - any later delayed validation/evidence they collected
+    # could not be linked back to it except by unreliable timestamp/text
+    # matching. Populated in writeback.py from the same trace_id already
+    # threaded through the whole request.
+    trace_id: str = ""
 
 
 @dataclass
