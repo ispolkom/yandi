@@ -523,6 +523,34 @@ def run_optimistic_respond(
                     "timestamp": datetime.now().isoformat()
                 }
 
+            # Foundation Repair P0-2 (YANDI_SELF_LEARNING_RECONCILIATION_AUDIT.md
+            # P0-2 / YANDI_EPISTEMIC_TRUST_CONSOLIDATION_REPORT.md section 9):
+            # compute canonical Trust HERE — synthesis_result.trust_level is
+            # now final for strand 1 (claim status gate + existence contract,
+            # both applied upstream in pipeline.py, plus the reflection-mistake
+            # downgrade just above are all already folded in), and
+            # epistemic_trust_gate_label (strand 2) has been available since
+            # function entry. This is the same MIN-of-two-strands computation
+            # the original cutover below performs; computing it once here and
+            # reusing `_canonical_result` at that cutover avoids a duplicate
+            # calculation and duplicate trace.add_observation() calls.
+            # Dataset/Experience consumers below (future ExperienceRecord
+            # material) must see the FINAL canonical Trust, not the
+            # pre-cutover synthesizer-strand value — that was the proven
+            # source of systematic trust divergence in persisted learning
+            # data (audit P0-2). self_model/memory/reflection above
+            # deliberately keep seeing the pre-cutover value: reflection's
+            # own mistake-downgrade is itself one of strand 1's inputs, so
+            # reflection running before canonicalization is required, not a
+            # bug (see the consolidation report's "Legacy paths remaining").
+            _canonical_result = compute_canonical_trust(
+                synthesis_result.trust_level,
+                epistemic_trust_gate_label,
+                log,
+                verbose,
+            )
+            _canonical_trust_for_learning = _canonical_result["canonical_trust"]
+
             # ---- СОХРАНЕНИЕ ОПЫТА В ПАМЯТЬ (асинхронное обучение) ----
             try:
                 experience_memory = get_experience_memory()
@@ -539,7 +567,7 @@ def run_optimistic_respond(
                         response=synthesis_result.answer[:500],  # обрезаем до 500 символов
                         context={
                             "domain": epistemic_result.domain if not is_subjective_answer else "subjective_analysis",
-                            "trust": synthesis_result.trust_level,
+                            "trust": _canonical_trust_for_learning,
                             "confidence": synthesis_result.confidence,
                             "mistakes": reflection_result.mistakes,
                             "lessons": reflection_result.lessons,
@@ -565,7 +593,7 @@ def run_optimistic_respond(
                     "query": query_to_use,
                     "intent": intent_result.intent if intent_result else "unknown",
                     "domain": epistemic_result.domain if not is_subjective_answer else "subjective",
-                    "trust": synthesis_result.trust_level,
+                    "trust": _canonical_trust_for_learning,
                     "confidence": synthesis_result.confidence,
                     "mistakes": reflection_result.mistakes if "reflection_result" in locals() else [],
                     "lessons": reflection_result.lessons if "reflection_result" in locals() else [],
@@ -636,6 +664,17 @@ def run_optimistic_respond(
         trace.add_observation("canonical_trust", _canonical_result["canonical_trust"])
         trace.add_observation("canonical_trust_diverged", _canonical_result["diverged"])
         trace.add_observation("canonical_trust_stricter_strand", _canonical_result["stricter_strand"])
+
+        # Foundation Repair P0-2: trace.outcome (OutcomeRecord, set further
+        # above from the pre-cutover trust snapshot) is still an in-memory
+        # object at this point — tracer.save_trace() below is what actually
+        # persists it. Patch it to the canonical value here so the PERSISTED
+        # trace (registry/dataset/orch_traces/*.jsonl) never carries a
+        # trust_label that disagrees with trace.trust in the same file —
+        # this was the audit's proven concrete divergence (P0-2). Fixing the
+        # source object in place, not masking the earlier snapshot.
+        if trace.outcome is not None:
+            trace.outcome.trust_label = _canonical_result["canonical_trust"]
 
     tracer.save_trace(trace)
     log(f"  · Трейс сохранен: {trace_id}")
