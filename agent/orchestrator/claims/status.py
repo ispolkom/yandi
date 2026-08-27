@@ -465,7 +465,7 @@ def evaluate_claim_status_gate(claims_data, synthesis_result, log):
             "установленным фактом.\n"
         )
 
-        if not synthesis_result.answer.startswith("⚠️ ВАЖНО:"):
+        if not synthesis_result.answer.startswith("⚠️"):
             synthesis_result.answer = (
                 _contradiction_notice
                 + "\n"
@@ -497,6 +497,29 @@ def evaluate_claim_status_gate(claims_data, synthesis_result, log):
             synthesis_result.confidence,
             0.45,
         )
+
+        # PRE-PUSH GATE (Blocker 3, live log 2026-08-27): same defect
+        # class as P0-A above, in a branch P0-A didn't cover — disputed
+        # claims (both supports AND contradicts exist, i.e. genuinely
+        # unsettled) previously only capped trust/confidence; the answer
+        # text itself, already generated before claim status was known,
+        # stayed unmarked. A disputed claim is not a "fact" by definition
+        # (real conflicting evidence exists) — mark it in the body, not
+        # only in the trust badge.
+        _disputed_notice = (
+            "⚠️ ВАЖНО: часть проверяемых утверждений в этом ответе "
+            f"является СПОРНОЙ (disputed={claims_disputed} из "
+            f"{total_claims}) — по ним есть и подтверждающие, и "
+            "опровергающие источники одновременно. Не считай эти пункты "
+            "установленным фактом.\n"
+        )
+
+        if not synthesis_result.answer.startswith("⚠️"):
+            synthesis_result.answer = (
+                _disputed_notice
+                + "\n"
+                + synthesis_result.answer
+            )
 
     elif claims_verified == 0:
         # supported != verified.
@@ -552,7 +575,7 @@ def evaluate_claim_status_gate(claims_data, synthesis_result, log):
                 "для проверки.\n"
             )
 
-            if not synthesis_result.answer.startswith("⚠️ ВАЖНО:"):
+            if not synthesis_result.answer.startswith("⚠️"):
                 synthesis_result.answer = (
                     _unsupported_notice
                     + "\n"
@@ -563,6 +586,35 @@ def evaluate_claim_status_gate(claims_data, synthesis_result, log):
                 synthesis_result.confidence,
                 0.60,
             )
+
+            # PRE-PUSH GATE (Blocker 3, live log 2026-08-27): the gap
+            # P0-A left open. verified=0 but supported>0 means the
+            # answer is allowed to stand (some claims ARE evidence-
+            # backed) - but any unverified/candidate/contradicted claims
+            # mixed in alongside those supported ones previously got NO
+            # marker at all, silently riding along as if equally
+            # established. This is exactly the live-observed bug: IARC
+            # evidence relation=uncertain, stated as fact in the
+            # rendered answer, because the ONLY gate that adds an
+            # inline warning required ALL claims to be unsupported.
+            _mixed_unverified = claims_unverified + claims_candidate
+            if _mixed_unverified > 0:
+                _mixed_notice = (
+                    "⚠️ ВАЖНО: не все утверждения в этом ответе "
+                    f"подтверждены — {_mixed_unverified} из "
+                    f"{total_claims} проверяемых утверждений не "
+                    "получили ни подтверждающих, ни опровергающих "
+                    "доказательств (unverified/candidate). Не считай их "
+                    "установленным фактом наравне с подтверждённой "
+                    "частью ответа.\n"
+                )
+
+                if not synthesis_result.answer.startswith("⚠️"):
+                    synthesis_result.answer = (
+                        _mixed_notice
+                        + "\n"
+                        + synthesis_result.answer
+                    )
 
     else:
         log(
