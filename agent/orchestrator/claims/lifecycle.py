@@ -15,6 +15,7 @@ import uuid
 
 from agent.evidence_pool import build_canonical_evidence_pool, merge_evidence
 from agent.claim_identity import compute_claim_content_hash
+from agent.source_clustering import assign_source_clusters
 
 
 def setup_claim_and_evidence_lifecycle(
@@ -65,6 +66,11 @@ def setup_claim_and_evidence_lifecycle(
         pipeline_evidence,
         synthesizer_evidence,
     )
+
+    # Epistemic Core v1 Phase 6: source-independence cluster metadata.
+    # Computed here, not read by any status/trust logic this phase — see
+    # agent/source_clustering.py's module docstring.
+    assign_source_clusters(evidence_data, log=log, verbose=verbose)
 
     technical_errors = reasoning_info.get(
         "technical_errors",

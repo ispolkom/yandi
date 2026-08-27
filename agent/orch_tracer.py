@@ -397,6 +397,7 @@ class Trace:
                     "is_meta_pipeline_output": e.is_meta_pipeline_output,
                     "is_subject_matter_evidence": e.is_subject_matter_evidence,
                     "rejection_reason": e.rejection_reason,
+                    "source_cluster_id": e.source_cluster_id,
                 }
                 for e in self.evidence[:10]
             ],

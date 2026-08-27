@@ -367,6 +367,11 @@ class EvidenceRecord:
     is_meta_pipeline_output: bool = False
     is_subject_matter_evidence: bool = True
     rejection_reason: Optional[str] = None
+    # Epistemic Core v1 Phase 6: source-independence cluster metadata
+    # (see agent/source_clustering.py). None when not computed (old
+    # records, or a code path that doesn't set it) — never a fabricated
+    # shared cluster between two unrelated items.
+    source_cluster_id: Optional[str] = None
 
 
 @dataclass

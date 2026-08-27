@@ -30,6 +30,7 @@ from agent.claim_evidence_mapper import map_claims_to_evidence
 from agent.claim_evidence_retriever import retrieve_for_claims
 from agent.evidence_pool import merge_evidence
 from agent.orchestrator.claims.mapping import run_claim_evidence_batch
+from agent.source_clustering import assign_source_clusters
 
 
 def _claim_has_effective_evidence(claim):
@@ -154,6 +155,12 @@ def apply_claim_resolution_and_second_retrieval(
             added_count = (
                 len(evidence_data) - evidence_before
             )
+
+            # Epistemic Core v1 Phase 6: recompute cluster metadata over
+            # the now-larger pool. Metadata only — see
+            # agent/source_clustering.py's module docstring.
+            if added_count > 0:
+                assign_source_clusters(evidence_data, log=log, verbose=verbose)
 
             if verbose:
                 log(
