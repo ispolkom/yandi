@@ -389,6 +389,11 @@ class ClaimRecord:
     # without it simply have an empty list here (default_factory), nothing
     # to migrate.
     evidence_relations: List[Dict[str, Any]] = field(default_factory=list)
+    # Epistemic Core v1 Phase 2: deterministic content identity (see
+    # agent/claim_identity.py) — NOT a replacement for claim_id, NOT
+    # semantic/paraphrase identity. None when absent/not computable
+    # (old traces, or empty claim text), never a fabricated value.
+    content_hash: Optional[str] = None
 
 
 @dataclass
