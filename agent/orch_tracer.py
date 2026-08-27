@@ -315,6 +315,7 @@ class Trace:
                 content_hash=claim_data.get("content_hash"),
                 evidence_search_attempted=claim_data.get("evidence_search_attempted"),
                 evidence_search_error=claim_data.get("evidence_search_error"),
+                semantic_family_id=claim_data.get("semantic_family_id"),
             )
             self.claims.append(claim_record)
         else:
@@ -419,6 +420,7 @@ class Trace:
                     "content_hash": c.content_hash,
                     "evidence_search_attempted": c.evidence_search_attempted,
                     "evidence_search_error": c.evidence_search_error,
+                    "semantic_family_id": c.semantic_family_id,
                 }
                 for c in self.claims[:15]
             ],

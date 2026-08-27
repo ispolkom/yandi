@@ -409,6 +409,13 @@ class ClaimRecord:
     # distinct from "attempted, found nothing" (error stays None).
     evidence_search_attempted: Optional[bool] = None
     evidence_search_error: Optional[str] = None
+    # Epistemic Core v1 Phase 10: cross-request semantic claim family
+    # (see agent/claim_family_registry.py). Groups this OCCURRENCE with
+    # other occurrences judged semantically equivalent — does not
+    # replace claim_id, which remains this occurrence's own identity.
+    # None when not computed (old traces, or the claim wasn't in the
+    # capped linking batch).
+    semantic_family_id: Optional[str] = None
 
 
 @dataclass
