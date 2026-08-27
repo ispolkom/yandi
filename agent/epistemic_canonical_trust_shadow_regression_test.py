@@ -1,13 +1,23 @@
 """
 agent/epistemic_canonical_trust_shadow_regression_test.py — Epistemic Core
-v1 Phase 13 regression: canonical Trust shadow evaluation
+v1 Phases 13-14 regression: canonical Trust
 (agent/orchestrator/epistemic/canonical_trust.py).
+
+Filename kept from Phase 13 (when this ran in shadow) for history
+continuity; Phase 14 promoted compute_canonical_trust() to the
+authoritative final Trust — see the "Phase 14 cutover proof" section
+below for the checks added at that point.
 
 Deterministic Trust matrix: for each scenario, compares the OLD
 production Trust (final_synthesizer_trust, i.e. SynthesisResult.
 trust_level AFTER all its existing downgrade-only gates) against the
-CANONICAL shadow result, and records a divergence table — not just
-"it runs".
+CANONICAL result, and records a divergence table — not just "it runs".
+Per Phase 14 acceptance (plan section 19), FINAL production Trust must
+now equal this same canonical value; the cutover-proof checks below
+verify that structurally (the assignment exists, in the right order,
+with nothing recomputing it afterward) rather than re-running the whole
+matrix through the live pipeline (already covered by this phase's live
+runs — see the consolidation report).
 
 canonical_trust.py itself does not read claims_data/coverage/grounding
 directly (that is trust_gate.py's job, unchanged this phase) — it only
@@ -22,7 +32,7 @@ adjustment, etc.).
 Run: /home/iam/venv/bin/python3 -m agent.epistemic_canonical_trust_shadow_regression_test
 """
 
-from agent.orchestrator.epistemic.canonical_trust import compute_canonical_trust_shadow
+from agent.orchestrator.epistemic.canonical_trust import compute_canonical_trust
 from agent.orchestrator.epistemic.trust_gate import _TRUST_ORDER
 
 PASS = 0
@@ -125,7 +135,7 @@ print(f"{'scenario':<32} {'old_prod':<20} {'trust_gate':<20} {'canonical':<20} {
 print("-" * 120)
 
 for name, old_prod, trust_gate_label, expected_canonical in MATRIX:
-    result = compute_canonical_trust_shadow(old_prod, trust_gate_label, log=lambda m: None, verbose=False)
+    result = compute_canonical_trust(old_prod, trust_gate_label, log=lambda m: None, verbose=False)
     print(
         f"{name:<32} {old_prod:<20} {trust_gate_label:<20} "
         f"{result['canonical_trust']:<20} {str(result['diverged']):<9} {result['stricter_strand']}"
@@ -147,28 +157,28 @@ print()
 
 # ── Structural / edge-case checks beyond the matrix ──
 
-r_none_both = compute_canonical_trust_shadow(None, None, log=lambda m: None, verbose=False)
+r_none_both = compute_canonical_trust(None, None, log=lambda m: None, verbose=False)
 check(
     "neither strand available -> fail-safe UNVERIFIED, not a crash",
     r_none_both["canonical_trust"] == "UNVERIFIED" and not r_none_both["diverged"],
     f"{r_none_both}",
 )
 
-r_no_gate = compute_canonical_trust_shadow("STRONGLY_SUPPORTED", None, log=lambda m: None, verbose=False)
+r_no_gate = compute_canonical_trust("STRONGLY_SUPPORTED", None, log=lambda m: None, verbose=False)
 check(
     "trust_gate strand unavailable (e.g. synthesis timed out): synthesizer strand used as-is, no crash",
     r_no_gate["canonical_trust"] == "STRONGLY_SUPPORTED" and not r_no_gate["diverged"],
     f"{r_no_gate}",
 )
 
-r_no_synth = compute_canonical_trust_shadow(None, "PARTIALLY_SUPPORTED", log=lambda m: None, verbose=False)
+r_no_synth = compute_canonical_trust(None, "PARTIALLY_SUPPORTED", log=lambda m: None, verbose=False)
 check(
     "synthesizer strand unavailable: trust_gate strand used as-is, no crash",
     r_no_synth["canonical_trust"] == "PARTIALLY_SUPPORTED" and not r_no_synth["diverged"],
     f"{r_no_synth}",
 )
 
-r_equal = compute_canonical_trust_shadow("PARTIALLY_SUPPORTED", "PARTIALLY_SUPPORTED", log=lambda m: None, verbose=False)
+r_equal = compute_canonical_trust("PARTIALLY_SUPPORTED", "PARTIALLY_SUPPORTED", log=lambda m: None, verbose=False)
 check(
     "both strands agree exactly: not diverged, stricter_strand='equal'",
     not r_equal["diverged"] and r_equal["stricter_strand"] == "equal",
@@ -180,15 +190,15 @@ check(
 # direction explicitly (trust_gate stricter than synthesizer, and vice
 # versa), both already covered by the matrix above (#11/#12 and #2
 # respectively), plus a direct symmetric check:
-r_a = compute_canonical_trust_shadow("UNVERIFIED", "STRONGLY_SUPPORTED", log=lambda m: None, verbose=False)
-r_b = compute_canonical_trust_shadow("STRONGLY_SUPPORTED", "UNVERIFIED", log=lambda m: None, verbose=False)
+r_a = compute_canonical_trust("UNVERIFIED", "STRONGLY_SUPPORTED", log=lambda m: None, verbose=False)
+r_b = compute_canonical_trust("STRONGLY_SUPPORTED", "UNVERIFIED", log=lambda m: None, verbose=False)
 check(
     "symmetric: whichever strand is UNVERIFIED wins regardless of argument order",
     r_a["canonical_trust"] == "UNVERIFIED" and r_b["canonical_trust"] == "UNVERIFIED",
     f"{r_a} {r_b}",
 )
 
-# ── Structural inertness: the shadow value can never reach the user ──
+# ── Phase 14 cutover proof: canonical Trust IS the final result, exactly once ──
 
 import inspect
 import agent.orchestrator.response.writeback as writeback_mod
@@ -196,26 +206,38 @@ import agent.orchestrator.response.writeback as writeback_mod
 wb_src = inspect.getsource(writeback_mod.run_optimistic_respond)
 
 check(
-    "run_optimistic_respond never assigns compute_canonical_trust_shadow's "
-    "result into synthesis_result.trust_level",
-    "synthesis_result.trust_level = _canonical_shadow" not in wb_src
-    and "synthesis_result.trust_level = compute_canonical_trust_shadow" not in wb_src,
+    "run_optimistic_respond DOES assign compute_canonical_trust's result "
+    "into synthesis_result.trust_level (the Phase 14 cutover point)",
+    'synthesis_result.trust_level = _canonical_result["canonical_trust"]' in wb_src,
     "",
 )
+
+_lines = wb_src.splitlines()
+_cutover_idx = next(i for i, l in enumerate(_lines) if "_canonical_result = compute_canonical_trust(" in l)
+_assign_idx = next(i for i, l in enumerate(_lines) if 'synthesis_result.trust_level = _canonical_result["canonical_trust"]' in l)
+_return_idx = next(i for i, l in enumerate(_lines) if "return OrchestratorResponse(" in l)
 check(
-    "the final OrchestratorResponse(...) construction does not reference "
-    "_canonical_shadow at all — it is trace-only metadata",
-    "_canonical_shadow" not in wb_src.split("return OrchestratorResponse(")[-1],
-    "",
+    "the cutover happens in the right order: compute canonical -> assign "
+    "it onto synthesis_result.trust_level -> only THEN build the response "
+    "that reads synthesis_result.trust_level",
+    _cutover_idx < _assign_idx < _return_idx,
+    f"compute={_cutover_idx} assign={_assign_idx} return={_return_idx}",
 )
 check(
-    "_canonical_shadow is written only via trace.add_observation, never "
-    "into an OutcomeRecord or OrchestratorResponse field",
-    all(
-        "_canonical_shadow[" not in line or "trace.add_observation(" in line
-        for line in wb_src.splitlines()
-        if "_canonical_shadow[" in line
+    "nothing between the cutover assignment and the final return "
+    "reassigns synthesis_result.trust_level again (single decision point, "
+    "no downstream silent recompute)",
+    not any(
+        "synthesis_result.trust_level =" in l
+        for l in _lines[_assign_idx + 1:_return_idx]
     ),
+    "",
+)
+check(
+    "the trace's own .trust field is also updated to the canonical value "
+    "at cutover (previously it only ever held the trust_gate strand's "
+    "label, set earlier and never reconciled with the final response)",
+    "trace.trust = _canonical_result[" in wb_src,
     "",
 )
 
@@ -224,8 +246,8 @@ import agent.orchestrator_v2 as orch_v2_mod
 orch_src = inspect.getsource(orch_v2_mod)
 check(
     "orchestrator_v2.py threads label through as epistemic_trust_gate_label "
-    "(a keyword arg to run_optimistic_respond), never re-merges it into "
-    "synthesis_result.trust_level itself",
+    "(a keyword arg to run_optimistic_respond) — the cutover itself lives "
+    "entirely inside writeback.py, not duplicated here",
     "epistemic_trust_gate_label=label if 'label' in locals() else None" in orch_src
     and "synthesis_result.trust_level = label" not in orch_src,
     "",

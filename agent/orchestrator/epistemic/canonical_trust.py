@@ -63,12 +63,27 @@ requirement). No claim status, no belief semantics, and no
 verification_status vocabulary are touched — this module reads two
 already-computed strings and returns the lower-ranked one.
 
-SHADOW CONTRACT: this module computes a value, logs it, and returns it
-for the caller to store as trace metadata ONLY (an observation/outcome
-field, never assigned to OrchestratorResponse.trust_level or
-SynthesisResult.trust_level). See its one call site in
-agent/orchestrator/response/writeback.py for the structural guarantee
-(the return value there is never assigned into the response).
+PHASE 13 -> PHASE 14: this module ran in SHADOW for Phase 13 (computed,
+logged, and stored as trace metadata only — never read by the response).
+Phase 14 promotes it to authoritative: its one call site
+(agent/orchestrator/response/writeback.py, right after every existing
+mutation of synthesis_result.trust_level has already applied — claim
+status gate, existence contract, reflection downgrade — and right
+before the trace is saved) now ALSO assigns
+`synthesis_result.trust_level = compute_canonical_trust(...)
+["canonical_trust"]`, which is what the function that builds the final
+`OrchestratorResponse` reads a few lines later. This is the single
+cutover point: nothing downstream of it recomputes Trust again.
+
+Consumers that read synthesis_result.trust_level EARLIER than this
+call site (OutcomeRecord's trust_label, archive_query's trust_level,
+self_model/memory/reflection's trust input) still see the pre-cutover
+value at the point they run — see
+YANDI_EPISTEMIC_TRUST_CONSOLIDATION_REPORT.md section "Legacy paths
+remaining" for the full, explicit list and why each is left as-is
+(moving their call sites is a separate, larger change this phase
+deliberately does not make — see the plan's own "не превращать Phase 14
+в большой cleanup").
 
 PERFORMANCE: zero network/embedding/LLM calls. Pure comparison of two
 already-computed strings via a lookup table.
@@ -81,7 +96,7 @@ from typing import Any, Dict, Optional
 from agent.orchestrator.epistemic.trust_gate import _TRUST_ORDER, _apply_trust_cap
 
 
-def compute_canonical_trust_shadow(
+def compute_canonical_trust(
     final_synthesizer_trust: Optional[str],
     trust_gate_label: Optional[str],
     log,
