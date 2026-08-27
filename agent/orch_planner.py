@@ -149,7 +149,17 @@ def _get_reflection_policies(query: str = "", domain: str = "") -> List[Dict[str
         try:
             reflection = get_reflection()
             if reflection is not None:
-                policies = reflection.get_policies()
+                # Foundation Repair P0-1: get_policies() returns
+                # ReflectionLoop.active_policies BY REFERENCE, not a copy.
+                # The code below appends ad-hoc, per-call, lesson-derived
+                # entries to `policies` for local use by this function's
+                # callers only — it must never mutate the live policy list,
+                # or those ephemeral entries silently leak into
+                # registry/reflection_policies.json on the next
+                # ReflectionLoop._save_policies() call (proven live: this
+                # aliasing bug was the actual source of 379/382 malformed,
+                # unbounded entries found in that file during the audit).
+                policies = list(reflection.get_policies())
         except Exception:
             pass
 
@@ -249,11 +259,22 @@ def _apply_reflection_policies(steps: List[str], policies: List[Dict[str, Any]])
     for policy in policies:
         rule = policy.get("rule", "")
         confidence = policy.get("confidence", 0.5)
-        
+
+        # Foundation Repair P0-1 safety gate: a policy explicitly marked
+        # "observed" (not yet recurred often enough, see
+        # reflection_loop.py::_MIN_OBSERVATIONS_TO_ACTIVATE) must not affect
+        # production planning yet. Entries without a "status" key (legacy
+        # policies persisted before this fix, or the ad-hoc lesson-derived
+        # entries built fresh per call in _get_reflection_policies) are
+        # unaffected — this only blocks freshly-created, not-yet-confirmed
+        # reflection_loop policies.
+        if policy.get("status") == "observed":
+            continue
+
         # Применяем только политики с достаточной уверенностью
         if confidence < 0.5:
             continue
-        
+
         # Проверяем, есть ли правило в карте
         for pattern, action_info in _REFLECTION_POLICY_MAP.items():
             if pattern in rule:
@@ -311,6 +332,9 @@ def _should_skip_internet(query: str, policies: List[Dict[str, Any]]) -> bool:
     """Определить, нужно ли пропускать интернет."""
     # Проверяем политики
     for policy in policies:
+        # Foundation Repair P0-1 safety gate — see _apply_reflection_policies.
+        if policy.get("status") == "observed":
+            continue
         rule = policy.get("rule", "")
         if "Запретить web-поиск" in rule:
             return True

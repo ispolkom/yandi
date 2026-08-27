@@ -96,31 +96,59 @@ class ReflectionLoop:
         except Exception:
             pass
     
+    # Foundation Repair P0-1 safety gate: a brand-new policy must recur this
+    # many times (independent triggers, i.e. separate reflect_on_query calls)
+    # before it is allowed to affect production Planner behavior. This is
+    # NOT a PolicyHypothesis/Shadow/Experiment lifecycle (explicitly out of
+    # scope for Foundation Repair) — just the minimal gate needed to stop a
+    # single mistake occurrence from immediately mutating production plans.
+    _MIN_OBSERVATIONS_TO_ACTIVATE = 3
+
     def _apply_policy_to_planner(self, policy: Dict[str, Any]) -> bool:
         """
         Применить политику к планировщику.
-        Возвращает True, если политика была применена.
+        Возвращает True, если политика ПРИМЕНЕНА (status == "active").
+
+        Foundation Repair P0-1: repetition of the same rule no longer
+        inflates `confidence` unconditionally (was: +0.1 per repeat, capped
+        at 1.0, with no check that the rule ever actually helped — a
+        self-reinforcing loop with no delayed-outcome signal, in violation
+        of ROADMAP_v7 invariants 1.12/1.13). Repetition now only grows
+        `observed_count` (observation/накопление is preserved, per the
+        Foundation Repair brief). A policy only starts affecting the
+        Planner once it has recurred `_MIN_OBSERVATIONS_TO_ACTIVATE` times
+        (status flips "observed" -> "active"); `confidence` is fixed at
+        creation time and never self-inflates afterward.
         """
         policy_type = policy.get("type")
         rule = policy.get("rule")
-        
+
         # Проверяем, не существует ли уже такая политика
         for existing in self.active_policies:
             if existing.get("rule") == rule:
-                existing["confidence"] = min(1.0, existing.get("confidence", 0.5) + 0.1)
+                existing["observed_count"] = existing.get("observed_count", 1) + 1
+                if existing.get("status") != "active" and \
+                        existing["observed_count"] >= self._MIN_OBSERVATIONS_TO_ACTIVATE:
+                    existing["status"] = "active"
+                    existing["activated_at"] = time.time()
                 self._save_policies()
-                return True
-        
-        # Добавляем новую политику
+                return existing.get("status") == "active"
+
+        # Новая политика — фиксируем confidence на момент создания (больше
+        # не растёт от одного лишь повторения) и НЕ применяем к planner,
+        # пока не накопится _MIN_OBSERVATIONS_TO_ACTIVATE независимых
+        # повторений одного и того же rule.
         self.active_policies.append({
             "type": policy_type,
             "rule": rule,
             "confidence": policy.get("confidence", 0.7),
+            "status": "observed",
+            "observed_count": 1,
             "created_at": time.time(),
             "applied_count": 0,
         })
         self._save_policies()
-        return True
+        return False
     
     def reflect_on_query(self, query: str, response: str, 
                          epistemic: Dict[str, Any], 
