@@ -186,11 +186,9 @@ async def _inet_collect_responses():
         # Отправляем сообщение в чат как обычное message — фронт его отобразит
         await broadcast(synth_msg)
 
-        # Пишем в локальный FAISS реестр (QueryFrame будет видеть этот контекст)
-        asyncio.get_event_loop().run_in_executor(
-            None, _write_to_registry, question, synthesis, list(responses.keys())
-        )
-        # Передаём знание в YANDI ноду (AI-mesh)
+        # Передаём знание в YANDI ноду (AI-mesh) - see _push_to_node's own
+        # docstring: best-effort, not part of the epistemic knowledge
+        # boundary (a different node's own store, not pet's or agent's).
         asyncio.create_task(_push_to_node(question, synthesis, list(responses.keys())))
 
     await broadcast({
@@ -238,29 +236,18 @@ def _synthesize_council(question: str, responses: dict) -> str:
         return f"[синтез недоступен: {e}]"
 
 
-def _write_to_registry(question: str, synthesis: str, models: list):
-    """Записать синтез совета в локальный FAISS реестр знаний.
-
-    PET_AGENT_BOUNDARY_AUDIT.md Phase 2: removed a dead hardcoded
-    sys.path entry pointing at another machine's mount
-    (/media/iam/DATASET/yandi) - _PROJECT_ROOT is already on sys.path
-    (this file's own top-of-module insert), so it was never needed for
-    the import to resolve. No behavior change: agent.orch_registry_search
-    has no `store_synthesis` function (confirmed - only a read-side
-    search index, RegistrySearchIndex/search_registry), so this call
-    already failed with ImportError every time, silently caught below,
-    both before and after this cleanup. Left failing rather than
-    papered over - fixing it means deciding what "storing a council
-    synthesis" should mean under the one-source-of-truth architecture,
-    which is Phase 3/4 scope (see PET_AGENT_BOUNDARY_AUDIT.md), not a
-    Phase 2 dead-path cleanup.
-    """
-    try:
-        from agent.orch_registry_search import store_synthesis
-        store_synthesis(question, synthesis, models=models)
-    except Exception as e:
-        print(f"  [registry] ошибка записи: {e}")
-
+# PET_AGENT_BOUNDARY_AUDIT.md Phase 3 (store_synthesis() finding):
+# _write_to_registry() removed - deleted the obsolete pathway rather than
+# implementing the missing function it called. It tried to call
+# agent.orch_registry_search.store_synthesis(question, synthesis,
+# models=models), which does not exist and never has (that module is a
+# read-side FAISS search index only - RegistrySearchIndex/search_registry -
+# with no write/store function at all); the call failed with ImportError
+# every time, silently caught. The customer's Phase 3 decision: if the
+# intended role was "Council synthesis -> Knowledge", that role is now
+# architecturally obsolete - Council no longer has the authority to write
+# knowledge directly (see the removed _write_knowledge() above) - so
+# delete the dead caller instead of building the missing store_synthesis().
 
 _NODE_KB_URL = "http://127.0.0.1:18082/api/ai-rpc/knowledge/store"
 
@@ -2053,9 +2040,8 @@ async function saveDataset(){
     if(d.ok){
       const fname=d.jsonl.split("/").pop();
       const tags=(d.tags||[]).join(", ")||"—";
-      const kw=d.kw_written||0;
       addMsg({from:"system",
-        text:`💾 ${fname}\n🏷 ${tags}\n📚 +${kw} записей в базу знаний`,ts:now()});
+        text:`💾 ${fname}\n🏷 ${tags}`,ts:now()});
       refreshStats();
     } else {
       addMsg({from:"system",text:"❌ Ошибка сохранения",ts:now()});
@@ -2917,8 +2903,6 @@ async def council_broadcast(payload: dict):
 
 _OLLAMA_URL = "http://127.0.0.1:11434"
 _OLLAMA_MOD = "heretic:q8"
-_KW_DIR     = _HERE.parent / "registry" / "verified_knowledge"
-_KW_FILE    = _KW_DIR / "knowledge.jsonl"
 
 
 def _gen_slug(question: str) -> str:
@@ -2967,28 +2951,13 @@ def _gen_en_summary(question: str, answers: dict[str, str]) -> str:
             seen.add(l); out.append(l)
     return " ".join(out[:3])
 
-def _write_knowledge(question: str, answer: str, tags: list[str],
-                     title_en: str, answer_en: str, source: str,
-                     meta: dict | None = None) -> None:
-    """Append one Q&A record to verified_knowledge."""
-    import time as _t
-    _KW_DIR.mkdir(parents=True, exist_ok=True)
-    record = {
-        "question":    question,
-        "answer":      answer,
-        "trust_level": "HYPOTHESIS",
-        "verdict":     "COUNCIL_CONSENSUS",
-        "topic":       tags[0].split(":")[0] if tags else "general",
-        "tags":        tags,
-        "title_en":    title_en,
-        "answer_en":   answer_en,
-        "source":      source,
-        "ts":          _t.time(),
-        "ts_iso":      _t.strftime("%Y-%m-%dT%H:%M:%S"),
-        **(meta or {}),
-    }
-    with open(_KW_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+# PET_AGENT_BOUNDARY_AUDIT.md Phase 3: removed _write_knowledge() - its
+# only caller (save_dataset()) no longer calls it. Wrote a pet-owned
+# "COUNCIL_CONSENSUS"/"HYPOTHESIS" verdict straight into
+# registry/verified_knowledge/knowledge.jsonl (a second, incompatible-
+# schema copy of chat_translate.py's own _write_knowledge, both bypassing
+# agent's canonical knowledge pipeline). See the note at save_dataset()'s
+# former write site for the full reasoning.
 
 
 # Foundation Repair / PET_AGENT_BOUNDARY_AUDIT.md Phase 2: removed a local
@@ -3085,18 +3054,16 @@ async def save_dataset(payload: dict):
         lines.append(f"- {model}: ↑{counts['sent']} ↓{counts['recv']} tokens")
     md_path.write_text("\n".join(lines), encoding="utf-8")
 
-    # ── Write Q&A pairs to verified_knowledge (multilingual bridge) ────────────
-    kw_written = 0
-    if first_q and any(answers_map.values()):
-        for model, ans in answers_map.items():
-            if ans:
-                _write_knowledge(
-                    question=first_q, answer=ans,
-                    tags=tags, title_en=slug, answer_en=answer_en,
-                    source=f"council:{model}",
-                    meta={"lang_orig": lang_orig},
-                )
-                kw_written += 1
+    # PET_AGENT_BOUNDARY_AUDIT.md Phase 3: removed the "write Q&A pairs to
+    # verified_knowledge" step that used to run here. Raw council responses
+    # are already archived above (jsonl_path/md_path) with full provenance -
+    # that IS the raw observation record. Writing a second, pet-owned
+    # "COUNCIL_CONSENSUS"/"HYPOTHESIS" verdict into a separate
+    # registry/verified_knowledge/knowledge.jsonl store bypassed agent's
+    # canonical knowledge pipeline entirely. Knowledge may only be written
+    # by agent.orch_knowledge_writer after going through agent's own
+    # epistemic pipeline - this endpoint does not run one, so it must not
+    # write knowledge.
 
     # ── Clear if requested ─────────────────────────────────────────────────────
     if payload.get("clear"):
@@ -3110,7 +3077,7 @@ async def save_dataset(payload: dict):
         await broadcast({"type": "tokens", "tokens": _tokens, "limits": TOKEN_LIMITS})
 
     return {"ok": True, "jsonl": str(jsonl_path), "md": str(md_path),
-            "slug": file_slug, "tags": tags, "kw_written": kw_written,
+            "slug": file_slug, "tags": tags,
             "messages": len(messages)}
 
 
