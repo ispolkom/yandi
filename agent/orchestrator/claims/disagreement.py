@@ -36,13 +36,22 @@ def apply_claim_claim_disagreement(
     verbose,
 ):
     """
-    Pure side effects: disagreement_engine.challenge() calls, log() calls,
-    and cost["claim_claim_nli_ms"]. No return value — none of the locals
-    computed here (contradiction_count, candidate_count, etc.) are read
-    anywhere else in the original pipeline.
+    Side effects: disagreement_engine.challenge() calls, log() calls, and
+    cost["claim_claim_nli_ms"] — none of that changed by this docstring
+    update.
+
+    Epistemic Core v1 Phase 8 (additive): now ALSO returns
+    {"batch_results": batch_results, "pair_claims": pair_claims} — the
+    exact already-computed infer_claim_relations_batch() output and the
+    pair_id -> (claim_dict, claim_dict) lookup used above, so
+    agent/claim_graph_shadow.py can build claim-graph edges from the SAME
+    NLI results this function already paid for, without a second NLI
+    pass. Returns None when the early gate below is hit or on any
+    exception — callers that don't check the return value (all existing
+    ones) are unaffected either way.
     """
     if not (disagreement_engine and claims_data and len(claims_data) > 1):
-        return
+        return None
 
     try:
         import math
@@ -549,8 +558,14 @@ def apply_claim_claim_disagreement(
                 f"{disagreement_elapsed:.2f}s"
             )
 
+        return {
+            "batch_results": batch_results,
+            "pair_claims": pair_claims,
+        }
+
     except Exception as e:
         if verbose:
             log(
                 f"[V6] Ошибка batch спора: {e}"
             )
+        return None

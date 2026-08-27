@@ -63,6 +63,7 @@ from agent.orchestrator.claims.lifecycle import (
 from agent.orchestrator.claims.mapping import run_claim_evidence_batch, run_claim_evidence_mapping_pass1
 from agent.orchestrator.claims.retrieval import apply_claim_resolution_and_second_retrieval
 from agent.orchestrator.claims.disagreement import apply_claim_claim_disagreement
+from agent.claim_graph_shadow import run_claim_graph_shadow
 from agent.orchestrator.synthesis import build_frame_and_synthesize
 from agent.orchestrator.pre_pipeline import run_pre_pipeline
 from agent.orchestrator.pipeline import run_standard_pipeline
@@ -481,7 +482,9 @@ def process(
         # agent/orchestrator/claims/status.py. Epistemic Core v1 Phase 7:
         # now cluster-aware (evidence_data passed in) — see that
         # function's docstring for the semantic change this activates.
-        classify_claim_epistemic_status(claims_data, log, verbose, evidence_data)
+        # Phase 8: return value captured for the claim-graph shadow's
+        # diagnostic comparison log only — no other reader.
+        _claim_status_counts = classify_claim_epistemic_status(claims_data, log, verbose, evidence_data)
 
         # Final claim trace + epistemic grounding — extracted to
         # agent/orchestrator/claims/status.py (structural extraction;
@@ -501,10 +504,21 @@ def process(
 
         # Claim<->claim disagreement — extracted to
         # agent/orchestrator/claims/disagreement.py (structural
-        # extraction; behavior unchanged).
-        apply_claim_claim_disagreement(
+        # extraction; behavior unchanged). Phase 8: return value captured
+        # for the claim-graph shadow below — reuses these already-
+        # computed NLI results, makes zero additional NLI calls.
+        _disagreement_result = apply_claim_claim_disagreement(
             claims_data, _disagreement_engine, epistemic_result,
             is_subjective_answer, cost, log, verbose,
+        )
+
+        # Epistemic Core v1 Phase 8: claim_graph.py reactivated in SHADOW
+        # MODE. Purely observational — see run_claim_graph_shadow()'s
+        # docstring for the exact contract. Its return value is logged
+        # only, never read by anything that affects the answer, Trust,
+        # belief status, retrieval, or coverage.
+        run_claim_graph_shadow(
+            claims_data, _disagreement_result, _claim_status_counts, log, verbose,
         )
 
         # Final Claim Coverage — extracted to
