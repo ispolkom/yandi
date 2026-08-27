@@ -1,20 +1,14 @@
 """
 chat_translate.py — переводчик и языковые утилиты.
 Endpoint: /api/council/translate, /api/council/languages
-Утилиты: _ollama_mini, _detect_lang_name, _translate, _gen_slug, _gen_tags, _write_knowledge
+Утилиты: _ollama_mini, _detect_lang_name, _translate, _gen_slug, _gen_tags
 Используется только этим модулем — настройки модели не влияют на другие чаты.
 """
-import json
-from pathlib import Path
-
 from fastapi import APIRouter
 
 from pet.shared import OLLAMA_URL, OLLAMA_MOD, LANG_NAMES, LANG_FULL
 
 router = APIRouter()
-
-_KW_DIR  = Path(__file__).parent.parent / "registry" / "verified_knowledge"
-_KW_FILE = _KW_DIR / "knowledge.jsonl"
 
 
 # ── Ollama utility (только для переводчика/тегировщика) ───────────────────────
@@ -119,22 +113,16 @@ def _gen_en_summary(question: str, answers: dict[str, str]) -> str:
     return _ollama_mini(prompt, max_tokens=60)
 
 
-def _write_knowledge(question: str, answer: str, tags: list[str],
-                     slug: str, en_summary: str, models: list[str]):
-    import time
-    _KW_DIR.mkdir(parents=True, exist_ok=True)
-    entry = {
-        "question":   question,
-        "answer":     answer,
-        "tags":       tags,
-        "slug":       slug,
-        "en_summary": en_summary,
-        "models":     models,
-        "ts":         time.time(),
-        "verdict":    "COUNCIL_VERIFIED",
-    }
-    with open(_KW_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+# PET_AGENT_BOUNDARY_AUDIT.md Phase 3: _write_knowledge() removed -
+# confirmed zero callers anywhere (dead code: listed in this module's own
+# docstring as a utility, never invoked by any endpoint). It wrote a
+# pet-owned "COUNCIL_VERIFIED" verdict straight into
+# registry/verified_knowledge/knowledge.jsonl, bypassing agent's canonical
+# knowledge pipeline entirely - exactly the "PET is a second knowledge
+# writer" pattern the boundary refactor removes. Per the customer's Phase 3
+# decision: raw external AI text is an observation, not verified knowledge;
+# knowledge may only be written through agent.orch_knowledge_writer after
+# it has gone through agent's own epistemic pipeline.
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
