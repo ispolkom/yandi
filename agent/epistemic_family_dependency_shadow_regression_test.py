@@ -258,25 +258,61 @@ check(
 )
 tmp_path.unlink()
 
-# ── 11. Scope containment: production call site never captures the return value ──
+# ── 11. Scope containment: structural inertness w.r.t. THIS request ──
+#
+# Epistemic Core v1 Phase 12 (agent/dependency_recheck.py) legitimately
+# reads apply_family_dependency_shadow()'s return value now (to decide
+# what to recheck), so "return value never captured at the call site" is
+# no longer the right invariant to test. What must still hold — and is
+# checked here structurally, not by trusting the call site's style — is
+# that this function itself never mutates claims_data and never even
+# HAS a parameter through which it could reach synthesis_result/Trust/
+# evidence_data. That is what actually makes it impossible for THIS
+# function to influence the current request's own answer/Trust/coverage,
+# regardless of who reads its return value afterward.
+
+import agent.family_dependency_graph as fdg_mod
+import inspect as _inspect
+
+_sig = _inspect.signature(fdg_mod.apply_family_dependency_shadow)
+check(
+    "apply_family_dependency_shadow has no synthesis_result/trust/evidence_data/"
+    "belief_manager parameter — structurally cannot reach those subsystems",
+    not any(
+        p in _sig.parameters
+        for p in ("synthesis_result", "trust", "evidence_data", "belief_manager")
+    ),
+    f"{list(_sig.parameters)}",
+)
+
+fdg_src = inspect.getsource(fdg_mod.apply_family_dependency_shadow)
+check(
+    "apply_family_dependency_shadow never assigns into a claim/pair dict "
+    "(only reads claims_data via .get) — cannot mutate verification_status "
+    "or any other claim field as a side effect",
+    not any(
+        pattern in fdg_src
+        for pattern in ("claim[", "c1[", "c2[", "c[")
+    ),
+    "",
+)
 
 import agent.orchestrator_v2 as orch_v2_mod
 orch_src = inspect.getsource(orch_v2_mod)
 check(
-    "orchestrator_v2.py calls apply_family_dependency_shadow as a bare statement — "
-    "its return value is never captured, so it is structurally impossible for it "
-    "to influence the answer/Trust/belief/retrieval/coverage",
-    "apply_family_dependency_shadow(" in orch_src
-    and "= apply_family_dependency_shadow(" not in orch_src,
+    "orchestrator_v2.py calls apply_dependency_recheck (Phase 12) as a bare "
+    "statement — its return value is never captured, so it is structurally "
+    "impossible for it to influence THIS request's own answer/Trust/coverage",
+    "apply_dependency_recheck(" in orch_src
+    and "= apply_dependency_recheck(" not in orch_src,
     "",
 )
 
-import agent.family_dependency_graph as fdg_mod
-fdg_src = inspect.getsource(fdg_mod)
 check(
     "family_dependency_graph.py makes no NLI/embedding calls of its own "
     "(no requests/http imports) — reuses only already-computed disagreement_result",
-    "import requests" not in fdg_src and "infer_claim_relations_batch" not in fdg_src,
+    "import requests" not in inspect.getsource(fdg_mod)
+    and "infer_claim_relations_batch" not in inspect.getsource(fdg_mod),
     "",
 )
 

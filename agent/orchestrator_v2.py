@@ -65,6 +65,7 @@ from agent.orchestrator.claims.retrieval import apply_claim_resolution_and_secon
 from agent.orchestrator.claims.disagreement import apply_claim_claim_disagreement
 from agent.claim_graph_shadow import run_claim_graph_shadow
 from agent.family_dependency_graph import apply_family_dependency_shadow
+from agent.dependency_recheck import apply_dependency_recheck
 from agent.orchestrator.synthesis import build_frame_and_synthesize
 from agent.orchestrator.pre_pipeline import run_pre_pipeline
 from agent.orchestrator.pipeline import run_standard_pipeline
@@ -523,16 +524,31 @@ def process(
         )
 
         # Epistemic Core v1 Phase 11: cross-request semantic-family
-        # dependency graph, SHADOW MODE. Purely observational — see
-        # apply_family_dependency_shadow()'s docstring for the exact
-        # contract. Reuses the SAME claim<->claim NLI results as Phase 8
+        # dependency graph. Purely observational with respect to THIS
+        # request — see apply_family_dependency_shadow()'s docstring for
+        # the exact contract (it only ever reads claims_data, never
+        # mutates it, and takes no synthesis_result/trust/evidence_data
+        # parameter). Reuses the SAME claim<->claim NLI results as Phase 8
         # above (zero additional NLI calls), projected onto
         # semantic_family_id (Phase 10) instead of claim_id, and persisted
-        # across requests. Its return value is logged only, never read by
-        # anything that affects the answer, Trust, belief status,
-        # retrieval, or coverage.
-        apply_family_dependency_shadow(
+        # across requests. Phase 12 (below) reads its return value on
+        # purpose; nothing that affects THIS request's own answer, Trust,
+        # claim status, retrieval, or coverage does.
+        _family_dependency_stats = apply_family_dependency_shadow(
             claims_data, _disagreement_result, log, verbose,
+        )
+
+        # Epistemic Core v1 Phase 12: bounded, controlled re-evaluation of
+        # whatever RECHECK_CANDIDATEs Phase 11 found this request. Real
+        # retrieval + real NLI + a real belief update can happen here, but
+        # only for a DIFFERENT semantic family than the one this request
+        # is about, hard-capped (agent/dependency_recheck.py's
+        # MAX_RECHECKS_PER_CALL, depth==1 only, per-family cooldown), and
+        # structurally unable to change this request's own answer, Trust,
+        # claim status, or coverage (its return value is discarded here
+        # exactly like Phase 8/11's).
+        apply_dependency_recheck(
+            _family_dependency_stats, _belief_manager, cost, log, verbose,
         )
 
         # Final Claim Coverage — extracted to
