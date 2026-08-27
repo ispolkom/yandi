@@ -25,7 +25,7 @@ from pathlib import Path
 import redis
 import requests
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from assistant.local_http import local_post
+from agent.local_http import local_post
 
 ROOT = Path(__file__).resolve().parent.parent
 REDIS_HOST = "127.0.0.1"
