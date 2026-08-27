@@ -2768,14 +2768,26 @@ async def knowledge_list(trust: str = "VERIFIED", limit: int = 50):
 @app.post("/api/yandi/validate")
 async def yandi_validate(payload: dict):
     """
-    YANDI validation endpoint — принимает вопрос+ответ, валидирует через браузерные модели.
-    Возвращает вердикт: agree | disagree | partial.
+    Transport adapter (PET_AGENT_BOUNDARY_AUDIT.md Phase 4A): relays
+    question+answer to an active browser model and returns its RAW text.
+    PET does not parse or compute a verdict here - interpretation
+    (agree/disagree/partial) is agent/orch_validator.py's
+    _validate_on_yandi_node(), the only caller of this endpoint.
+
+    transport_status distinguishes availability states explicitly (per
+    the boundary refactor's availability/latency requirement - timeout
+    and unavailable must never be silently treated the same as each
+    other, or as negative evidence):
+      "unavailable" — no active browser model to ask, no relay attempted
+      "timeout"     — relayed, no response within the wait window
+      "completed"   — relayed, raw_text is a real model response
     """
     import uuid as _uuid
     question = (payload.get("question") or "").strip()
     answer   = (payload.get("answer")   or "").strip()
     if not question or not answer:
-        return {"ok": False, "error": "question and answer required"}
+        return {"ok": False, "transport_status": "error",
+                "transport_error": "question and answer required", "raw_text": ""}
 
     prompt = (
         "Ты верификатор ответов. Проверь правильность ответа на вопрос.\n\n"
@@ -2784,13 +2796,16 @@ async def yandi_validate(payload: dict):
         f"Вопрос: {question[:500]}\n\nОтвет для проверки:\n{answer[:1500]}"
     )
 
-    # Отправить в relay-цепочку (браузерные модели)
+    # Availability check up front — don't make the caller wait a full
+    # relay timeout just to learn nothing was listening.
     active = _active_models()
     if not active:
-        return {"ok": False, "verdict": "partial", "reason": "нет активных браузерных моделей"}
+        return {"ok": False, "transport_status": "unavailable",
+                "transport_error": "no active browser models", "raw_text": ""}
 
-    model  = active[0]
-    task_id = str(_uuid.uuid4())
+    model      = active[0]
+    task_id    = str(_uuid.uuid4())
+    started_at = _time.time()
     await _queue_after(model, task_id, prompt, 0)
 
     # Ждём ответ до 60 секунд
@@ -2800,20 +2815,20 @@ async def yandi_validate(payload: dict):
         raw = await r.get(f"council:relay:result:{task_id}")
         if raw:
             await r.aclose()
-            import json as _json, re as _re
+            import re as _re
             raw = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
-            try:
-                data = _json.loads(raw)
-                v = data.get("verdict", "partial")
-                if v not in ("agree", "disagree", "partial"):
-                    v = "partial"
-                return {"ok": True, "verdict": v, "reason": data.get("reason", "")}
-            except Exception:
-                return {"ok": True, "verdict": "partial", "reason": raw[:200]}
+            return {
+                "ok": True, "transport_status": "completed",
+                "raw_text": raw, "provider": model,
+                "latency_ms": round((_time.time() - started_at) * 1000),
+            }
         await _asyncio.sleep(1)
 
     await r.aclose()
-    return {"ok": False, "verdict": "partial", "reason": "timeout"}
+    return {"ok": False, "transport_status": "timeout",
+            "transport_error": "no relay response within 60s",
+            "raw_text": "", "provider": model,
+            "latency_ms": round((_time.time() - started_at) * 1000)}
 
 
 @app.post("/api/council/pause")

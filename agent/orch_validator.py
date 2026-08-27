@@ -113,20 +113,21 @@ def _validate_on_council_node(
         if not raw:
             update_node(node_id, correct=False, latency=latency, domain=domain)
             return NodeValidation(
-                node_id=node_id, verdict="partial",
-                reason="[Council не ответил]", latency=latency,
+                node_id=node_id, verdict="partial", confidence=0.0,
+                explanation="[Council не ответил]", latency=latency,
             )
 
         verdict, reason = _parse_free_text_verdict(raw)
         update_node(node_id, correct=(verdict == "agree"), latency=latency, domain=domain)
-        return NodeValidation(node_id=node_id, verdict=verdict, reason=reason, latency=latency)
+        return NodeValidation(node_id=node_id, verdict=verdict, confidence=0.7,
+                               explanation=reason, latency=latency)
 
     except Exception as e:
         latency = time.time() - t0
         update_node(node_id, correct=False, latency=latency, domain=domain)
         return NodeValidation(
-            node_id=node_id, verdict="partial",
-            reason=f"[ошибка Council: {e}]", latency=latency,
+            node_id=node_id, verdict="partial", confidence=0.0,
+            explanation=f"[ошибка Council: {e}]", latency=latency,
         )
 
 
@@ -137,12 +138,22 @@ def _validate_on_yandi_node(
     answer: str,
     domain: str,
 ) -> NodeValidation:
-    """Валидация через YANDI AI-RPC (порт 18082)."""
+    """Валидация через YANDI transport endpoint (pet/council_chat_server.py
+    /api/yandi/validate).
+
+    PET_AGENT_BOUNDARY_AUDIT.md Phase 4A: that endpoint is pure transport
+    now (returns raw_text + transport_status, never a computed verdict) -
+    this function is the only place that turns the raw browser-model text
+    into agree/disagree/partial, via the same _parse_free_text_verdict()
+    every other node type in this file already uses.
+
+    transport_status "unavailable" (no active browser model) and
+    "timeout" (relayed, no answer in time) are distinguished from an
+    actual ambiguous/unparseable answer in the `reason` text, but both
+    still resolve to verdict="partial" - neither state must count as
+    negative (disagree) evidence just because nothing answered.
+    """
     t0 = time.time()
-    prompt = VALIDATOR_PROMPT.format(
-        question=question[:500],
-        answer=answer[:1500],
-    )
     try:
         resp = _session.post(
             endpoint,
@@ -151,18 +162,40 @@ def _validate_on_yandi_node(
         )
         resp.raise_for_status()
         data    = resp.json()
-        raw     = data.get("reason", data.get("verdict", "partial"))
-        raw     = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         latency = time.time() - t0
+        status  = data.get("transport_status", "completed" if data.get("ok") else "error")
+
+        if status == "unavailable":
+            update_node(node_id, correct=False, latency=latency, domain=domain)
+            return NodeValidation(
+                node_id=node_id, verdict="partial", confidence=0.0,
+                explanation="[YANDI: нет активных браузерных моделей]", latency=latency,
+            )
+        if status == "timeout":
+            update_node(node_id, correct=False, latency=latency, domain=domain)
+            return NodeValidation(
+                node_id=node_id, verdict="partial", confidence=0.0,
+                explanation="[YANDI: нет ответа за отведённое время]", latency=latency,
+            )
+        raw = (data.get("raw_text") or "").strip()
+        if not data.get("ok") or not raw:
+            update_node(node_id, correct=False, latency=latency, domain=domain)
+            return NodeValidation(
+                node_id=node_id, verdict="partial", confidence=0.0,
+                explanation=f"[YANDI: {data.get('transport_error', 'нет ответа')}]", latency=latency,
+            )
+
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         verdict, reason = _parse_free_text_verdict(raw)
         update_node(node_id, correct=(verdict == "agree"), latency=latency, domain=domain)
-        return NodeValidation(node_id=node_id, verdict=verdict, reason=reason, latency=latency)
+        return NodeValidation(node_id=node_id, verdict=verdict, confidence=0.7,
+                               explanation=reason, latency=latency)
     except Exception as e:
         latency = time.time() - t0
         update_node(node_id, correct=False, latency=latency, domain=domain)
         return NodeValidation(
-            node_id=node_id, verdict="partial",
-            reason=f"[ошибка YANDI: {e}]", latency=latency,
+            node_id=node_id, verdict="partial", confidence=0.0,
+            explanation=f"[ошибка YANDI: {e}]", latency=latency,
         )
 
 
@@ -225,7 +258,8 @@ def _validate_on_node(
         latency = time.time() - t0
 
         update_node(node_id, correct=(verdict == "agree"), latency=latency, domain=domain)
-        return NodeValidation(node_id=node_id, verdict=verdict, reason=reason, latency=latency)
+        return NodeValidation(node_id=node_id, verdict=verdict, confidence=0.7,
+                               explanation=reason, latency=latency)
 
     except Exception as e:
         latency = time.time() - t0
@@ -233,7 +267,8 @@ def _validate_on_node(
         return NodeValidation(
             node_id=node_id,
             verdict="partial",
-            reason=f"[ошибка ноды: {e}]",
+            confidence=0.0,
+            explanation=f"[ошибка ноды: {e}]",
             latency=latency,
         )
 
@@ -301,4 +336,4 @@ if __name__ == "__main__":
     result = validate_parallel(question, answer, nodes, domain="tech")
     print(f"Agree: {result.agree_count}  Disagree: {result.disagree_count}  Timeout: {result.timed_out}")
     for v in result.validations:
-        print(f"  [{v.verdict:8s}] {v.node_id} ({v.latency:.1f}s): {v.reason[:80]}")
+        print(f"  [{v.verdict:8s}] {v.node_id} ({v.latency:.1f}s): {v.explanation[:80]}")
