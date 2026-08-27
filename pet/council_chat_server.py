@@ -64,6 +64,12 @@ from pet.chat_translate import router as _translate_router
 from pet.chat_orch      import router as _orch_router
 from pet.chat_agent     import router as _agent_router
 
+# PET_AGENT_BOUNDARY_AUDIT.md Phase 2: this file used to define its own
+# byte-for-byte-identical copy of chat_translate.py's raw Ollama call
+# helper (verified: same endpoint, same trust_env=False, same <think>-tag
+# and stop-token cleanup) instead of reusing it. Import the single owner.
+from pet.chat_translate import _ollama_mini
+
 app.include_router(_local_router)
 app.include_router(_translate_router)
 app.include_router(_orch_router)
@@ -233,10 +239,23 @@ def _synthesize_council(question: str, responses: dict) -> str:
 
 
 def _write_to_registry(question: str, synthesis: str, models: list):
-    """Записать синтез совета в локальный FAISS реестр знаний."""
+    """Записать синтез совета в локальный FAISS реестр знаний.
+
+    PET_AGENT_BOUNDARY_AUDIT.md Phase 2: removed a dead hardcoded
+    sys.path entry pointing at another machine's mount
+    (/media/iam/DATASET/yandi) - _PROJECT_ROOT is already on sys.path
+    (this file's own top-of-module insert), so it was never needed for
+    the import to resolve. No behavior change: agent.orch_registry_search
+    has no `store_synthesis` function (confirmed - only a read-side
+    search index, RegistrySearchIndex/search_registry), so this call
+    already failed with ImportError every time, silently caught below,
+    both before and after this cleanup. Left failing rather than
+    papered over - fixing it means deciding what "storing a council
+    synthesis" should mean under the one-source-of-truth architecture,
+    which is Phase 3/4 scope (see PET_AGENT_BOUNDARY_AUDIT.md), not a
+    Phase 2 dead-path cleanup.
+    """
     try:
-        import sys as _sys
-        _sys.path.insert(0, "/media/iam/DATASET/yandi")
         from agent.orch_registry_search import store_synthesis
         store_synthesis(question, synthesis, models=models)
     except Exception as e:
@@ -2902,23 +2921,6 @@ _KW_DIR     = _HERE.parent / "registry" / "verified_knowledge"
 _KW_FILE    = _KW_DIR / "knowledge.jsonl"
 
 
-def _ollama_mini(prompt: str, max_tokens: int = 60) -> str:
-    import requests as _req
-    try:
-        s = _req.Session(); s.trust_env = False
-        r = s.post(f"{_OLLAMA_URL}/api/generate",
-                   json={"model": _OLLAMA_MOD, "prompt": prompt, "stream": False,
-                         "options": {"temperature": 0.1, "num_predict": max_tokens}},
-                   timeout=60)
-        raw = r.json().get("response", "").strip()
-        import re
-        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-        for stop in ("<|endoftext|>", "<|im_start|>", "<|im_end|>", "</s>"):
-            raw = raw.split(stop)[0]
-        return raw.strip()
-    except Exception:
-        return ""
-
 def _gen_slug(question: str) -> str:
     """Translate question to English 3-5 word lowercase-dash slug."""
     prompt = (
@@ -2989,22 +2991,11 @@ def _write_knowledge(question: str, answer: str, tags: list[str],
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-# Language codes → display names (used by UI selector)
-LANG_NAMES = {
-    "auto": "Авто", "ru": "Русский", "en": "English",
-    "zh": "中文", "de": "Deutsch", "fr": "Français",
-    "es": "Español", "ro": "Română", "uk": "Українська",
-    "ja": "日本語", "ko": "한국어", "ar": "العربية",
-    "pl": "Polski", "tr": "Türkçe",
-}
-
-LANG_FULL = {
-    "ru": "Russian", "en": "English", "zh": "Chinese",
-    "de": "German",  "fr": "French",  "es": "Spanish",
-    "ro": "Romanian","uk": "Ukrainian","ja": "Japanese",
-    "ko": "Korean",  "ar": "Arabic",  "pl": "Polish",
-    "tr": "Turkish",
-}
+# Foundation Repair / PET_AGENT_BOUNDARY_AUDIT.md Phase 2: removed a local
+# LANG_NAMES/LANG_FULL redefinition that byte-for-byte duplicated (verified
+# via dict equality) the versions already imported from pet.shared at the
+# top of this file (line ~40) and shadowed them for no purpose - confirmed
+# neither local copy was ever referenced anywhere else in this file.
 
 def _detect_lang_name(text: str) -> str:
     """Определить язык текста — вернуть полное название на английском (любой язык)."""
@@ -3030,24 +3021,6 @@ def _detect_lang(text: str) -> str:
         "japanese": "ja", "korean": "ko", "arabic": "ar", "polish": "pl", "turkish": "tr",
     }
     return _name_to_code.get(name, name[:2])
-
-def _translate(text: str, target_lang_name: str) -> str:
-    """Перевести текст на язык target_lang_name (полное название, любой язык)."""
-    prompt = (
-        f"Translate the following text to {target_lang_name}. "
-        "Output ONLY the translation, no explanations, no prefix.\n"
-        "Text:\n" + text[:2000] + "\nTranslation:"
-    )
-    raw = _ollama_mini(prompt, max_tokens=800)
-    import re
-    paras = raw.split("\n\n")
-    seen, out = set(), []
-    for p in paras:
-        ps = p.strip()
-        if ps and ps not in seen:
-            seen.add(ps); out.append(ps)
-    return "\n\n".join(out).strip()
-
 
 @app.post("/api/council/save_dataset")
 async def save_dataset(payload: dict):
