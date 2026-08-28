@@ -18,6 +18,7 @@ class LocalSynthesisResult:
     refutation_text: str = ""
 
 import time
+from datetime import datetime
 from pathlib import Path
 import uuid
 
@@ -70,7 +71,7 @@ from agent.epistemic_contradiction_shadow import (
     build_shadow_request_summary,
 )
 from agent.dependency_recheck import apply_dependency_recheck
-from agent.db.sql.shadow_write import shadow_record_question_and_run, pipeline_version
+from agent.db.sql.shadow_write import shadow_record_question_and_run, shadow_complete_run, pipeline_version
 from agent.orchestrator.synthesis import build_frame_and_synthesize
 from agent.orchestrator.pre_pipeline import run_pre_pipeline
 from agent.orchestrator.pipeline import run_standard_pipeline
@@ -305,6 +306,22 @@ def process(
         request, verbose, t_start, query, log, trace, cost, _tracer
     )
     if early_response is not None:
+        # Этап 5 (SQL persistence migration, MIGRATION_STATUS.md §41 gap
+        # closed): without this, a run that exits via one of
+        # run_pre_pipeline's 11 short-circuits stayed status='running' in
+        # SQL forever (until reconcile_stale_running_runs() eventually
+        # marks it 'aborted', which is also wrong — this run DID
+        # complete, with a real delivered answer). early_response.answer/
+        # trust_level are the literal delivered text and the trust label
+        # this SAME branch already decided (e.g. trace.trust set right
+        # above it) — reused, not invented; matches shadow_complete_run's
+        # existing use in agent/orchestrator/response/writeback.py.
+        shadow_complete_run(
+            run_id=trace_id, question_id=_sql_question_id,
+            delivered_answer_text=early_response.answer, completed_at=datetime.utcnow(),
+            canonical_trust=early_response.trust_level,
+            reason="pre_pipeline_short_circuit", log=log, verbose=verbose,
+        )
         return early_response
 
     query_to_use = _pre_pipeline_state["query_to_use"]
@@ -355,6 +372,16 @@ def process(
         is_subjective_answer, enrich_result,
     )
     if early_response is not None:
+        # Same fix as run_pre_pipeline's early_response branch above —
+        # run_standard_pipeline() has its own early-return short-circuits
+        # (e.g. cache-hit direct answer) with the identical "stuck at
+        # status='running' forever" gap otherwise.
+        shadow_complete_run(
+            run_id=trace_id, question_id=_sql_question_id,
+            delivered_answer_text=early_response.answer, completed_at=datetime.utcnow(),
+            canonical_trust=early_response.trust_level,
+            reason="standard_pipeline_short_circuit", log=log, verbose=verbose,
+        )
         return early_response
 
     epistemic_result = _pipeline_state["epistemic_result"]
