@@ -908,21 +908,33 @@ def _budgeted_side_candidates(
     budget: int,
     fetch_cache: "SharedFetchCache",
     side: str,
-) -> tuple[List[str], int, int]:
+    processed_urls_canonical: Optional[set] = None,
+) -> tuple[List[str], int, int, int]:
     """
     ONE side (e.g. direct/counter, or main/counter) of a budgeted
-    discovery -> exact-dedup -> stoplist-exclusion -> budget-cap funnel
-    (P4 §6/§7/§12). Accepts a LIST of queries because a "side" is not
-    always one query — PASS2 (scrape_budgeted) has exactly one query
-    per side, but stage 6 (scrape_budgeted_side) can have up to 3
-    alternative main-query formulations or 2-3 refutation queries; all
-    of them feed the SAME candidate pool for that side before dedup/
-    stoplist/cap, same as the old scrape()'s multi-query discovery loop
-    did for a single undifferentiated pool.
+    discovery -> exact-dedup -> stoplist-exclusion -> processed-
+    exclusion -> budget-cap funnel (P4 §6/§7/§12, P6 §6). Accepts a
+    LIST of queries because a "side" is not always one query — PASS2
+    (scrape_budgeted) has exactly one query per side, but stage 6
+    (scrape_budgeted_side) can have up to 3 alternative main-query
+    formulations or 2-3 refutation queries; all of them feed the SAME
+    candidate pool for that side before dedup/stoplist/processed/cap,
+    same as the old scrape()'s multi-query discovery loop did for a
+    single undifferentiated pool.
+
+    processed_urls_canonical: pre-canonicalized (SharedFetchCache.
+    canonicalize) set of URLs already verified for THIS claim in a
+    prior cycle (Этап 4 / P6) — None or empty for stage 6, which has
+    no claim/content_hash yet (P6 §8, deliberately not touched). A
+    processed URL is excluded BEFORE the budget cap, same tier as
+    stoplist — it never occupies one of the 3 slots. Shared identically
+    across BOTH sides (P6 §10: a URL processed as direct is just as
+    processed if it would otherwise be discovered again as counter —
+    there is no per-side processed state).
 
     Returns (candidate_urls_capped_at_budget, discovered_count,
-    stoplist_excluded_count) — NO fetch happens here, this is
-    candidate SELECTION only.
+    stoplist_excluded_count, processed_excluded_count) — NO fetch
+    happens here, this is candidate SELECTION only.
 
     Independent of the other side by construction — this function
     never sees or is affected by the other side's query/results, which
@@ -940,7 +952,7 @@ def _budgeted_side_candidates(
         discovered.extend(urls)
 
     if not discovered:
-        return [], 0, 0
+        return [], 0, 0, 0
 
     # Exact URL dedup (P4 §6) — canonicalized, same normalization
     # SharedFetchCache itself uses, not a second dedup concept.
@@ -957,18 +969,34 @@ def _budgeted_side_candidates(
     # never occupies one of the 3 slots; it simply isn't a valid
     # network candidate at all.
     stoplist_excluded = 0
-    eligible = []
+    after_stoplist = []
     for url in deduped:
         if is_stoplisted(url):
             stoplist_excluded += 1
             print(f"  [scraper][{side}] stoplist SKIP (pre-budget): {url[:60]}...")
             continue
+        after_stoplist.append(url)
+
+    # Processed-for-this-claim exclusion (P6 §6/§12) — SAME tier as
+    # stoplist: a URL already verified for this exact claim (via
+    # persistent Verification Memory, Этап 3) is not a new candidate
+    # either. Distinct storage/semantics from stoplist (P6 §12 — never
+    # written into transport_memory, never global) but the same
+    # position in the funnel: excluded before the 3-slot cap is spent,
+    # not after.
+    processed_excluded = 0
+    eligible = []
+    for url in after_stoplist:
+        if processed_urls_canonical and SharedFetchCache.canonicalize(url) in processed_urls_canonical:
+            processed_excluded += 1
+            print(f"  [scraper][{side}] processed SKIP (pre-budget): {url[:60]}...")
+            continue
         eligible.append(url)
 
-    # Hard cap (P4 §1/§5) — no top-up if some of these later turn out
-    # to be reprints of each other or to fail; that is next cycle's
-    # job, not this one's.
-    return eligible[:budget], len(discovered), stoplist_excluded
+    # Hard cap (P4 §1/§5, P6 §11) — no top-up if some of these later
+    # turn out to be reprints of each other or to fail; that is next
+    # cycle's job, not this one's.
+    return eligible[:budget], len(discovered), stoplist_excluded, processed_excluded
 
 
 def _fetch_budgeted_tagged_urls(
@@ -1071,6 +1099,7 @@ def scrape_budgeted(
     counter_budget: int = PASS2_COUNTER_BUDGET,
     fetch_cache: "Optional[SharedFetchCache]" = None,
     claim_id: str = "",
+    content_hash: str = "",
 ) -> WebScrapeResult:
     """
     P4 (web budget 3+3), claim-specific (PASS2) retrieval. Replaces
@@ -1082,19 +1111,32 @@ def scrape_budgeted(
     this task exists to bound.
 
     Two INDEPENDENT funnels (P4 §2/§12), each: discovery -> exact
-    dedup -> stoplist exclusion -> hard budget cap -> fetch. Neither
-    side's exhaustion affects the other (P4 §4 — fixes a real bug:
-    the old scrape()'s shared discovery loop could break after the
-    FIRST query alone hit DISCOVERY_RESULTS, silently skipping the
-    second query's search entirely; each side here gets its own
-    _search_with_ddgs() call, unaffected by the other).
+    dedup -> stoplist exclusion -> processed exclusion -> hard budget
+    cap -> fetch. Neither side's exhaustion affects the other (P4 §4 —
+    fixes a real bug: the old scrape()'s shared discovery loop could
+    break after the FIRST query alone hit DISCOVERY_RESULTS, silently
+    skipping the second query's search entirely; each side here gets
+    its own _search_with_ddgs() call, unaffected by the other).
+
+    content_hash (P6 / Этап 4 §7): identity token for the "processed"
+    exclusion — deliberately just the token, not the claim dict itself
+    (§7: "scraper должен знать только минимально необходимый identity
+    token", no coupling to claims_data internals). Empty string (the
+    default) disables processed exclusion entirely (both counts read
+    as 0) — used by any caller that doesn't have a claim yet.
+
+    The processed set (agent.verification_memory.get_historical_web_urls)
+    is fetched ONCE and shared identically across BOTH sides (P6 §10 —
+    a URL already verified for this claim is excluded regardless of
+    which side would have rediscovered it).
 
     Reuses (not reimplements): _search_with_ddgs, SharedFetchCache
     (dedup + canonicalize), is_stoplisted/stoplist_url,
     _fetch_url_with_proxy_fallback (the same interleaved direct-then-
     proxy-immediately lifecycle from the stoplist patch — one URL,
     direct+proxy together, still costs exactly ONE budget slot, per
-    P4 §8).
+    P4 §8), agent.verification_memory (Этап 3's persistent evidence,
+    not a new processed-state store — P6 §16).
 
     No relevance/quality filtering or ranking here — the caller
     (retrieve_claim_evidence) already runs its own subject-anchor/
@@ -1105,20 +1147,37 @@ def scrape_budgeted(
     if fetch_cache is None:
         fetch_cache = SharedFetchCache()
 
-    direct_candidates, direct_discovered, direct_stoplist_excluded = (
-        _budgeted_side_candidates([direct_query], direct_budget, fetch_cache, "direct")
+    processed_urls: set = set()
+    historical_occurrences = 0
+    if content_hash:
+        from agent.verification_memory import get_historical_web_urls
+        processed_urls, historical_occurrences = get_historical_web_urls(content_hash)
+
+    processed_urls_canonical = {SharedFetchCache.canonicalize(u) for u in processed_urls}
+
+    print(
+        f"[ProcessedSources] claim_id={claim_id or 'unknown'} "
+        f"content_hash={(content_hash or '-')[:12]} "
+        f"historical_occurrences={historical_occurrences} "
+        f"processed_urls={len(processed_urls)}"
     )
-    counter_candidates, counter_discovered, counter_stoplist_excluded = (
-        _budgeted_side_candidates([counter_query], counter_budget, fetch_cache, "counter")
+
+    direct_candidates, direct_discovered, direct_stoplist_excluded, direct_processed_excluded = (
+        _budgeted_side_candidates([direct_query], direct_budget, fetch_cache, "direct", processed_urls_canonical)
+    )
+    counter_candidates, counter_discovered, counter_stoplist_excluded, counter_processed_excluded = (
+        _budgeted_side_candidates([counter_query], counter_budget, fetch_cache, "counter", processed_urls_canonical)
     )
 
     print(
         f"[WebBudget] scope=claim claim_id={claim_id or 'unknown'} "
         f"direct_candidates={direct_discovered} "
         f"direct_stoplist_excluded={direct_stoplist_excluded} "
+        f"direct_processed_excluded={direct_processed_excluded} "
         f"direct_selected={len(direct_candidates)} "
         f"counter_candidates={counter_discovered} "
         f"counter_stoplist_excluded={counter_stoplist_excluded} "
+        f"counter_processed_excluded={counter_processed_excluded} "
         f"counter_selected={len(counter_candidates)}"
     )
 
@@ -1141,7 +1200,10 @@ def scrape_budgeted(
         f"[WebBudget] scope=claim claim_id={claim_id or 'unknown'} "
         f"direct_fetched={fetched_by_origin.get('direct', 0)} "
         f"counter_fetched={fetched_by_origin.get('counter', 0)} "
-        f"proxy_fetched={proxy_fetched}"
+        f"proxy_fetched={proxy_fetched} "
+        f"processed_urls_known={len(processed_urls)} "
+        f"processed_candidates_excluded={direct_processed_excluded + counter_processed_excluded} "
+        f"new_urls_selected={len(direct_candidates) + len(counter_candidates)}"
     )
 
     result = WebScrapeResult(
@@ -1202,7 +1264,12 @@ def scrape_budgeted_side(
     if fetch_cache is None:
         fetch_cache = SharedFetchCache()
 
-    candidates, discovered, stoplist_excluded = _budgeted_side_candidates(
+    # P6 (Этап 4 §8): no processed_urls_canonical here — stage 6 runs
+    # BEFORE claim extraction, so there is no content_hash to scope a
+    # processed set by. Deliberately not touched (see this function's
+    # own docstring above and the Этап 4 INSPECT report — no invented
+    # question-identity, no symmetry-for-its-own-sake).
+    candidates, discovered, stoplist_excluded, _processed_excluded_unused = _budgeted_side_candidates(
         queries, budget, fetch_cache, side,
     )
 

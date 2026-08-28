@@ -816,6 +816,10 @@ def retrieve_claim_evidence(
             counter_q,
             fetch_cache=fetch_cache,
             claim_id=claim.get("claim_id", ""),
+            # P6 (Этап 4 §7): pass only the identity token, not the
+            # claim object — scrape_budgeted() must not couple to
+            # claims_data internals.
+            content_hash=claim.get("content_hash", "") or "",
         )
     except Exception as exc:
         print(
@@ -1018,6 +1022,10 @@ def retrieve_claim_evidence(
             "retrieval_queries": list(
                 query_result.queries
             ),
+            # P6 (Этап 4 §9, Finding 2 fix): WebSnippet.origin (Этап 2)
+            # already tags "direct"/"counter" per-snippet — carried
+            # through here instead of being silently dropped.
+            "route_side": getattr(snippet, "origin", "") or "",
         })
 
     # --------------------------------------------------------

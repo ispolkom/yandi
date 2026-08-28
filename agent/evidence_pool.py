@@ -55,6 +55,7 @@ def _make_evidence(
     title: str,
     text: str,
     retrieval_origin: str,
+    route_side: str = "",
 ) -> Optional[Dict[str, Any]]:
 
     text = (text or "").strip()
@@ -93,6 +94,11 @@ def _make_evidence(
         "quality_reasons": list(quality.reasons),
 
         "retrieval_origin": retrieval_origin,
+        # P6 (Этап 4 §9, Finding 2 fix): "main"/"counter" for stage 6
+        # (from WebSnippet.origin, set by scrape_budgeted_side) —
+        # separate from retrieval_origin (the stage label), same
+        # reasoning as claim_evidence_retriever.py's PASS2 evidence.
+        "route_side": route_side or "",
 
         "is_meta_pipeline_output": False,
         "is_subject_matter_evidence": True,
@@ -252,6 +258,7 @@ def build_canonical_evidence_pool(
             ),
             text=text,
             retrieval_origin="initial_web",
+            route_side=_value(snippet, "origin", default="") or "",
         )
 
         if ev:
@@ -322,6 +329,7 @@ def build_canonical_evidence_pool(
             ),
             text=text,
             retrieval_origin="refutation",
+            route_side=_value(snippet, "origin", default="") or "",
         )
 
         if ev:

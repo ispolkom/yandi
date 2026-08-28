@@ -428,6 +428,17 @@ class EvidenceRecord:
     validator_id: Optional[str] = None
     model_id: Optional[str] = None
 
+    # P6 (Этап 4 §9, Finding 2 fix): which SIDE of a budgeted retrieval
+    # this evidence was originally fetched for — "direct"/"counter"
+    # (PASS2, from WebSnippet.origin set in orch_web_scraper.py::
+    # scrape_budgeted) or "main"/"counter" (stage 6, from
+    # scrape_budgeted_side). Deliberately a SEPARATE field from
+    # retrieval_origin (which stays "claim_specific"/"initial_web"/
+    # "refutation" — the STAGE/mechanism, unchanged meaning) — one
+    # field must not carry two different meanings. "" for anything not
+    # produced by a budgeted retrieval (old data, non-web evidence).
+    route_side: str = ""
+
 
 @dataclass
 class ClaimRecord:
