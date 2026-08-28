@@ -738,7 +738,7 @@ def run_optimistic_respond(
         run_id=trace_id,
         question_id=sql_question_id,
         delivered_answer_text=optimistic.text,
-        completed_at=datetime.now(),
+        completed_at=datetime.utcnow(),
         canonical_trust=(_canonical_result["canonical_trust"] if synthesis_result else "UNVERIFIED"),
         synthesizer_strand=(_sql_synthesizer_strand if synthesis_result else None),
         trust_gate_strand=epistemic_trust_gate_label,
