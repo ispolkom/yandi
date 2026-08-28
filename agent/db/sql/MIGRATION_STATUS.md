@@ -2,6 +2,23 @@
 
 Read this before touching anything in `agent/db/sql/`.
 
+## Current phase: 5E-S (SQL BASTION) — primitives built + unit-tested, wiring + live enforcement NOT DONE
+
+New sequence (mandate: 5E → 5E-S SQL BASTION → 5F equivalence → 5G
+reset → 5H virgin run → 5I read cutover → 5J remove JSON dependency).
+**5F must not start until 5E-S is accepted** — see
+`SECURITY_ARCHITECTURE.md`/`SECURITY_THREAT_MODEL.md` for the full
+design, and the session's final report for the honest PROVEN/DESIGNED/
+BLOCKED breakdown. One-line summary: table classification, GRANT/
+trigger design, AES-256-GCM crypto layer, HMAC integrity journal, and
+bootstrap logic are all written and unit-tested against fakes; NONE of
+it is wired into `repositories.py`'s live write path yet, and NONE of
+it has been proven against a real server (still no SQL credentials in
+this environment; the actual Percona instance turned out to be a
+SHARED, FastPanel-managed host listening on `*:3306`, not a dedicated
+YANDI instance — a required owner decision, `SECURITY_ARCHITECTURE.md`
+§4, that 5E-S deliberately does not make unilaterally).
+
 ## Current phase: 5E complete (shadow dual-write, all known wiring gaps closed, still unverified live)
 
 | Phase | What it means | Status |
