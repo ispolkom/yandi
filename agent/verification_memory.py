@@ -55,6 +55,12 @@ from agent.claim_identity import compute_claim_content_hash
 from agent.db.schema import INDEX_SCHEMA
 from agent.orch_schemas import EvidenceRecord
 from agent.orch_tracer import TRACES_DIR
+# P10 (Этап 4G-2): reuses the SAME URL normalization already used for
+# exact-URL-dedup / processed-source-reuse (Этап 2/4) — not a second
+# canonicalization. Safe to import at module level: orch_web_scraper.py
+# only imports THIS module back inside a function body (scrape_budgeted),
+# never at its own module top, so there is no import cycle.
+from agent.orch_web_scraper import SharedFetchCache
 
 BASE = Path(__file__).parent.parent
 INDEX_DB = BASE / "registry" / "index.db"
@@ -291,6 +297,32 @@ def _query_index_all(content_hash: str) -> List[sqlite3.Row]:
             ORDER BY observed_at DESC
             """,
             (content_hash,),
+        ).fetchall()
+    finally:
+        con.close()
+
+
+def _query_index_by_family(semantic_family_id: str) -> List[sqlite3.Row]:
+    """
+    P10 (Этап 4G-2): ALL historical occurrences of this
+    semantic_family_id (Level 2 identity) — same locator table
+    (claim_verification_index), same "no LIMIT, union across every
+    past run" shape as _query_index_all(content_hash) above, just a
+    different WHERE column. No new table.
+    """
+    if not semantic_family_id:
+        return []
+
+    con = _db_connect()
+    con.row_factory = sqlite3.Row
+    try:
+        return con.execute(
+            """
+            SELECT * FROM claim_verification_index
+            WHERE semantic_family_id = ?
+            ORDER BY observed_at DESC
+            """,
+            (semantic_family_id,),
         ).fetchall()
     finally:
         con.close()
@@ -556,6 +588,139 @@ def lookup_historical_evidence(
             f"[VerificationMemory] lookup claim_id={claim_id} "
             f"content_hash={(content_hash or '-')[:12]} "
             f"hits={len(rows)} evidence_reconstructed={len(results)}"
+        )
+
+    return results
+
+
+# ============================================================
+# P10 (Этап 4G-2): FAMILY-SCOPED HISTORICAL EVIDENCE READ PATH
+# ============================================================
+#
+# READ-ONLY. Nothing below is wired into the live retrieval/verification
+# pipeline yet (no production caller exists at the end of this stage —
+# см. Этап 4G brief §16/17: "gate Phase12" и любая activation остаются
+# отдельным, будущим решением). This is deliberately just a read
+# capability over data that ALREADY exists (claim_verification_index's
+# semantic_family_id column, populated since Этап 4C's ordering fix).
+
+def compute_stable_root(observation: Dict[str, Any]) -> Optional[tuple]:
+    """
+    P10 (Этап 4G-2): stable, CROSS-RUN root identity for one evidence
+    observation.
+
+    Deliberately NOT source_cluster_id — Этап 4F's Finding Y: cluster
+    ids are `f"sc_{root_evidence_id}"`, recomputed fresh every cycle
+    from a RANDOM per-fetch evidence_id (agent/source_clustering.py),
+    so the same URL fetched in two different requests gets a DIFFERENT
+    source_cluster_id. Uses canonicalized source_uri instead
+    (SharedFetchCache.canonicalize — the SAME normalization already
+    used for exact-URL-dedup / processed-source-reuse, not a second
+    one) — source_uri never changes across reuse, only `route` does.
+
+    A route="local_memory" observation is a REPLAY of an earlier
+    internet observation of the SAME source_uri, not a new one — so it
+    must resolve to the SAME root as the original. origin_route (which
+    the Этап 4 multi-hop provenance fix already keeps correct across
+    multiple reuse hops) tells us what the TRUE original channel was.
+
+    Returns None — "not countable as an independent root in V1" — for
+    any observation whose ultimate channel isn't "internet".
+    network_node/ai_chat have no reliable stable identity yet
+    (node_id/validator_id/model_id are still unpopulated placeholders,
+    Этап 3 §13) and are deliberately not guessed at here, per the
+    brief's explicit instruction not to invent one.
+    """
+    route = observation.get("route")
+    origin_route = observation.get("origin_route")
+
+    effective_channel = origin_route if (route == "local_memory" and origin_route) else route
+
+    if effective_channel != "internet":
+        return None
+
+    uri = observation.get("source_uri")
+    if not uri:
+        return None
+
+    return ("internet", SharedFetchCache.canonicalize(uri))
+
+
+def get_family_historical_evidence(
+    family_id: str,
+    log=None,
+    verbose: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    P10 (Этап 4G-2): RAW historical evidence observations for every
+    claim occurrence ever linked into this semantic_family_id (Level 2
+    identity), across EVERY historical trace (no LIMIT, same "union
+    across all past runs" shape as get_historical_web_urls() — a
+    DIFFERENT job, content_hash-scoped, left untouched).
+
+    Returns raw observations, NEVER an aggregated verdict — the caller
+    decides what (if anything) to do with them. Each dict carries only
+    fields that already genuinely exist on a persisted EvidenceRecord/
+    relation — nothing invented:
+
+        semantic_family_id, claim_id, trace_id, evidence_id, relation,
+        source_uri, route, origin_route, observed_at,
+        origin_observed_at, source_cluster_id, origin_source_cluster_id,
+        directness, evidence_eligible, origin_trace_id, stable_root
+        (see compute_stable_root() — None when this observation's
+        channel can't be treated as an independent root in V1).
+    """
+    rows = _query_index_by_family(family_id)
+
+    results: List[Dict[str, Any]] = []
+
+    for row in rows:
+        trace_dict = _read_trace_line(row["jsonl_file"], row["byte_offset"])
+        if not trace_dict:
+            continue
+
+        historical_claim = next(
+            (c for c in trace_dict.get("claims", []) if c.get("claim_id") == row["claim_id"]),
+            None,
+        )
+        if not historical_claim:
+            continue
+
+        evidence_by_id = {
+            e.get("evidence_id"): e
+            for e in trace_dict.get("evidence", [])
+            if e.get("evidence_id")
+        }
+
+        for rel in historical_claim.get("evidence_relations", []) or []:
+            ev = evidence_by_id.get(rel.get("evidence_id"))
+            if not ev:
+                continue
+
+            observation = {
+                "semantic_family_id": family_id,
+                "claim_id": row["claim_id"],
+                "trace_id": row["trace_id"],
+                "evidence_id": ev.get("evidence_id"),
+                "relation": rel.get("relation"),
+                "source_uri": ev.get("source_uri"),
+                "route": ev.get("route"),
+                "origin_route": ev.get("origin_route"),
+                "observed_at": ev.get("observed_at"),
+                "origin_observed_at": ev.get("origin_observed_at"),
+                "source_cluster_id": ev.get("source_cluster_id"),
+                "origin_source_cluster_id": ev.get("origin_source_cluster_id"),
+                "directness": rel.get("directness"),
+                "evidence_eligible": rel.get("evidence_eligible"),
+                "origin_trace_id": ev.get("origin_trace_id"),
+            }
+            observation["stable_root"] = compute_stable_root(observation)
+            results.append(observation)
+
+    if verbose and log:
+        log(
+            f"[VerificationMemory] family_history family_id={family_id} "
+            f"occurrences={len(rows)} observations={len(results)}"
         )
 
     return results
