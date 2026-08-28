@@ -87,6 +87,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from agent.db.sql.shadow_write import shadow_record_recheck_event
+
 BASE = Path(__file__).parent.parent
 DEFAULT_STORE_PATH = BASE / "registry" / "claim_family_graph.json"
 
@@ -150,12 +152,27 @@ class FamilyDependencyGraph:
             return True
         return (time.time() - entry.get("last_rechecked_at", 0)) >= cooldown_seconds
 
-    def record_recheck(self, family_id: str, outcome: str) -> None:
+    def record_recheck(
+        self, family_id: str, outcome: str, run_id: Optional[str] = None,
+        trigger_reason: Optional[str] = None, started_at: Optional[float] = None,
+        reason: Optional[str] = None, domain: Optional[str] = None,
+        canonical_text: Optional[str] = None,
+    ) -> None:
         entry = self.recheck_log.get(family_id, {"recheck_count": 0})
         entry["last_rechecked_at"] = time.time()
         entry["last_outcome"] = outcome
         entry["recheck_count"] = entry.get("recheck_count", 0) + 1
         self.recheck_log[family_id] = entry
+        # Этап 5 (SQL persistence migration, mandate §16): the JSON
+        # recheck_log above is CURRENT-STATE-ONLY (overwrites on every
+        # call, a confirmed real bug — see schema.py's recheck_event
+        # comment). This is the append-only side: one row per actual
+        # recheck attempt, history never lost.
+        shadow_record_recheck_event(
+            family_id=family_id, outcome=outcome, run_id=run_id,
+            trigger_reason=trigger_reason, started_at=started_at, reason=reason,
+            domain=domain, canonical_text=canonical_text,
+        )
 
     def _find_edge(self, from_family: str, to_family: str, edge_type: str) -> Optional[Dict[str, Any]]:
         for e in self.edges:

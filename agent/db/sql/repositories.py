@@ -418,6 +418,28 @@ def record_belief_assessment(
         return cur.lastrowid
 
 
+def record_recheck_event(
+    conn, family_id: str, outcome: str, run_id: Optional[str] = None,
+    trigger_reason: Optional[str] = None, started_at=None, reason: Optional[str] = None,
+) -> int:
+    """APPEND-ONLY (mandate §16) — FIXES a real, confirmed bug: the
+    current registry/claim_family_graph.json's recheck_log[family_id]
+    OVERWRITES on every recheck (schema.py's own comment: fam_c370ccfa
+    had recheck_count=2 but only the LAST outcome was ever visible).
+    One row per actual recheck attempt here, never overwritten — the
+    JSON side's own last-outcome/count fields are untouched by this,
+    kept as the cheap "current state" shortcut they already are."""
+    started_at = _coerce_datetime(started_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO recheck_event "
+            "(family_id, run_id, trigger_reason, started_at, outcome, reason) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            (family_id, run_id, trigger_reason, started_at, outcome, reason),
+        )
+        return cur.lastrowid
+
+
 # ============================================================
 # READ — Local Memory read API (mandate §14/§33)
 # ============================================================

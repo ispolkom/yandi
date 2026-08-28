@@ -135,6 +135,7 @@ def apply_dependency_recheck(
     graph: Optional[FamilyDependencyGraph] = None,
     registry=None,
     fetch_cache=None,
+    run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Consumes agent.family_dependency_graph.apply_family_dependency_shadow's
@@ -145,6 +146,15 @@ def apply_dependency_recheck(
     it — see this module's docstring for why that is still true even
     though, unlike Phase 11, this module DOES cause a real, persisted,
     cross-request belief mutation as its entire purpose.
+
+    run_id (Этап 5, SQL persistence migration): the CURRENT request's
+    run — the one whose Phase 11 dependency graph traversal happened to
+    trigger this recheck of a DIFFERENT family. Purely an append-only
+    provenance tag on the resulting recheck_event row (mandate §16); it
+    is optional and defaults to None (this module has exactly one
+    production call site, unlike belief_manager.py's — see that
+    module's own shadow-write commit for why threading run_id wasn't
+    done there).
     """
     t0 = time.time()
     graph = graph or get_family_dependency_graph()
@@ -203,6 +213,10 @@ def apply_dependency_recheck(
             stats["skipped_no_family_record"] += 1
             continue
 
+        cand_started_at = time.time()
+        cand_trigger_reason = cand.get("changed_family")
+        cand_domain = family.get("domain")
+
         belief = _belief_for_family(belief_manager, family) if belief_manager else None
         if not belief:
             stats["skipped_no_belief"] += 1
@@ -210,7 +224,10 @@ def apply_dependency_recheck(
             # recheck slot spent (retrieval below still runs) — logged,
             # not silently free, so it can't be used to bypass the cap by
             # only targeting family-less candidates.
-            graph.record_recheck(family_id, "no_belief")
+            graph.record_recheck(
+                family_id, "no_belief", run_id=run_id, trigger_reason=cand_trigger_reason,
+                started_at=cand_started_at, domain=cand_domain, canonical_text=canonical_text,
+            )
             rechecks_done += 1
             if verbose:
                 log(
@@ -281,7 +298,10 @@ def apply_dependency_recheck(
                 )
                 stats["belief_updates"] += 1
 
-            graph.record_recheck(family_id, outcome)
+            graph.record_recheck(
+                family_id, outcome, run_id=run_id, trigger_reason=cand_trigger_reason,
+                started_at=cand_started_at, domain=cand_domain, canonical_text=canonical_text,
+            )
             stats["rechecks_performed"] += 1
 
             if verbose:
@@ -295,7 +315,11 @@ def apply_dependency_recheck(
 
         except Exception as e:
             stats["errors"] += 1
-            graph.record_recheck(family_id, "error")
+            graph.record_recheck(
+                family_id, "error", run_id=run_id, trigger_reason=cand_trigger_reason,
+                started_at=cand_started_at, domain=cand_domain, canonical_text=canonical_text,
+                reason=str(e)[:120],
+            )
             if verbose:
                 log(f"[Dependency Recheck] family={family_id} error={e}")
             # Failure never touches the belief — old state (and its
