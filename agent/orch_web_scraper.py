@@ -18,8 +18,9 @@ from bs4 import BeautifulSoup
 from agent.orch_schemas import WebQueryResult, WebScrapeResult, WebSnippet
 from agent.source_quality import evaluate_source_quality
 from agent.transport_memory import (
-    preferred_transport,
     record_transport_result,
+    is_stoplisted,
+    stoplist_url,
 )
 
 # Попытка импорта DuckDuckGo
@@ -378,6 +379,7 @@ REJECT_REASONS = {
     "seo_spam": "SEO-мусор, низкое качество",
     "irrelevant": "нерелевантно запросу",
     "low_quality": "низкое качество контента",
+    "proxy_unavailable": "proxy не настроен (proxy.txt отсутствует/битый)",
 }
 
 
@@ -509,7 +511,13 @@ def _fetch_url(url: str, query: str = "") -> tuple[Optional[dict], str]:
         soup = BeautifulSoup(resp.text, "html.parser")
         title_tag = soup.find("title")
         title = title_tag.get_text(strip=True)[:200] if title_tag else url
-        
+
+        # P4 (permanent stoplist): direct success was never recorded
+        # into transport_memory at all (only failures were) — fixed
+        # while touching this code, since accurate direct_status is
+        # now load-bearing for is_stoplisted()/stoplist_url().
+        record_transport_result(url, "direct", "ok")
+
         return {"url": url, "title": title, "text": text, "content": text}, ""
     except _requests.Timeout:
         record_transport_result(
@@ -634,12 +642,13 @@ def _fetch_url_proxy(
             else url
         )
 
-        record_transport_result(
-            url,
-            "direct",
-            "ok",
-        )
-
+        # P4 (permanent stoplist): this function is only ever called
+        # for the PROXY transport — recording "direct","ok" here was a
+        # pre-existing mislabeling bug (this fetch used proxy, not
+        # direct; direct may well have just failed, which is WHY proxy
+        # was tried at all). Fixed while touching this code for the
+        # stoplist feature, since accurate per-transport status is now
+        # load-bearing for is_stoplisted()/stoplist_url().
         record_transport_result(
             url,
             "proxy",
@@ -697,6 +706,82 @@ def _fetch_url_proxy(
             session.close()
         except Exception:
             pass
+
+
+# HTTP codes where switching transport/IP is potentially useful (P4:
+# hoisted from a closure inside scrape() to module level so
+# _fetch_url_with_proxy_fallback can share the exact same retry
+# decision — same set, same semantics, not duplicated).
+_PROXY_RETRY_HTTP_CODES = {
+    401, 403, 407, 408, 429, 451, 500, 502, 503, 504,
+}
+
+
+def _should_proxy_retry(reason: str) -> bool:
+    if reason in {
+        "timeout",
+        "fetch_failed",
+        "http_error",
+        "cloudflare_challenge",
+    }:
+        return True
+
+    if reason.startswith("http_"):
+        try:
+            code = int(reason.split("_", 1)[1])
+        except Exception:
+            return False
+
+        return code in _PROXY_RETRY_HTTP_CODES
+
+    return False
+
+
+def _fetch_url_with_proxy_fallback(
+    url: str,
+    query: str,
+    fetch_cache: "SharedFetchCache",
+) -> tuple[Optional[dict], str, str, Optional[tuple]]:
+    """
+    P4 (permanent stoplist): ONE lifecycle per URL — direct, then
+    IMMEDIATELY proxy if direct fails with a transport-level (proxy-
+    retryable) reason — instead of the old two-PHASE design (wait for
+    the entire direct batch, only then start a separate proxy-retry
+    pass). Other URLs' own lifecycles proceed independently/in
+    parallel via the same worker pool (unchanged) — this only changes
+    the SEQUENCING within one URL's own attempt, not overall
+    concurrency.
+
+    Returns (result_or_None, reason, transport_used,
+    stoplist_reasons_or_None). stoplist_reasons is only non-None when
+    BOTH direct AND proxy were genuinely attempted and BOTH failed
+    with a transport-level reason — never for content-level rejects
+    (no_content/no_keywords/etc — those say nothing about whether the
+    URL is reachable) and never when proxy was unavailable/not
+    configured (can't claim "even via proxy failed" if proxy was never
+    tried).
+    """
+    result, reason = fetch_cache.get_or_fetch(
+        url, "direct", lambda u: _fetch_url(u, query)
+    )
+
+    if result:
+        return result, "", "direct", None
+
+    if not _should_proxy_retry(reason):
+        return None, reason, "direct", None
+
+    if not _load_proxy_url():
+        return None, "proxy_unavailable", "direct", None
+
+    proxy_result, proxy_reason = fetch_cache.get_or_fetch(
+        url, "proxy", lambda u: _fetch_url_proxy(u, query)
+    )
+
+    if proxy_result:
+        return proxy_result, "", "proxy", None
+
+    return None, proxy_reason, "proxy", (reason, proxy_reason)
 
 
 def _search_with_ddgs(
@@ -850,38 +935,32 @@ def scrape(
     urls = list(dict.fromkeys(all_urls))[:DISCOVERY_RESULTS]
 
     # ========================================================
-    # TRANSPORT MEMORY ROUTING
+    # PERMANENT STOPLIST + TRANSPORT MEMORY ROUTING (P4)
     # ========================================================
     #
-    # URL, для которых ранее уже доказано:
-    #
-    #   direct -> cloudflare_challenge
-    #   proxy  -> cloudflare_challenge
-    #
-    # не отправляем повторно в requests pipeline.
-    #
-    # Они сохраняются отдельно как browser_queue.
-    browser_queue = []
+    # URL уже доказанно недоступен (direct И proxy оба провалились
+    # ранее — stoplist_url(), или старое browser_required-состояние,
+    # которое is_stoplisted() трактует так же) — не отправляем его в
+    # fetch pool вообще, до любой сетевой попытки.
+    stoplist_skipped = 0
     direct_urls = []
 
     for url in urls:
-        transport = preferred_transport(url)
-
-        if transport == "browser":
-            browser_queue.append(url)
+        if is_stoplisted(url):
+            stoplist_skipped += 1
 
             print(
-                f"  [scraper] browser QUEUE: "
+                f"  [scraper] stoplist SKIP: "
                 f"{url[:60]}... "
-                f"(transport memory)"
+                f"(permanent, transport_memory)"
             )
             continue
 
         direct_urls.append(url)
 
     urls = direct_urls
-    
-    if not urls and not browser_queue:
+
+    if not urls:
         print("[scraper] No URLs found via DDGS")
         result = WebScrapeResult(
             snippets=[],
@@ -899,112 +978,63 @@ def scrape(
             len(all_urls) + len(all_rejected),
         )
         return result
-    
+
     print(
         f"[scraper] discovery="
-        f"{len(urls) + len(browser_queue)} URL, "
-        f"direct={len(urls)} "
-        f"browser={len(browser_queue)} "
+        f"{len(urls) + stoplist_skipped} URL, "
+        f"eligible={len(urls)} "
+        f"stoplisted={stoplist_skipped} "
         f"final={max_results}"
     )
-    
+
     # 3. Парсим страницы с проверкой релевантности
     snippets = []
     total_chars = 0
     rejected = all_rejected.copy()
     rejected_count = 0
 
-    # Browser-required URL не считается плохим источником.
-    # Он только недоступен текущими requests transport'ами.
-    for url in browser_queue:
-        rejected.append({
-            "url": url,
-            "reason": "browser_required",
-        })
-
-    if browser_queue:
-        print(
-            f"[scraper] browser queue="
-            f"{len(browser_queue)}"
-        )
-
-    # Direct failures, которые имеет смысл повторить
-    # через альтернативный transport.
-    proxy_retry_urls = []
-
-    # HTTP codes, где смена transport/IP потенциально полезна.
-    proxy_retry_http_codes = {
-        401,
-        403,
-        407,
-        408,
-        429,
-        451,
-        500,
-        502,
-        503,
-        504,
-    }
-
-    def _should_proxy_retry(reason: str) -> bool:
-        if reason in {
-            "timeout",
-            "fetch_failed",
-            "http_error",
-            "cloudflare_challenge",
-        }:
-            return True
-
-        if reason.startswith("http_"):
-            try:
-                code = int(
-                    reason.split("_", 1)[1]
-                )
-            except Exception:
-                return False
-
-            return code in proxy_retry_http_codes
-
-        return False
-    
     # --------------------------------------------------------
-    # 3. FETCH POOL — PARTIAL RESULTS ARE VALID
+    # 3. FETCH POOL — ONE LIFECYCLE PER URL (P4)
     # --------------------------------------------------------
+    #
+    # Direct, затем НЕМЕДЛЕННО proxy при retryable-провале direct —
+    # внутри ОДНОЙ задачи на URL, не отдельной фазой после того, как
+    # весь direct-батч завершится. Другие URL продолжают обрабатываться
+    # независимо тем же пулом воркеров (concurrency не менялась).
+    #
+    # Таймаут пула увеличен вдвое относительно старого — задача теперь
+    # может делать ДВЕ последовательные сетевые попытки (direct, затем
+    # proxy), а не одну.
     #
     # Один зависший URL НЕ должен уничтожать весь search result.
-    #
-    # wait() возвращает:
-    #   done     — что успело завершиться;
-    #   not_done — что не успело.
-    #
-    # Обрабатываем done, not_done считаем timeout.
     executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=5
     )
 
     futures = {
         executor.submit(
-            fetch_cache.get_or_fetch,
+            _fetch_url_with_proxy_fallback,
             url,
-            "direct",
-            lambda u: _fetch_url(u, ""),
+            "",
+            fetch_cache,
         ): url
         for url in urls
     }
 
     done, not_done = concurrent.futures.wait(
         futures,
-        timeout=FETCH_TIMEOUT + 5,
+        timeout=(FETCH_TIMEOUT * 2) + 5,
     )
 
-    # --------------------------------------------------------
-    # Готовые futures.
-    # --------------------------------------------------------
+    proxy_success = 0
+    proxy_failed = 0
+    stoplisted_now = 0
+
     for future in done:
         url = futures[future]
 
         try:
-            result, reject_reason = future.result()
+            result, reason, transport_used, stoplist_reasons = future.result()
 
             if result:
                 snippet = WebSnippet(
@@ -1018,46 +1048,68 @@ def scrape(
                 snippets.append(snippet)
                 total_chars += len(result["text"])
 
-                print(
-                    f"  [scraper] OK: "
-                    f"{url[:60]}... "
-                    f"({len(result['text'])} chars)"
-                )
-
-            else:
-                reason = (
-                    reject_reason
-                    or "unknown"
-                )
-
-                if _should_proxy_retry(reason):
-                    proxy_retry_urls.append(url)
+                if transport_used == "proxy":
+                    proxy_success += 1
 
                     print(
-                        f"  [scraper] direct FAIL: "
+                        f"  [scraper] proxy OK: "
                         f"{url[:60]}... "
-                        f"reason={reason} "
-                        f"-> proxy queue"
+                        f"({len(result['text'])} chars)"
                     )
-
                 else:
-                    rejected_count += 1
-
-                    reason_text = REJECT_REASONS.get(
-                        reason,
-                        reason,
-                    )
-
-                    rejected.append({
-                        "url": url,
-                        "reason": reason,
-                    })
-
                     print(
-                        f"  [scraper] reject: "
+                        f"  [scraper] OK: "
                         f"{url[:60]}... "
-                        f"({reason_text})"
+                        f"({len(result['text'])} chars)"
                     )
+
+                continue
+
+            reason = reason or "unknown"
+
+            if stoplist_reasons is not None:
+                direct_reason, proxy_reason = stoplist_reasons
+                stoplist_url(url, direct_reason, proxy_reason)
+                stoplisted_now += 1
+                proxy_failed += 1
+                rejected_count += 1
+
+                rejected.append({"url": url, "reason": proxy_reason or "proxy_failed"})
+
+                print(
+                    f"  [scraper] STOPLISTED (direct={direct_reason} "
+                    f"proxy={proxy_reason}): {url[:60]}..."
+                )
+                continue
+
+            if transport_used == "proxy":
+                # Proxy attempted but failed for a reason that doesn't
+                # warrant a permanent ban (e.g. proxy_unavailable was
+                # already filtered out earlier — this branch is
+                # reachable only if _fetch_url_with_proxy_fallback's
+                # own stoplist gate didn't fire, kept defensive).
+                proxy_failed += 1
+                rejected_count += 1
+                rejected.append({"url": url, "reason": reason})
+
+                print(
+                    f"  [scraper] proxy FAIL: "
+                    f"{url[:60]}... reason={reason}"
+                )
+                continue
+
+            # Direct-only outcome: either a content-level reject
+            # (no_content/no_keywords/etc — not proxy-retryable at
+            # all) or proxy_unavailable (proxy not configured, so we
+            # cannot claim "even via proxy failed").
+            rejected_count += 1
+            reason_text = REJECT_REASONS.get(reason, reason)
+            rejected.append({"url": url, "reason": reason})
+
+            print(
+                f"  [scraper] reject: "
+                f"{url[:60]}... ({reason_text})"
+            )
 
         except Exception as e:
             rejected_count += 1
@@ -1073,19 +1125,22 @@ def scrape(
             )
 
     # --------------------------------------------------------
-    # Незавершённые futures.
+    # Незавершённые futures — ни direct, ни proxy не удалось
+    # достоверно ЗАВЕРШИТЬ в отведённое время. НЕ заносим в stoplist:
+    # мы не знаем, что оба transport'а реально провалились, только
+    # что задача не успела. timeout != permanent failure proof.
     # --------------------------------------------------------
     for future in not_done:
         url = futures[future]
 
         future.cancel()
 
-        proxy_retry_urls.append(url)
+        rejected_count += 1
+        rejected.append({"url": url, "reason": "timeout"})
 
         print(
-            f"  [scraper] direct TIMEOUT: "
-            f"{url[:60]}... "
-            f"-> proxy queue"
+            f"  [scraper] TIMEOUT (direct+proxy lifecycle): "
+            f"{url[:60]}..."
         )
 
     # КРИТИЧНО:
@@ -1107,162 +1162,13 @@ def scrape(
             f"completed={len(done)}"
         )
 
-    # ========================================================
-    # 3B. PROXY RETRY PASS
-    # ========================================================
-    #
-    # Direct очередь уже полностью обработана.
-    # Только теперь пробуем проблемные URL через proxy.
-    proxy_retry_urls = list(
-        dict.fromkeys(proxy_retry_urls)
+    print(
+        f"[scraper] proxy summary: "
+        f"ok={proxy_success} "
+        f"failed={proxy_failed} "
+        f"stoplisted_now={stoplisted_now} "
+        f"stoplist_skipped={stoplist_skipped}"
     )
-
-    proxy_success = 0
-    proxy_failed = 0
-
-    if proxy_retry_urls:
-        if _load_proxy_url():
-            print(
-                f"[scraper] proxy retry queue="
-                f"{len(proxy_retry_urls)}"
-            )
-
-            proxy_executor = (
-                concurrent.futures.ThreadPoolExecutor(
-                    max_workers=min(
-                        3,
-                        len(proxy_retry_urls),
-                    )
-                )
-            )
-
-            proxy_futures = {
-                proxy_executor.submit(
-                    fetch_cache.get_or_fetch,
-                    url,
-                    "proxy",
-                    lambda u: _fetch_url_proxy(u, ""),
-                ): url
-                for url in proxy_retry_urls
-            }
-
-            proxy_done, proxy_not_done = (
-                concurrent.futures.wait(
-                    proxy_futures,
-                    timeout=FETCH_TIMEOUT + 5,
-                )
-            )
-
-            for future in proxy_done:
-                url = proxy_futures[future]
-
-                try:
-                    result, reason = future.result()
-
-                    if result:
-                        snippet = WebSnippet(
-                            url=result["url"],
-                            title=result["title"],
-                            content=result["content"],
-                            text=result["text"],
-                            relevance=0.7,
-                        )
-
-                        snippets.append(snippet)
-                        total_chars += len(
-                            result["text"]
-                        )
-
-                        proxy_success += 1
-
-                        print(
-                            f"  [scraper] proxy OK: "
-                            f"{url[:60]}... "
-                            f"({len(result['text'])} chars)"
-                        )
-
-                    else:
-                        proxy_failed += 1
-                        rejected_count += 1
-
-                        rejected.append({
-                            "url": url,
-                            "reason": (
-                                reason
-                                or "proxy_failed"
-                            ),
-                        })
-
-                        if reason == "cloudflare_challenge":
-                            print(
-                                f"  [scraper] browser REQUIRED: "
-                                f"{url[:60]}... "
-                                f"reason=cloudflare_challenge"
-                            )
-                        else:
-                            print(
-                                f"  [scraper] proxy FAIL: "
-                                f"{url[:60]}... "
-                                f"reason="
-                                f"{reason or 'unknown'}"
-                            )
-
-                except Exception as exc:
-                    proxy_failed += 1
-                    rejected_count += 1
-
-                    rejected.append({
-                        "url": url,
-                        "reason": "proxy_fetch_failed",
-                    })
-
-                    print(
-                        f"  [scraper] proxy ERROR: "
-                        f"{url[:60]}... "
-                        f"{type(exc).__name__}"
-                    )
-
-            for future in proxy_not_done:
-                url = proxy_futures[future]
-
-                future.cancel()
-
-                proxy_failed += 1
-                rejected_count += 1
-
-                rejected.append({
-                    "url": url,
-                    "reason": "proxy_timeout",
-                })
-
-                print(
-                    f"  [scraper] proxy TIMEOUT: "
-                    f"{url[:60]}..."
-                )
-
-            proxy_executor.shutdown(
-                wait=False,
-                cancel_futures=True,
-            )
-
-        else:
-            # Proxy config отсутствует/битый:
-            # сохраняем исходные direct failures.
-            for url in proxy_retry_urls:
-                rejected_count += 1
-
-                rejected.append({
-                    "url": url,
-                    "reason": "proxy_unavailable",
-                })
-
-    if proxy_retry_urls:
-        print(
-            f"[scraper] proxy summary: "
-            f"queued={len(proxy_retry_urls)} "
-            f"ok={proxy_success} "
-            f"failed={proxy_failed}"
-        )
 
     # 4. Дополнительная lexical relevance-проверка.
     #
