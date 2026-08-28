@@ -337,7 +337,16 @@ CREATE TABLE IF NOT EXISTS belief_assessment_history (
     old_confidence   FLOAT NULL,
     new_confidence   FLOAT NULL,
     reason           VARCHAR(255) NULL,
-    change_type      ENUM('decay','update','challenge','supersede') NOT NULL,
+    -- PREVIOUS AUDIT CORRECTION (mandate §50): the original 5A design
+    -- guessed at these labels ('decay','update','challenge','supersede')
+    -- before checking agent/belief_manager.py's real history[].change
+    -- values. The actual, only-ever-written values are 'created'
+    -- (add_belief), 'decayed' (_apply_decay), 'updated'
+    -- (_update_existing), 'revised' (challenge_belief — NOT 'challenge'),
+    -- 'superseded' (supersede_belief). Corrected to match before this
+    -- table is ever written to (schema never deployed yet, so no
+    -- migration-of-existing-rows risk).
+    change_type      ENUM('created','decayed','updated','revised','superseded') NOT NULL,
     created_at       DATETIME NOT NULL,
     CONSTRAINT fk_bah_belief FOREIGN KEY (belief_id)
         REFERENCES belief(belief_id),
