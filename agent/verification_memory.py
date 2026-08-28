@@ -666,9 +666,18 @@ def get_family_historical_evidence(
         semantic_family_id, claim_id, trace_id, evidence_id, relation,
         source_uri, route, origin_route, observed_at,
         origin_observed_at, source_cluster_id, origin_source_cluster_id,
-        directness, evidence_eligible, origin_trace_id, stable_root
+        directness, evidence_eligible, evidence_role, source_class,
+        retrieval_origin, origin_trace_id, stable_root
         (see compute_stable_root() — None when this observation's
         channel can't be treated as an independent root in V1).
+
+    evidence_role/source_class/retrieval_origin (Этап 4G-3 addition):
+    these were already being persisted per-relation at add_claim_raw()
+    time (agent/orch_tracer.py) but weren't yet surfaced here — they
+    are exactly the fields agent/orchestrator/claims/status.py::
+    _counts_toward_status() needs, so a caller can apply that SAME
+    eligibility predicate to historical relations instead of inventing
+    a second truth table.
     """
     rows = _query_index_by_family(family_id)
 
@@ -712,6 +721,9 @@ def get_family_historical_evidence(
                 "origin_source_cluster_id": ev.get("origin_source_cluster_id"),
                 "directness": rel.get("directness"),
                 "evidence_eligible": rel.get("evidence_eligible"),
+                "evidence_role": rel.get("evidence_role"),
+                "source_class": rel.get("source_class"),
+                "retrieval_origin": rel.get("retrieval_origin"),
                 "origin_trace_id": ev.get("origin_trace_id"),
             }
             observation["stable_root"] = compute_stable_root(observation)
