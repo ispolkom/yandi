@@ -280,6 +280,43 @@ def shadow_record_claim_family(
     _shadow(log, verbose, "record_claim_family", _do)
 
 
+def shadow_record_belief_assessment(
+    *, belief_id: str, topic: str, statement: str, confidence: float,
+    status: str, change_type: str, old_confidence: Optional[float] = None,
+    new_confidence: Optional[float] = None, reason: Optional[str] = None,
+    run_id: Optional[str] = None, log=None, verbose: bool = False,
+) -> None:
+    """
+    Wired into agent/belief_manager.py at each of its 5 existing
+    Belief.history.append(...) call sites (add_belief's create path,
+    _apply_decay, _update_existing, challenge_belief, supersede_belief)
+    — mirrors the JSON history[] entry being appended, in the same
+    transaction as the belief's current-state upsert (mandate §17:
+    BELIEF is mutable current state; BELIEF_ASSESSMENT_HISTORY is
+    append-only, never overwritten — matches confirmed current
+    beliefs.json semantics exactly, doesn't invent a new one).
+
+    change_type must be one of the 5 REAL values agent/belief_manager.py
+    ever writes to Belief.history[]["change"] — 'created', 'decayed',
+    'updated', 'revised', 'superseded' (schema.py's ENUM was corrected
+    to match these exactly; the original 5A design had guessed at
+    different labels, see schema.py's own PREVIOUS AUDIT CORRECTION
+    comment).
+
+    run_id is None at every current call site (see repo.record_belief_
+    assessment()'s docstring for why threading it through Belief-
+    Manager's public API is out of scope for this pass) — honest NULL,
+    not fabricated.
+    """
+    def _do(conn):
+        repo.upsert_belief(conn, belief_id, topic, statement, confidence, status)
+        repo.record_belief_assessment(
+            conn, belief_id, change_type, old_confidence, new_confidence, reason, run_id,
+        )
+
+    _shadow(log, verbose, "record_belief_assessment", _do)
+
+
 def shadow_reconcile_stale_runs(*, older_than_seconds: int = 3600, log=None, verbose: bool = False) -> Optional[int]:
     """
     Should be called once at process/daemon startup (NOT wired into any

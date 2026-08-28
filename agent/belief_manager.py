@@ -27,6 +27,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
+from agent.db.sql.shadow_write import shadow_record_belief_assessment
+
 
 @dataclass
 class Belief:
@@ -97,6 +99,12 @@ class BeliefManager:
                         "change": "decayed",
                     })
                     belief.updated_at = now
+                    shadow_record_belief_assessment(
+                        belief_id=belief.id, topic=belief.topic, statement=belief.statement,
+                        confidence=belief.confidence, status=belief.status,
+                        change_type="decayed", old_confidence=old_conf, new_confidence=belief.confidence,
+                        reason=f"decay: {age_days:.1f} days",
+                    )
         self._save()
     
     def _bayesian_update(self, belief: Belief, new_evidence: float, is_supporting: bool) -> float:
@@ -179,6 +187,12 @@ class BeliefManager:
         )
         self.beliefs.append(belief)
         self._save()
+        shadow_record_belief_assessment(
+            belief_id=belief.id, topic=belief.topic, statement=belief.statement,
+            confidence=belief.confidence, status=belief.status,
+            change_type="created", old_confidence=0.0, new_confidence=confidence,
+            reason="initial",
+        )
         return belief
     
     def _find_similar(self, topic: str, statement: str) -> Optional[Belief]:
@@ -436,6 +450,12 @@ different
             "contradiction_score": belief.contradiction_score,
         })
         self._save()
+        shadow_record_belief_assessment(
+            belief_id=belief.id, topic=belief.topic, statement=belief.statement,
+            confidence=belief.confidence, status=belief.status,
+            change_type="updated", old_confidence=old_confidence, new_confidence=belief.confidence,
+            reason="bayesian_update",
+        )
         return belief
     
     def challenge_belief(
@@ -488,8 +508,14 @@ different
                 
                 if belief.confidence < 0.3:
                     belief.status = "revised"
-                
+
                 self._save()
+                shadow_record_belief_assessment(
+                    belief_id=belief.id, topic=belief.topic, statement=belief.statement,
+                    confidence=belief.confidence, status=belief.status,
+                    change_type="revised", old_confidence=old_confidence, new_confidence=belief.confidence,
+                    reason=f"challenged: {reason}",
+                )
                 return belief
         return None
     
@@ -514,6 +540,12 @@ different
                 "change": "superseded",
             })
             self._save()
+            shadow_record_belief_assessment(
+                belief_id=old_belief.id, topic=old_belief.topic, statement=old_belief.statement,
+                confidence=old_belief.confidence, status=old_belief.status,
+                change_type="superseded", old_confidence=None, new_confidence=None,
+                reason=f"superseded by {new_belief_id}",
+            )
             return True
         return False
     

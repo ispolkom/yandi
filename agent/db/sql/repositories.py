@@ -367,6 +367,57 @@ def record_run_error(conn, run_id: str, failed_stage: str, error_class: str, sho
         )
 
 
+def upsert_belief(
+    conn, belief_id: str, topic: str, statement: str, confidence: float,
+    status: str = "active", created_at=None, updated_at=None,
+) -> None:
+    """belief is MUTABLE current-derived-state (mandate §17: BELIEF !=
+    truth table, matches agent.belief_manager.Belief's own semantics
+    exactly — confidence/status/updated_at overwritten in place on
+    every call, same as the JSON beliefs.json record they mirror).
+    created_at is write-once (first INSERT only); every subsequent call
+    for the same belief_id only updates the mutable columns."""
+    created_at = _coerce_datetime(created_at) or _now()
+    updated_at = _coerce_datetime(updated_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO belief (belief_id, topic, statement, confidence, status, created_at, updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE statement=VALUES(statement), confidence=VALUES(confidence), "
+            "status=VALUES(status), updated_at=VALUES(updated_at)",
+            (belief_id, topic, statement, confidence, status, created_at, updated_at),
+        )
+
+
+def record_belief_assessment(
+    conn, belief_id: str, change_type: str, old_confidence: Optional[float] = None,
+    new_confidence: Optional[float] = None, reason: Optional[str] = None,
+    run_id: Optional[str] = None, created_at=None,
+) -> int:
+    """belief_assessment_history is APPEND-ONLY (mandate §17) — mirrors
+    the entries already appended to Belief.history[] in agent.belief_
+    manager.py, never replacing or overwriting a previous assessment.
+    run_id is genuinely NULL-able and often NULL by design: a decay
+    sweep (_apply_decay()) is not tied to any single verification run,
+    and correlating every BeliefManager.add_belief()/challenge_belief()
+    call site (agent/dependency_recheck.py, agent/curiosity.py x2,
+    agent/disagreement_engine.py, agent/orchestrator/claims/lifecycle.py
+    — agent/biography_stats.py's own unrelated BiographyStats.add_belief()
+    is a different class entirely, not this one) with a run_id would
+    mean changing each of their public signatures — out of proportion
+    for this pass; documented as a deliberate V1 scope limit, not
+    silently omitted."""
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO belief_assessment_history "
+            "(belief_id, run_id, old_confidence, new_confidence, reason, change_type, created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (belief_id, run_id, old_confidence, new_confidence, (reason or "")[:255] or None, change_type, created_at),
+        )
+        return cur.lastrowid
+
+
 # ============================================================
 # READ — Local Memory read API (mandate §14/§33)
 # ============================================================
