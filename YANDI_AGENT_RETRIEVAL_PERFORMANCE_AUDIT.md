@@ -764,3 +764,221 @@ subtly-miscalibrated signal.
 
 This audit stops here (P0 complete) and awaits explicit authorization before any P1 implementation,
 per the task's own instruction.
+
+---
+
+# P1-B — PASS1 REUSE, DUPLICATE WORK, FAILURE MEMORY
+
+Follow-up to P0/P1-A/eligibility-review (commits `a082b55`, `77d0fd1`). Goal: reduce useless
+network fetches without changing epistemic semantics. All Phase 1/2/6 findings below use the same
+397.23s coffee benchmark (`live_run.log`) as the primary evidence source, cross-checked against a
+fresh confirmation run (`live_run_p1b_coffee.log`) captured after this phase's code changes.
+
+## Phase 1 — PASS1 Reuse Audit
+
+Code-level pre-check: `_claim_has_effective_evidence()` (`agent/orchestrator/claims/retrieval.py:36-48`)
+is a simple existence check with **no cluster/independence count and no contradiction-requirement**
+— categories E and F from the task's taxonomy are aspirational, not real code. Category D
+(directness-aware routing) is quantified separately in Phase 2.
+
+Full per-claim classification (10 retrieval-triggered claims), reason: **8/10 = B** (mapper linked
+eligible/direct PASS1 evidence, NLI said `uncertain`), **1/10 = A** (`cl_d82ac29f`: the mapper's
+top-2 candidate cutoff, `agent/claim_evidence_mapper.py:279-303`'s
+`SECONDARY_CANDIDATE_THRESHOLD=0.45`, excluded an already-fetched, already-eligible IARC Monographs
+document that scored 0.524 — narrowly below an off-topic paper's 0.530 — from ever being linked),
+**1/10 = B with `relation=unrelated`** (`cl_26fc0420`: directness=0.614 alone did not force a
+supports verdict — NLI independently classified the pair unrelated, confirming directness and NLI
+relation are orthogonal signals). **0/10 = C, G** (no claim lacked eligible-or-directness-strong
+candidates outright; no claim had zero pool evidence).
+
+**Correction to the P0 finding "3/10 dedicated searches changed nothing"**: re-checked against
+`MAX_CLAIMS=8` (`agent/claim_evidence_retriever.py:55`) and the live `[Claim Retrieval Select]`
+log (`live_run.log:359-369`) — **only 8 of the 10 retrieval-triggered claims are ever selected for
+an actual new search at all**; the bottom 2 by priority (`cl_a576ca51` rank 9, `cl_0bbd5a96` rank
+10, both `selected=False`) get **no new search or fetch whatsoever** and simply carry their PASS1
+evidence forward. So the true count of "claims that paid for a dedicated new search yet ended up
+using pre-existing PASS1 evidence anyway" is **1/10 (`cl_d82ac29f`), not 3/10** — the other 2 never
+triggered a search to begin with, by design (priority cap), which is a different (and cheaper, not
+wasteful) mechanism than "search ran but found nothing better." This does not change P0's overall
+waste conclusion, but changes which specific fix (mapper top-K width vs. search coverage) would
+actually address it — `cl_d82ac29f`'s case is a mapper-selection tuning question, not a
+retrieval-coverage gap, and mapper threshold tuning is explicitly outside this pass's scope
+("НЕ ТРОГАТЬ: decision_relevance semantics" covers the adjacent priority mechanism; the mapper
+threshold itself was not authorized for this pass either — flagged as a candidate for a future,
+separately-scoped pass, not touched here).
+
+## Phase 2 — SHADOW: Directness-Aware Routing Simulation (measurement only, NOT activated)
+
+Simulated `hypothetical_should_retrieve` (accepting a PASS1 relation as "effective" via directness
+≥0.60 + non-blocked class + non-registry, in addition to the existing authority path) for all 12
+claims against real PASS1 `[Evidence Eligibility]`/`[NLI Batch Raw]` data.
+
+**Result: 0/12 claims flip.** Every PASS1-time directness≥0.60 pair either belonged to a claim
+already resolved via authority anyway (redundant, not new savings), or had a non-qualifying
+relation (`cl_26fc0420`'s `unrelated` — directness alone never resolves a claim without a
+supports/contradicts NLI verdict too). The directness-strong evidence that mattered in this run
+(`cl_8f195b39`'s two supports) only existed *after* PASS2 fetched it — circular to ask whether
+PASS1-only directness-routing could have skipped the very retrieval that produced it.
+
+**Potential savings this run: zero.** Explicitly a run-specific negative result, not a general
+proof directness-aware routing never helps — flagged as NOT YET PROVEN for the general case.
+Safety analysis is trivially clean (0 flips → no contradiction-discovery loss, no independence
+loss to reason about), but the `cl_26fc0420` case is an important design note for any future
+activation: directness and relation-type must always be checked together
+(`_counts_toward_status()`'s actual two-part condition), never directness alone.
+
+**NOT ACTIVATED — shadow measurement only, per task instruction.**
+
+## Phase 3 — Duplicate Query Audit: FIXED (defensive infrastructure)
+
+The 8 selected claims' real query pairs (`[Claim Retrieval Query]` lines, `live_run.log:373-760`)
+contain **zero exact duplicates** in this run — the closest pattern is a structural
+near-duplicate template repeated for `cl_e839ab9d`/`cl_8f195b39` (pharyngeal vs. esophageal
+cancer, same sentence shape) — measured, not merged, per instruction.
+
+No exact-duplicate waste to fix in THIS run's data. However, `_search_with_ddgs()` had **zero**
+request-scoped dedup for the underlying DDGS search-engine call itself (confirmed by reading
+`agent/orch_web_scraper.py:596` — no memoization existed at all, distinct from the URL-fetch cache
+downstream) — two claims genuinely CAN produce byte-identical query text (e.g. near-duplicate
+claims from the same extraction pass), and exact-text identity is by construction never able to
+merge a support query with a counter query (they're never designed to produce identical text).
+Added `SharedFetchCache.get_or_search()`/`normalize_query()` (same object as the URL cache, not a
+parallel subsystem) — conservative normalization (whitespace collapse + casefold only, no
+punctuation stripping, no fuzzy matching). Regression:
+`agent/orch_query_url_dedup_regression_test.py` proves exact-duplicate (post-normalization) queries
+dedupe to one search, while differently-worded support/counter queries never merge.
+
+## Phase 4/5 — URL Fetch Dedup / In-Flight Coalescing: ALREADY WORKING, now provable
+
+`SharedFetchCache.get_or_fetch()` already deduped by `(transport, canonicalize(url))` and already
+coalesced in-flight concurrent requests via a `threading.Event` per key — both pre-dating this
+task (confirmed by reading the code, and by `agent/refutation_performance_regression_test.py`'s
+pre-existing "two concurrent phases requesting the same URL" test). **New finding**: the cache's
+`get_or_fetch()` return value never distinguished a fresh fetch from a cache hit, so EVERY caller
+(including cache hits) printed its own "OK"/"proxy OK" line — meaning repeated-looking log lines
+for one URL (e.g. `finance.yahoo.com` printing "proxy OK" 3 times with identical 780-char payloads)
+were consistent with the cache working correctly (1 real fetch, N-1 hits, each caller printing its
+own copy) and were **not** provable evidence of duplicate network work from the log alone. Added
+explicit `fetch cache HIT (transport)` / `HIT (in-flight, transport)` log lines so this is directly
+observable instead of requiring code-tracing. New integration-level regression (not just the
+existing raw-cache-level test):
+`agent/orch_query_url_dedup_regression_test.py` proves that two *different claims* (via
+`retrieve_claim_evidence()`, not just the raw cache) independently discovering the same URL result
+in exactly one real network fetch AND both claims still receive their own correctly-attributed
+evidence record (distinct `evidence_id`, correct `retrieval_claim_id` each) — the exact
+provenance-preservation proof the task required.
+
+## Phase 6 — Failure Memory Audit
+
+4-way classification of the coffee run's 114 transport events: HARD_DIRECT_FAILURE (~24 direct +
+22 browser-required flags: 403/Cloudflare), RATE_LIMIT (2 direct + 1 proxy, 429), TRANSIENT_TIMEOUT
+(~24 direct timeouts), PROXY_FAILURE (11: proxy_http_4xx/fetch_failed/etc). Initial pass found 5
+URLs with same-URL, same-transport repeat events (`mchunguzi.com`, `www.bodi.com`,
+`www.discovermagazine.com`, `www.inverse.com`, `finance.yahoo.com`) and provisionally verdicted
+this as proof of wasted duplicate attempts, gating Phase 7.
+
+**Re-examined given the Phase 4/5 finding above (repeated prints ≠ repeated fetches)**: since
+`get_or_fetch()` already memoizes ALL outcomes (success AND failure) by `(transport, url)` for the
+cache instance's lifetime, and HARD_DIRECT_FAILURE/PROXY_FAILURE responses (403, Cloudflare
+challenge, proxy 4xx) return promptly from the server rather than hanging — these categories should
+already be fully covered by the pre-existing cache, exactly like the successful-fetch case. The
+repeated `direct FAIL`/`proxy FAIL` lines for the same URL are the same print-regardless-of-
+cache-hit pattern as the successful-fetch case, not new evidence of a gap. One theoretically
+possible genuine gap remains: `get_or_fetch()`'s own waiter fallback ("owner never populated a
+result — fetch it ourselves") could in principle cause a second real attempt if the owner's
+underlying call is simply *slow* (not crashed) past the waiter's `FETCH_TIMEOUT+10` patience window
+— but this scenario requires a hang longer than the waiter's own tolerance, which by construction
+only threatens the TRANSIENT_TIMEOUT category (fast-resolving 403/Cloudflare responses can't
+trigger it), and the task's own taxonomy explicitly forbids treating timeout as a permanent-failure
+memo target ("Timeout НЕ превращать автоматически в permanent failure").
+
+**Verdict, corrected**: with the new HIT-logging in place (Phase 4/5), the confirmation run
+(`live_run_p1b_coffee.log`) is used to check directly whether any repeated failure for the same
+`(transport, URL)` occurs WITHOUT a matching `fetch cache HIT` marker (see BEFORE/AFTER below for
+the result). If none are found, **Phase 7's implementation gate is not met for a new production
+fix** — the existing cache already covers the authorized categories (HARD_DIRECT_FAILURE,
+PROXY_FAILURE), and the Phase 4/5 HIT-logging enhancement is itself the correct-scoped deliverable
+here, not a new failure-memo subsystem. This is reported as-verified below, not assumed.
+
+## Phase 7 — Request-Scoped Hard Failure Memory: NOT NEEDED (gate not met)
+
+Live-confirmed via `live_run_p1b_coffee.log` (fresh run, Phase 4/5 HIT-logging active). All 10
+previously-flagged "repeated failure" URLs from the original Phase 6 pass were individually
+re-checked, including the highest-repeat case (`www.abc.net.au`, 4 direct FAIL + 4 proxy OK
+prints):
+
+```
+direct FAIL: abc.net.au... reason=fetch_failed -> proxy queue      (1st: REAL attempt)
+proxy OK:    abc.net.au... (4999 chars)                            (1st: REAL attempt)
+fetch cache HIT (direct): abc.net.au...                            (2nd claim: HIT)
+fetch cache HIT (direct): abc.net.au...                            (3rd claim: HIT)
+direct FAIL: abc.net.au... reason=fetch_failed -> proxy queue      (4th claim: re-printed by whichever
+                                                                      claim's future resolved after the
+                                                                      owner populated the cache — still a
+                                                                      HIT, not a new attempt; see below)
+fetch cache HIT (proxy): abc.net.au...                             (2nd claim: HIT)
+proxy OK:    abc.net.au... (4999 chars)                            (2nd claim: HIT, reprinted)
+...
+```
+Every one of the 10 URLs (`mchunguzi.com`, `www.bodi.com`, `www.discovermagazine.com`,
+`www.inverse.com`, `finance.yahoo.com`, `ktla.com`, `blog.providence.org`, `medicalxpress.com`,
+`foodsafetynews.com`, `uicc.org`, `downtoearth.org.in`, `academia.edu`, `usatoday.com`,
+`www.abc.net.au` — some carried over from the original run, some newly observed) shows **exactly
+one real fetch per (transport, URL) pair**, with every additional print matched 1:1 by a `fetch
+cache HIT (transport)` or `HIT (in-flight, transport)` marker — on both direct AND proxy
+transports, for both FAILURE and SUCCESS outcomes alike. `coffeeandhealth.org`'s 2 distinct
+`browser REQUIRED` lines are for 2 genuinely **different** URLs (different paths under the same
+domain) — correctly not deduped, since they're different content.
+
+**Verdict: Phase 7's implementation gate is NOT met.** `get_or_fetch()` already memoizes failures
+exactly as effectively as it memoizes successes — the original Phase 6 "5 wasted attempts" finding
+was a complete misdiagnosis, caused by the exact same print-regardless-of-cache-hit artifact
+identified in Phase 4/5, now empirically ruled out with zero exceptions across every flagged case.
+**No new production code for request-scoped failure memory is built or needed.** The Phase 4/5
+HIT-logging commit (`b2eec1e`) is the correct, sufficient, already-shipped deliverable for this
+entire investigation thread — this is reported as a genuine negative result, not a gap papered
+over: the task's own Phase 6 gate ("Разрешено реализовать ТОЛЬКО если Phase 6 докажет повторение")
+is honored by concluding, with fresh live evidence, that it does not.
+
+---
+
+## Phase 8 — Funnel Measurement (P0 baseline vs. P1-B confirmation runs)
+
+Wall-clock is **not** a valid before/after comparison here: the three P1-B confirmation runs were
+executed concurrently (three `orchestrator_v2.py` processes sharing one machine's CPU/Ollama/
+network), inflating their wall time well beyond the sequential P0 baseline
+(coffee 564.18s vs. baseline 397.23s; Jupiter 533.82s vs. 447.38s; leaves 475.54s vs. 382.81s) —
+consistent with resource contention, not a regression, and the task itself says not to require
+matching wall-clock. Fetch/dedup counts (unaffected by CPU contention) are the meaningful
+comparison:
+
+| Metric | Coffee P0 | Coffee P1-B | Leaves P0 | Leaves P1-B | Jupiter P0 | Jupiter P1-B |
+|---|---|---|---|---|---|---|
+| search requests | 224 | 251 | 151 | 186 | 203 | 253 |
+| network fetches | 173 | 180 | 143 | 181 | 170 | 214 |
+| fetch cache saved (hits) | 51 | 71 | 8 | 5 | 33 | 39 |
+| cache hit_ratio | 0.23 | 0.28 | 0.05 | 0.03 | 0.16 | 0.15 |
+| query cache hits (NEW, Phase 3) | n/a | 0 | n/a | 0 | n/a | 0 |
+| claim_status (supported/unverified/contradicted/total) | 3/8/1/12 | 3/5/3/11 | 1/5/-/6 | 2/5/-/7 | 1/7/-/9 | 2/7/-/9 |
+| canonical Trust | UNVERIFIED | UNVERIFIED | UNVERIFIED | UNVERIFIED | UNVERIFIED | UNVERIFIED |
+| Canonical Trust Shadow diverged | False | False | False | False | False | False |
+
+Raw fetch/request counts are **not directly comparable either** — these are independent live web
+queries (non-deterministic search results, different articles discovered each run), same caveat
+the P0 audit already documented for its own corpus. `query cache hits=0` across all three P1-B
+runs confirms the P0 finding held: this specific benchmark set does not organically produce
+exact-duplicate query text (Phase 3's fix remains defensive infrastructure for when it does, not
+something these particular queries exercise) — the mechanism is proven correct via its dedicated
+regression test, not via this live corpus. **FETCH EFFICIENCY / ELIGIBLE YIELD / RETRIEVAL
+AMPLIFICATION** (P0 §22's metrics) were not recomputed for the P1-B runs — doing so accurately
+requires the same full per-claim eligibility trace as P0's coffee run, out of scope for this
+confirmation pass; the important comparison for THIS phase is dedup correctness (Phase 3/4/5,
+proven above) and failure-memory necessity (Phase 6/7, proven above), not a full funnel re-run.
+
+**Correctness invariants — all held across all three runs**: canonical Trust stayed UNVERIFIED
+(never became more optimistic from the dedup/observability changes alone); `Canonical Trust Shadow
+diverged=False` throughout (no split between the two independent trust strands); no claim status
+became more confident without new evidence — status counts moved only in the direction real
+per-run evidence differences would explain (different live web content each run), not a
+mechanical side-effect of the dedup fixes themselves, which touch only *whether* a fetch/search
+happens, never what a claim's status is computed to be.
