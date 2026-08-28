@@ -386,6 +386,48 @@ class EvidenceRecord:
     # shared cluster between two unrelated items.
     source_cluster_id: Optional[str] = None
 
+    # P5 (verification memory) — additive, all default to a value that
+    # preserves old-record meaning (empty string / current cycle / not
+    # from memory). See agent/verification_memory.py.
+    #
+    # retrieval_claim_id: which CURRENT claim this evidence is owned by
+    # (mirrors the runtime evidence dict's own field of the same name —
+    # copied through, not recomputed). "" for shared/global evidence not
+    # owned by one specific claim.
+    retrieval_claim_id: str = ""
+    # route: which of the 5 epistemic channels this evidence reached
+    # THIS verification cycle through. "internet" for anything actually
+    # fetched this cycle (matches all existing/old data's true meaning);
+    # "local_memory" when reconstructed from a prior trace via
+    # verification_memory.lookup_historical_evidence(); "network_node"/
+    # "ai_chat" reserved for future channels (P4 §13 of the Этап 3
+    # brief) — nothing sets them yet.
+    route: str = "internet"
+    observed_at: Optional[float] = None
+    # from_memory: this EvidenceRecord was reconstructed from a prior
+    # trace, not fetched this cycle. The single authoritative flag
+    # downstream code (P1-A gate, Trust) must check before treating a
+    # relation involving this evidence as a fresh verification result —
+    # see agent/orchestrator/claims/retrieval.py::_claim_has_effective_evidence.
+    from_memory: bool = False
+    # origin_*: ONLY meaningful when from_memory=True — preserves the
+    # provenance chain back to where this evidence was ORIGINALLY
+    # observed (P4 §12: "memory reuse is a new ROUTE, not a new SOURCE"
+    # — source_uri never changes, only route does; these fields record
+    # what route/trace/time it first came from, so reuse never gets
+    # mistaken for a second independent root).
+    origin_route: Optional[str] = None
+    origin_trace_id: Optional[str] = None
+    origin_observed_at: Optional[float] = None
+    origin_source_cluster_id: Optional[str] = None
+
+    # Schema preparation only (P4 §13) — NOT activated by this patch.
+    # Nodes/AI-chat orchestration is untouched; these stay None until a
+    # future stage actually populates them.
+    node_id: Optional[str] = None
+    validator_id: Optional[str] = None
+    model_id: Optional[str] = None
+
 
 @dataclass
 class ClaimRecord:

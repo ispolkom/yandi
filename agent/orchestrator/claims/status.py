@@ -626,7 +626,7 @@ def evaluate_claim_status_gate(claims_data, synthesis_result, log):
     return claims_accepted, total_claims, claims_rejected
 
 
-def finalize_claim_trace_and_grounding(claims_data, trace, rejected_structural_claims, semantic_grounding_score, log, verbose):
+def finalize_claim_trace_and_grounding(claims_data, trace, rejected_structural_claims, semantic_grounding_score, log, verbose, evidence_data=None):
     """
     Extracted from agent/orchestrator_v2.py [8] ("FINAL CLAIM TRACE" +
     "EPISTEMIC GROUNDING" blocks, run right after claim epistemic status
@@ -644,8 +644,14 @@ def finalize_claim_trace_and_grounding(claims_data, trace, rejected_structural_c
     высокий epistemic_grounding сам по себе НЕ повышает Trust — evidence
     может полностью противоречить ответу.
 
-    Mutates trace in place (add_claim_raw per unique claim_id). Returns
-    (epistemic_grounding_score, support_grounding_score).
+    Mutates trace in place (add_claim_raw per unique claim_id, then P5
+    persist_verification_evidence for the full evidence pool — same SAVE
+    point, just no longer starved to the first 3 stage-6 snippets).
+    evidence_data is optional/additive: omitting it (old callers, tests)
+    just means verification-memory persistence is skipped, exactly as if
+    this parameter didn't exist — no other behavior changes.
+
+    Returns (epistemic_grounding_score, support_grounding_score).
     """
     traced_claim_ids = set()
 
@@ -659,6 +665,14 @@ def finalize_claim_trace_and_grounding(claims_data, trace, rejected_structural_c
 
         if claim_id:
             traced_claim_ids.add(claim_id)
+
+    if evidence_data is not None:
+        try:
+            from agent.verification_memory import persist_verification_evidence
+            persist_verification_evidence(trace, claims_data, evidence_data, log=log, verbose=verbose)
+        except Exception as e:
+            if verbose:
+                log(f"[VerificationMemory] Ошибка сохранения evidence: {e}")
 
     if verbose:
         log(

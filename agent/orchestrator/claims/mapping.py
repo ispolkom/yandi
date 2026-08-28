@@ -235,6 +235,11 @@ def run_claim_evidence_batch(claims, evidence, batch_label, log, verbose):
                 ),
                 "directness": directness,
                 "relevance": "relevant",
+                # P5 (verification memory): threaded through so the
+                # P1-A gate (_claim_has_effective_evidence) and the
+                # persisted trace can tell a memory-reconstructed
+                # relation apart from a freshly-computed one.
+                "from_memory": bool(ev.get("from_memory", False)),
             })
 
         jobs.append({
@@ -327,6 +332,7 @@ def run_claim_evidence_batch(claims, evidence, batch_label, log, verbose):
                         "directness",
                         0.0,
                     ),
+                    "from_memory": bool(source.get("from_memory", False)),
                 })
 
                 relation_count += 1

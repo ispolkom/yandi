@@ -70,6 +70,7 @@ from agent.evidence_pool import merge_evidence
 from agent.orchestrator.claims.mapping import run_claim_evidence_batch
 from agent.orchestrator.claims.retrieval import _claim_has_effective_evidence
 from agent.source_clustering import assign_source_clusters
+from agent.verification_memory import lookup_historical_evidence
 
 MAX_CLAIM_WORKERS = 3
 
@@ -332,6 +333,66 @@ async def _process_one_claim(
                 timeline["final_status_ready"] = time.time() - t_start
                 return
 
+            # ---- MEMORY PASS (Этап 3 / P5: verification memory) ----
+            #
+            # LOAD point: after claim extraction/identity (content_hash
+            # already set upstream, in claims/lifecycle.py), BEFORE PASS2
+            # web retrieval — per the confirmed brief. Historical evidence
+            # (if any) is reconstructed as ordinary route="local_memory"
+            # candidates OWNED by this claim (retrieval_claim_id=claim_id,
+            # via agent.verification_memory.lookup_historical_evidence) and
+            # run through the EXACT SAME Mapper -> NLI this claim's PASS1
+            # evidence just went through — never copied in as a ready-made
+            # verdict. _claim_has_effective_evidence() below ignores
+            # from_memory relations on their own (P4 §10), so a memory hit
+            # alone can never short-circuit PASS2 — it only participates in
+            # the final relation set alongside whatever PASS1/PASS2 find.
+            try:
+                memory_evidence = await asyncio.to_thread(
+                    lookup_historical_evidence, claim, None, log, verbose,
+                )
+            except Exception:
+                memory_evidence = []
+
+            print(
+                f"[VerificationMemory] claim_id={claim_id} "
+                f"content_hash={(claim.get('content_hash') or '-')[:12]} "
+                f"evidence_loaded={len(memory_evidence)}"
+            )
+
+            timeline["memory_evidence_loaded"] = len(memory_evidence)
+
+            if memory_evidence:
+                async with evidence_lock:
+                    evidence_data[:] = merge_evidence(evidence_data, memory_evidence)
+                    snapshot_mem = list(evidence_data)
+
+                mapped_mem = await asyncio.to_thread(
+                    map_claims_to_evidence, [claim], snapshot_mem, embedding_cache,
+                )
+
+                mapped_mem_ids = list(mapped_mem[0].derived_from_evidence_ids or []) if mapped_mem else []
+                if mapped_mem:
+                    claim["derived_from_evidence_ids"] = mapped_mem_ids
+
+                memory_ids = {e["evidence_id"] for e in memory_evidence if e.get("evidence_id")}
+                memory_mapped = len(memory_ids & set(mapped_mem_ids))
+                timeline["memory_evidence_mapped"] = memory_mapped
+
+                await nli_batcher.submit(claim, "MEMORY_ASYNC")
+                timeline["memory_pass_done"] = time.time() - t_start
+
+                memory_nli_pairs = sum(
+                    1 for rel in (claim.get("evidence_relations") or [])
+                    if rel.get("evidence_id") in memory_ids
+                )
+                timeline["memory_nli_pairs"] = memory_nli_pairs
+
+                print(
+                    f"[VerificationMemory] claim_id={claim_id} "
+                    f"evidence_mapped={memory_mapped} nli_pairs={memory_nli_pairs}"
+                )
+
             if _claim_has_effective_evidence(claim):
                 timeline["final_status_ready"] = time.time() - t_start
                 return  # DONE — resolved, no PASS2 needed
@@ -438,6 +499,28 @@ async def _run_async_claim_pipeline_impl(
     profile["nli_batch_sizes"] = nli_batcher.batch_sizes
     profile["nli_enqueue_timestamps"] = nli_batcher.enqueue_timestamps
     profile["nli_flush_records"] = nli_batcher.flush_records
+
+    # P5 (verification memory): request-wide summary, aggregated from
+    # each claim worker's own timeline entries (set in the MEMORY PASS
+    # block above).
+    timelines = profile.get("timelines", [])
+    memory_claim_hits = sum(1 for t in timelines if t.get("memory_evidence_loaded", 0) > 0)
+    memory_evidence_loaded_total = sum(t.get("memory_evidence_loaded", 0) for t in timelines)
+    memory_evidence_mapped_total = sum(t.get("memory_evidence_mapped", 0) for t in timelines)
+    memory_nli_pairs_total = sum(t.get("memory_nli_pairs", 0) for t in timelines)
+
+    profile["memory_claim_hits"] = memory_claim_hits
+    profile["memory_evidence_loaded"] = memory_evidence_loaded_total
+    profile["memory_evidence_mapped"] = memory_evidence_mapped_total
+    profile["memory_nli_pairs"] = memory_nli_pairs_total
+
+    print(
+        f"[VerificationMemory] summary claims={len(timelines)} "
+        f"memory_claim_hits={memory_claim_hits} "
+        f"memory_evidence_loaded={memory_evidence_loaded_total} "
+        f"memory_evidence_mapped={memory_evidence_mapped_total} "
+        f"memory_nli_pairs={memory_nli_pairs_total}"
+    )
 
     return evidence_data
 

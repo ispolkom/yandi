@@ -300,6 +300,19 @@ class Trace:
                     "relation": rel.get("relation", "unrelated"),
                     "relation_method": rel.get("method", "unknown"),
                     "source_claim": (rel.get("source_claim") or "")[:300],
+                    # P5 (verification memory): these were being silently
+                    # dropped at persist time even though mapping.py's
+                    # run_claim_evidence_batch already computes them per
+                    # relation — needed both for AUDIT (why did this
+                    # relation count/not count toward status?) and so a
+                    # future reload can tell a memory-derived relation
+                    # apart from a fresh one (from_memory).
+                    "source_class": rel.get("source_class", "unknown"),
+                    "evidence_eligible": rel.get("evidence_eligible", False),
+                    "evidence_role": rel.get("evidence_role", "context"),
+                    "directness": rel.get("directness", 0.0),
+                    "retrieval_origin": rel.get("retrieval_origin", ""),
+                    "from_memory": bool(rel.get("from_memory", False)),
                 }
                 for rel in (claim_data.get("evidence_relations") or [])
                 if rel.get("evidence_id")
@@ -392,6 +405,14 @@ class Trace:
                     "quality_score": e.quality_score,
                     "source_class": e.source_class,
                     "evidence_eligible": e.evidence_eligible,
+                    # P5: pre-existing gap, unrelated to this patch's own
+                    # fields but found while building verification-memory
+                    # reconstruction (evidence_role was never serialized
+                    # here at all, even though EvidenceRecord always had
+                    # it) — a reconstructed memory evidence item needs its
+                    # real role to correctly re-enter the SAME direct+
+                    # eligible eligibility path everything else uses.
+                    "evidence_role": e.evidence_role,
                     "authority": e.authority,
                     "traceability": e.traceability,
                     "primaryness": e.primaryness,
@@ -399,30 +420,46 @@ class Trace:
                     "is_subject_matter_evidence": e.is_subject_matter_evidence,
                     "rejection_reason": e.rejection_reason,
                     "source_cluster_id": e.source_cluster_id,
+                    # P5 (verification memory) additive fields.
+                    "retrieval_claim_id": e.retrieval_claim_id,
+                    "route": e.route,
+                    "observed_at": e.observed_at,
+                    "from_memory": e.from_memory,
+                    "origin_route": e.origin_route,
+                    "origin_trace_id": e.origin_trace_id,
+                    "origin_observed_at": e.origin_observed_at,
+                    "origin_source_cluster_id": e.origin_source_cluster_id,
+                    "node_id": e.node_id,
+                    "validator_id": e.validator_id,
+                    "model_id": e.model_id,
                 }
-                for e in self.evidence[:10]
+                # P5: no more [:10] cap — P4 §2 of the verification-memory
+                # brief ("не только первые 3") applies just as much to this
+                # hard count cap as it did to add_source() only ever being
+                # called for the first 3 refutation snippets. What actually
+                # bounds this list now is collect_verification_evidence_ids()
+                # upstream (agent/verification_memory.py) — only evidence
+                # that got a real relation on some claim ever reaches
+                # trace.evidence at all, not the raw discovery/rejected pool.
+                for e in self.evidence
             ],
 
             "claims": [
                 {
                     "claim_id": c.claim_id,
                     "claim_text": c.claim_text[:300],
-                    "derived_from_evidence_ids": c.derived_from_evidence_ids[:3],
+                    "derived_from_evidence_ids": c.derived_from_evidence_ids,
                     "claim_type": c.claim_type,
                     "claim_confidence": c.claim_confidence,
                     "verification_status": c.verification_status,
-                    # Same [:3] cap as derived_from_evidence_ids above —
-                    # evidence_relations covers exactly that same evidence-id
-                    # set (see claims/mapping.py::run_claim_evidence_batch,
-                    # candidate_sources is built from derived_from_evidence_ids),
-                    # so the same truncation reasoning applies.
-                    "evidence_relations": c.evidence_relations[:3],
+                    "evidence_relations": c.evidence_relations,
                     "content_hash": c.content_hash,
                     "evidence_search_attempted": c.evidence_search_attempted,
                     "evidence_search_error": c.evidence_search_error,
                     "semantic_family_id": c.semantic_family_id,
                 }
-                for c in self.claims[:15]
+                # P5: no more [:15] cap, same rationale as evidence above.
+                for c in self.claims
             ],
 
             "rejected_claims": self.rejected_claims[:10],
@@ -482,12 +519,40 @@ class DecisionTracer:
         data = trace.to_dict()
         self._traces.append(data)
 
+        locator = None
+
         try:
-            day_file = TRACES_DIR / f"{datetime.now().strftime('%Y%m%d')}.jsonl"
+            day_file_name = f"{datetime.now().strftime('%Y%m%d')}.jsonl"
+            day_file = TRACES_DIR / day_file_name
+            line = json.dumps(data, ensure_ascii=False) + "\n"
+
             with day_file.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(data, ensure_ascii=False) + "\n")
+                # P5 (verification memory): 'a' mode is always
+                # positioned at EOF on open (POSIX append semantics) —
+                # this offset is exactly where THIS trace's line starts,
+                # used as registry/index.db's locator (agent.
+                # verification_memory.index_trace) so a future LOAD is
+                # one seek+readline, not a full-file scan.
+                byte_offset = f.tell()
+                f.write(line)
+
+            locator = (day_file_name, byte_offset)
         except Exception as e:
             print(f"[tracer] Ошибка сохранения: {e}")
+
+        if locator:
+            # Deferred import: agent.verification_memory imports
+            # TRACES_DIR from this module, so a module-level import here
+            # would be circular. Failure here must never affect the
+            # trace itself already being safely on disk — it only means
+            # the lookup accelerator doesn't know about this trace yet
+            # (the JSONL source of truth is unaffected, still fully
+            # scannable as a fallback).
+            try:
+                from agent.verification_memory import index_trace
+                index_trace(trace, locator[0], locator[1])
+            except Exception as e:
+                print(f"[tracer] Ошибка индексации verification memory: {e}")
 
         return data
 

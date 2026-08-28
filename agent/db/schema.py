@@ -47,6 +47,29 @@ CREATE TABLE IF NOT EXISTS schema_version (
     applied_at  TEXT    NOT NULL DEFAULT (datetime('now')),
     description TEXT    NOT NULL DEFAULT ''
 );
+
+-- P5 (verification memory) — lookup-only ACCELERATOR, not a second
+-- epistemic store. registry/dataset/orch_traces/*.jsonl stays the sole
+-- source of truth for claims/evidence/relations/Trust; this table only
+-- answers "where do I find the record for this claim?" (locator =
+-- jsonl filename + byte offset the trace was appended at, so a lookup
+-- is one seek+readline, not a full-file scan). No Trust, no relation,
+-- no evidence content, no quality metadata lives here — see
+-- agent/verification_memory.py. Additive-only (CREATE TABLE IF NOT
+-- EXISTS) — no SCHEMA_VERSION bump needed for a purely additive table.
+CREATE TABLE IF NOT EXISTS claim_verification_index (
+    trace_id            TEXT    NOT NULL,
+    claim_id            TEXT    NOT NULL,
+    content_hash        TEXT,                        -- exact-match key (agent/claim_identity.py)
+    semantic_family_id  TEXT,                         -- fallback key (agent/claim_family_registry.py)
+    jsonl_file          TEXT    NOT NULL,              -- e.g. "20260828.jsonl", relative to orch_traces/
+    byte_offset         INTEGER NOT NULL,              -- f.tell() at the start of this trace's line
+    observed_at         REAL    NOT NULL,
+    PRIMARY KEY (trace_id, claim_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cvi_content_hash ON claim_verification_index(content_hash);
+CREATE INDEX IF NOT EXISTS idx_cvi_family       ON claim_verification_index(semantic_family_id);
+CREATE INDEX IF NOT EXISTS idx_cvi_observed     ON claim_verification_index(observed_at);
 """
 
 # ── knowledge/{category}.db ───────────────────────────────────────────────────
