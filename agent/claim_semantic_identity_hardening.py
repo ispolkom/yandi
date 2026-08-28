@@ -44,6 +44,8 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from agent.claim_identity import extract_subject_anchors
+
 # Each dimension pair: (name, pattern_x, pattern_y). If text A matches
 # pattern_x but not pattern_y, and text B matches pattern_y but not
 # pattern_x (or vice versa), that's an asymmetric marker mismatch — a
@@ -76,7 +78,54 @@ _OBSERVATION = re.compile(r"(?i)\b(вырос[а-я]*|снизил[а-я]*|за�
 _ABSENCE_OF_EVIDENCE = re.compile(r"(?i)\b(не\s+найден[а-я]*|не\s+обнаружен[а-я]*|не\s+зафиксирован[а-я]*|not\s+found|no\s+evidence\s+of)\b")
 _EVIDENCE_OF_ABSENCE = re.compile(r"(?i)(доказан[а-я]*\s+отсутствие|доказано,?\s+что\b.*\bне\b|установлено,?\s+что\b.*\bневозмож)")
 
-_NEGATION = re.compile(r"(?i)\b(не\s+явля|неявля|не\s+был[а-я]*|не\s+являет|неэффектив[а-я]*|не\s+обнаруж|не\s+найден|нельзя|невозможно)\b")
+# P8 (Этап 4D-1): predicate polarity guard — deterministic, conservative
+# ("не + predicate", not generic "не" anywhere in text — no false veto
+# on "не только"/"не менее"/"не более"/"не обязательно"/"не просто",
+# which are particles/adverbs, not predicate negation, and structurally
+# cannot match any alternative below since none of them starts with
+# those words). Fixes a real pre-existing bug: the old "не\s+явля" /
+# "не\s+являет" alternatives each had an implicit trailing \b right
+# after the stem, which never matches inside a longer conjugated form
+# ("является"/"являются" continue past "явля"/"являет" with more
+# letters) — "не является" silently never matched despite looking
+# covered. Fixed the same way "не\s+был[а-я]*" already worked: stem +
+# [а-я]* wildcard before the boundary, applied consistently to every
+# alternative below (принцип уже был в коде для "был", просто не был
+# применён к "явля").
+#
+# New stems (§2 of the Этап 4D-1 brief) added in the SAME whitelist
+# style, not a generic morphological parser: вызыва/влия/подтвержда/
+# сниж/привод cover the imperfective present-tense forms named in the
+# brief (вызывает/влияет/подтверждает/снижает/приводит and their
+# regular conjugations); irregular perfective pasts (привёл, снизил)
+# are NOT covered — an accepted false negative, per the brief's own
+# principle ("FALSE NEGATIVE → допустимо; FALSE POSITIVE → опасно").
+#
+# English (§4): a short, explicit list of auxiliary-negation
+# constructions (does/do/did/is/are/was/were/cannot/will/has/have/had +
+# not) plus a generic \w+n't catch-all for contractions — same
+# precision-first spirit as the causal/correlational dimension pair
+# above, which already mixes RU+EN in one pattern.
+_NEGATION = re.compile(r"""(?ix)
+    \b(
+        не\s+явля[а-я]* | неявля[а-я]* |
+        не\s+был[а-я]* |
+        не\s+обнаруж[а-я]* |
+        не\s+найден[а-я]* |
+        неэффектив[а-я]* |
+        нельзя | невозможно |
+        не\s+вызыва[а-я]* |
+        не\s+влия[а-я]* |
+        не\s+подтвержда[а-я]* |
+        не\s+сниж[а-я]* |
+        не\s+привод[а-я]* |
+        does\s+not | do\s+not | did\s+not |
+        is\s+not | are\s+not | was\s+not | were\s+not |
+        cannot | can\s+not | will\s+not |
+        has\s+not | have\s+not | had\s+not |
+        \w+n't
+    )\b
+""")
 
 _NUMBER = re.compile(r"\d[\d.,]*")
 
@@ -135,5 +184,21 @@ def hardening_guard(claim_a: str, claim_b: str) -> Optional[str]:
     nums_b = set(_NUMBER.findall(claim_b))
     if nums_a and nums_b and nums_a != nums_b:
         return "numeric_mismatch"
+
+    # P7 (Этап 4C §4/§5): entity/subject incompatibility. Reuses the
+    # SAME subject-anchor extraction as claim_evidence_retriever.py's
+    # Subject Gate (agent.claim_identity.extract_subject_anchors) — one
+    # implementation, not a new NER layer. Precision-first per §7/§9 of
+    # the brief: fires ONLY when BOTH texts have an explicit anchor and
+    # those anchor sets are fully disjoint (e.g. "ЕС" vs "НАТО", or
+    # "Юпитер" vs "Сатурн"). If either text has no explicit anchor
+    # (pronoun reference, implicit subject, or a subject this narrow
+    # alias list doesn't cover), the guard ABSTAINS — it must never
+    # manufacture a "different" verdict from the mere ABSENCE of a
+    # signal, only from an explicit, positive mismatch.
+    anchors_a = set(extract_subject_anchors(claim_a))
+    anchors_b = set(extract_subject_anchors(claim_b))
+    if anchors_a and anchors_b and anchors_a.isdisjoint(anchors_b):
+        return "entity_subject_mismatch"
 
     return None

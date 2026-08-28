@@ -52,7 +52,12 @@ from agent.claim_semantic_identity_hardening import hardening_guard
 EMBEDDING_PREFILTER_THRESHOLD = 0.70
 
 
-def classify_claim_pair_detailed(claim_a: str, claim_b: str) -> dict:
+def classify_claim_pair_detailed(
+    claim_a: str,
+    claim_b: str,
+    *,
+    precomputed_similarity: Optional[float] = None,
+) -> dict:
     """
     Full pipeline with diagnostics, for evaluation/reporting. Returns:
         {
@@ -74,6 +79,17 @@ def classify_claim_pair_detailed(claim_a: str, claim_b: str) -> dict:
            "equivalent" verdict to "different" if a dangerous marker
            mismatch is found (see agent/claim_semantic_identity_hardening.py).
            Never touches "contradicts"/"different"/"exact".
+
+    precomputed_similarity (P9 / Этап 4D-2): when the caller already
+    computed this pair's cosine similarity as part of a BATCHED
+    embedding call (agent.claim_family_registry.ClaimFamilyRegistry.
+    find_or_link_claim() embeds one claim against N candidates in ONE
+    /api/embed call, not N), pass it here to skip step 2's OWN
+    embedding call entirely. Decision policy is byte-identical either
+    way — this only changes WHERE the similarity number comes from,
+    never how it's used (same threshold, same judge, same guard).
+    Default None preserves the exact original behavior (own embedding
+    call) for every other caller.
     """
     norm_a = canonicalize_claim_text(claim_a)
     norm_b = canonicalize_claim_text(claim_b)
@@ -84,14 +100,17 @@ def classify_claim_pair_detailed(claim_a: str, claim_b: str) -> dict:
     if not norm_a or not norm_b:
         return {"outcome": "different", "raw_verdict": "different", "similarity": None, "guard_reason": None}
 
-    vectors = BeliefManager._embed_batch([claim_a, claim_b])
-    if vectors is None:
-        # Fail-safe, same as belief_manager.py: embedding failure never
-        # fabricates an equivalence.
-        return {"outcome": "different", "raw_verdict": "different", "similarity": None, "guard_reason": None}
+    if precomputed_similarity is not None:
+        similarity = precomputed_similarity
+    else:
+        vectors = BeliefManager._embed_batch([claim_a, claim_b])
+        if vectors is None:
+            # Fail-safe, same as belief_manager.py: embedding failure never
+            # fabricates an equivalence.
+            return {"outcome": "different", "raw_verdict": "different", "similarity": None, "guard_reason": None}
 
-    import numpy as np
-    similarity = float(np.dot(vectors[0], vectors[1]))
+        import numpy as np
+        similarity = float(np.dot(vectors[0], vectors[1]))
 
     if similarity < EMBEDDING_PREFILTER_THRESHOLD:
         return {"outcome": "different", "raw_verdict": "different", "similarity": similarity, "guard_reason": None}
@@ -109,11 +128,17 @@ def classify_claim_pair_detailed(claim_a: str, claim_b: str) -> dict:
     return {"outcome": raw_verdict, "raw_verdict": raw_verdict, "similarity": similarity, "guard_reason": None}
 
 
-def classify_claim_pair(claim_a: str, claim_b: str) -> str:
+def classify_claim_pair(
+    claim_a: str,
+    claim_b: str,
+    *,
+    precomputed_similarity: Optional[float] = None,
+) -> str:
     """
     Returns one of: "exact", "equivalent", "contradicts", "different".
     Thin wrapper over classify_claim_pair_detailed() for callers that
     only need the final outcome — see that function for the full
-    pipeline description and Phase 9B's hardening guard step.
+    pipeline description, the hardening guard step, and what
+    precomputed_similarity does (Этап 4D-2 batched-embedding path).
     """
-    return classify_claim_pair_detailed(claim_a, claim_b)["outcome"]
+    return classify_claim_pair_detailed(claim_a, claim_b, precomputed_similarity=precomputed_similarity)["outcome"]

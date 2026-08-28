@@ -196,6 +196,95 @@ def setup_claim_and_evidence_lifecycle(
     )
 
 
+def assign_claim_family_identity(
+    claims_data,
+    epistemic_result,
+    is_subjective_answer,
+    cost,
+    log,
+    verbose,
+):
+    """
+    P7 (Этап 4C, Finding A/B fix): Epistemic Core v1 Phase 10 cross-
+    request claim linking (agent.claim_family_registry.ClaimFamilyRegistry
+    .find_or_link_claim), extracted verbatim from the block that used to
+    live inside update_beliefs_link_answer_and_personality_cycle() —
+    same registry call, same domain derivation, same try/except, same
+    cost bucket name. Two changes, both scoped exactly to this INSPECT's
+    findings:
+
+    Finding A (ordering): this function must be called BEFORE
+    finalize_claim_trace_and_grounding() (which does trace.add_claim_raw
+    -> persist_verification_evidence -> index_trace), not after — so
+    claim["semantic_family_id"] actually exists by the time the claim is
+    persisted. No belief/personality/linker logic moved — those stay
+    exactly where they were, in update_beliefs_link_answer_and_
+    personality_cycle(), unchanged, still running after trace
+    finalization same as before.
+
+    Finding B (coverage): the [:3] cap was IDENTITY-scoped ("claims 4+
+    never get a family_id at all"), not a belief-update-cost decision of
+    its own — it was borrowed from the belief-update loop's cap, which
+    exists for a DIFFERENT reason (bounded LLM/network cost for belief
+    writes) and stays untouched at its own call site. Identity coverage
+    must not depend on a claim's position in the list, so this function
+    processes ALL claims_data, not claims_data[:3].
+
+    Mutates claims_data in place (claim["semantic_family_id"]) and
+    cost["claim_family_link_ms"]. Returns nothing.
+
+    P9 (Этап 4D-2 §5, intra-request mutation preserved): claims are
+    still processed ONE AT A TIME, sequentially — each call sees the
+    registry state left by the PREVIOUS claim in this same request, so
+    claim #5 can still land in a family claim #1 just created. NOT
+    batched across claims_data — only each individual find_or_link_claim
+    call's OWN embedding step is now batched internally (against that
+    claim's candidate families), per Этап 4D-2's scope.
+    """
+    if not claims_data:
+        return
+
+    _t0_family_link = time.time()
+    _stats = {}
+
+    try:
+        registry = get_claim_family_registry()
+        domain = (
+            epistemic_result.domain
+            if not is_subjective_answer
+            else "subjective"
+        )
+        for claim in claims_data:
+            claim_text = (claim.get("claim_text") or "").strip()
+            claim_id = claim.get("claim_id")
+            if not claim_text or not claim_id:
+                continue
+            family_id = registry.find_or_link_claim(
+                claim_text, claim_id, domain, log=log, verbose=verbose, stats=_stats,
+            )
+            claim["semantic_family_id"] = family_id
+    except Exception as e:
+        if verbose:
+            log(f"[Claim Family] Ошибка линковки семей: {e}")
+
+    cost["claim_family_link_ms"] = (time.time() - _t0_family_link) * 1000
+
+    # P9 (Этап 4D-2 §10): minimal observability — the whole point of
+    # this patch is to stop having this cost hide inside [PROFILE]'s
+    # "unaccounted" bucket (Этап 4C found 157s/10 claims there).
+    print(
+        f"[FamilyIdentity] claims={_stats.get('claims', 0)} "
+        f"exact_hits={_stats.get('exact_hits', 0)} "
+        f"embed_batches={_stats.get('embed_batches', 0)} "
+        f"embedded_texts={_stats.get('embedded_texts', 0)} "
+        f"prefilter_candidates={_stats.get('prefilter_candidates', 0)} "
+        f"llm_judges={_stats.get('llm_judges', 0)} "
+        f"linked={_stats.get('linked', 0)} "
+        f"created={_stats.get('created', 0)} "
+        f"wall={cost['claim_family_link_ms'] / 1000:.2f}s"
+    )
+
+
 def update_beliefs_link_answer_and_personality_cycle(
     claims_data,
     synthesis_result,
@@ -322,33 +411,17 @@ def update_beliefs_link_answer_and_personality_cycle(
             f"total={cost['belief_update_ms'] / 1000:.2f}s"
         )
 
-    # ---- Epistemic Core v1 Phase 10: cross-request claim linking ----
-    #
-    # Same [:3] cap as the belief-update loop above, for the same reason
-    # (bounded per-claim network cost) — reusing that established
-    # precedent rather than inventing a new number.
-    if claims_data:
-        _t0_family_link = time.time()
-        try:
-            registry = get_claim_family_registry()
-            domain = (
-                epistemic_result.domain
-                if not is_subjective_answer
-                else "subjective"
-            )
-            for claim in claims_data[:3]:
-                claim_text = (claim.get("claim_text") or "").strip()
-                claim_id = claim.get("claim_id")
-                if not claim_text or not claim_id:
-                    continue
-                family_id = registry.find_or_link_claim(
-                    claim_text, claim_id, domain, log=log, verbose=verbose,
-                )
-                claim["semantic_family_id"] = family_id
-        except Exception as e:
-            if verbose:
-                log(f"[Claim Family] Ошибка линковки семей: {e}")
-        cost["claim_family_link_ms"] = (time.time() - _t0_family_link) * 1000
+    # Epistemic Core v1 Phase 10 (cross-request claim linking) moved out
+    # of this function — P7 (Этап 4C, Finding A): it used to run HERE,
+    # AFTER finalize_claim_trace_and_grounding() had already called
+    # trace.add_claim_raw()/persist_verification_evidence()/index_trace(),
+    # so claim["semantic_family_id"] was never set in time to reach the
+    # persisted Trace or claim_verification_index — confirmed on live
+    # data (207/210 real claims had semantic_family_id=null; the only 3
+    # that didn't came through the cache-hit path in orchestrator/
+    # pipeline.py, a different call site entirely). See
+    # assign_claim_family_identity() below, now called BEFORE
+    # finalize_claim_trace_and_grounding() in orchestrator_v2.py.
 
     # ---- YANDI V6: LINKER ----
     supporting_ids = []

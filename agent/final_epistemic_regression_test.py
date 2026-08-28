@@ -254,15 +254,12 @@ def main() -> int:
     print("P1: subject anchor сохраняется на входе в query formulation")
     print("=" * 72)
 
-    import re as _re
-
-    # Изолированный импорт только чистых regex-функций (без scrape/bs4).
-    src = open("agent/claim_evidence_retriever.py", encoding="utf-8").read()
-    start = src.index("def _extract_subject_anchors")
-    end = src.index("def _snippet_text")
-    ns: dict = {"re": _re, "List": list}
-    exec(compile(src[start:end], "claim_evidence_retriever_anchors", "exec"), ns)
-    _extract_subject_anchors = ns["_extract_subject_anchors"]
+    # P7 (Этап 4C §6): extract_subject_anchors() moved to
+    # agent/claim_identity.py (shared with the new entity guard in
+    # claim_semantic_identity_hardening.py) — that module has no scrape/
+    # bs4 dependencies, so a plain import replaces the old source-slice-
+    # and-exec isolation hack this test used to need.
+    from agent.claim_identity import extract_subject_anchors as _extract_subject_anchors
 
     claim_text = "Ни один телескоп или космический аппарат не зафиксировал ни одного сигнала или артефакта на Юпитере."
     query_context = "Есть ли разумная жизнь на Юпитере?"
