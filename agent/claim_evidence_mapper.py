@@ -9,6 +9,7 @@ assistant/claim_evidence_mapper.py — Claim-Evidence Mapper.
 from __future__ import annotations
 
 import sys
+import threading
 import uuid
 import re
 from pathlib import Path
@@ -20,6 +21,80 @@ BASE = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE))
 
 from agent.orch_schemas import ClaimRecord, EvidenceRecord
+
+
+# ------------------------------------------------------------
+# EVIDENCE EMBEDDING CACHE (async claim pipeline, P2 Part 9)
+# ------------------------------------------------------------
+#
+# Same thread-safe, request-scoped, in-flight-coalescing pattern as
+# agent/orch_web_scraper.py::SharedFetchCache — deliberately not a new
+# design, reusing the one already proven safe in this codebase.
+#
+# WHY THIS EXISTS: map_claims_to_evidence() already caches evidence
+# embeddings WITHIN one call ("Evidence не меняются от claim к claim.
+# Поэтому их embeddings должны вычисляться ровно один раз на mapping
+# pass" — see the docstring below). Under the async claim pipeline,
+# each claim can trigger its OWN call to map_claims_to_evidence()
+# (streaming), so that free, per-call caching no longer covers
+# evidence shared ACROSS claims/calls — without this, N claims sharing
+# one evidence item would each independently re-embed it, N unguarded
+# Ollama calls where today there is exactly one. This cache closes
+# that gap by living OUTSIDE any single map_claims_to_evidence() call,
+# passed in explicitly and shared across all of them for one request.
+class EvidenceEmbeddingCache:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._vectors: Dict[str, Any] = {}
+        self._events: Dict[str, threading.Event] = {}
+        self.requests = 0
+        self.hits = 0
+        self.embeds = 0
+
+    def get_or_embed(self, evidence_id: str, text: str, embed_fn):
+        """
+        embed_fn: callable(text) -> vector. Called AT MOST ONCE per
+        evidence_id for this cache instance's lifetime (one user
+        request), regardless of how many claims/threads ask for it.
+        """
+        with self._lock:
+            self.requests += 1
+
+            if evidence_id in self._vectors:
+                self.hits += 1
+                return self._vectors[evidence_id]
+
+            existing_event = self._events.get(evidence_id)
+
+            if existing_event is None:
+                event = threading.Event()
+                self._events[evidence_id] = event
+                is_owner = True
+            else:
+                event = existing_event
+                is_owner = False
+
+        if not is_owner:
+            event.wait(timeout=30 + 10)
+
+            with self._lock:
+                if evidence_id in self._vectors:
+                    self.hits += 1
+                    return self._vectors[evidence_id]
+            # Owner never populated a result — embed it ourselves
+            # rather than return nothing (same fallback as
+            # SharedFetchCache.get_or_fetch()).
+
+        vector = None
+        try:
+            self.embeds += 1
+            vector = embed_fn(text)
+        finally:
+            with self._lock:
+                self._vectors[evidence_id] = vector
+                event.set()
+
+        return vector
 
 
 @dataclass
@@ -34,7 +109,8 @@ class MappedClaim:
 
 def map_claims_to_evidence(
     claims: List[Dict[str, Any]],
-    evidence_records: List[Dict[str, Any]]
+    evidence_records: List[Dict[str, Any]],
+    embedding_cache: "Optional[EvidenceEmbeddingCache]" = None,
 ) -> List[ClaimRecord]:
     """
     Привязать claims к evidence на основе текстового совпадения.
@@ -42,12 +118,21 @@ def map_claims_to_evidence(
     Args:
         claims: список claims (словари)
         evidence_records: список evidence записей
+        embedding_cache: P2 (async claim pipeline) — request-scoped,
+            shared ACROSS multiple calls to this function (e.g. one
+            call per streaming claim). None (default) preserves exact
+            prior behavior: a fresh one-off cache, scoped to just this
+            one call, matching what the in-call `evidence_vectors`
+            dict already did before this parameter existed.
 
     Returns:
         List[ClaimRecord] с заполненными derived_from_evidence_ids
     """
     if not claims:
         return []
+
+    if embedding_cache is None:
+        embedding_cache = EvidenceEmbeddingCache()
 
     # Извлекаем тексты evidence
     evidence_texts = []
@@ -149,7 +234,9 @@ def map_claims_to_evidence(
             if not ev_text:
                 continue
 
-            evidence_vectors[ev["id"]] = _gemma_embed(ev_text)
+            evidence_vectors[ev["id"]] = embedding_cache.get_or_embed(
+                ev["id"], ev_text, _gemma_embed,
+            )
 
         semantic_available = bool(evidence_vectors)
 
@@ -237,9 +324,17 @@ def map_claims_to_evidence(
                         "source": ev.get("source", ""),
                     })
 
+                # Async claim pipeline (YANDI_AGENT_RETRIEVAL_PERFORMANCE_
+                # AUDIT.md P2 Part L/M): under streaming, evidence can be
+                # appended to evidence_data in a non-deterministic order
+                # (race between which claim's retrieval finishes first) —
+                # a score-only sort is stable, so ties would silently
+                # break by insertion order, making candidate selection
+                # (and therefore everything downstream) order-dependent.
+                # Secondary key on evidence_id makes ties break the same
+                # way regardless of arrival order.
                 all_scores.sort(
-                    key=lambda item: item["score"],
-                    reverse=True,
+                    key=lambda item: (-item["score"], item["id"]),
                 )
 
                 # Диагностика показывает реальный score distribution.

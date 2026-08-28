@@ -25,6 +25,7 @@ Claim-specific evidence retrieval.
 from __future__ import annotations
 
 import concurrent.futures
+import threading
 import time
 
 import json
@@ -54,6 +55,13 @@ from agent.claim_relation import (
 # переданного списка.
 MAX_CLAIMS = 8
 MAX_QUERIES_PER_CLAIM = 2
+
+# Async claim pipeline: serializes retrieve_claim_evidence()'s fallback
+# single-claim query-generation call (see call site for full rationale) —
+# a bounded-2 concurrent path (GENERATION_SEMAPHORE) is reduced to fully
+# sequential, closing the one new concurrent-Ollama-call source the async
+# pipeline introduces outside its own single-consumer NLI queue.
+_query_generation_lock = threading.Lock()
 
 # P1 (performance architecture pass): claims per batched query-
 # generation LLM call. Chosen over batch_size=8 (all MAX_CLAIMS in one
@@ -754,9 +762,31 @@ def retrieve_claim_evidence(
     if precomputed_query_result is not None:
         query_result = precomputed_query_result
     else:
-        query_result = formulate_claim_evidence_queries(
-            contextual_claim_text
-        )
+        # Async claim pipeline (agent/orchestrator/claims/async_pipeline.py):
+        # up to MAX_CLAIM_WORKERS=3 claims can call retrieve_claim_evidence()
+        # concurrently (via asyncio.to_thread), each hitting this fallback
+        # when no batch-precomputed query was available. Before the async
+        # pipeline existed, retrieve_for_claims() ALWAYS precomputed queries
+        # for the whole retrieval_claims list up front, so this branch was
+        # never exercised concurrently in production. GENERATION_SEMAPHORE
+        # (orch_config.py) already bounds concurrent Ollama generation calls
+        # to 2, but a live async-pipeline run showed a batch of
+        # HTTPError:500 responses from the local Ollama server shortly
+        # after a run with this fallback exercised at up to 2-3 concurrent
+        # callers for the first time — root cause not conclusively proven,
+        # but the correlation (zero HTTPError:500 in any of 5 prior
+        # benchmark runs, including concurrent ones, vs. 33 in this run)
+        # is real and this is the one NEW concurrent-Ollama-call path the
+        # async pipeline introduces outside its own single-consumer NLI
+        # queue. Serializing it fully (not just semaphore-bounding to 2)
+        # is a low-cost precaution — query generation is a short call, not
+        # the GPU-heavy NLI path — that removes this specific new
+        # concurrency source entirely rather than leaving it as a
+        # plausible-but-unconfirmed contributor.
+        with _query_generation_lock:
+            query_result = formulate_claim_evidence_queries(
+                contextual_claim_text
+            )
 
     _query_generation_ms = (time.time() - _t0_query_gen) * 1000
 

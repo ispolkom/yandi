@@ -42,8 +42,20 @@ def report_pipeline_profile(cost, total, request_fetch_cache, log, verbose):
         ("claim_specific_retrieval", "claim_retrieval_ms"),
         # G (YANDI_RUNTIME_REGRESSION_FIX_REPORT.md §G): раньше эти
         # фазы формировали unaccounted=275.87s (43.8% total).
+        # claim_setup_ms now covers ONLY structural validation —
+        # PASS1 mapping/NLI + PASS2 gate/retrieval/mapping/NLI moved
+        # into the bounded async claim pipeline (see
+        # claim_async_pipeline below); claim_retrieval_ms/
+        # claim_pass2_mapping_nli_ms are no longer set by that
+        # pipeline and this table simply omits them now (cost.get()
+        # skips absent keys) rather than showing stale zeros.
         ("claim_setup_validator_mapper1_nli1", "claim_setup_ms"),
         ("claim_pass2_mapper_nli", "claim_pass2_mapping_nli_ms"),
+        # Async claim pipeline (YANDI_AGENT_RETRIEVAL_PERFORMANCE_
+        # AUDIT.md P2 follow-up) — bounded (MAX_CLAIM_WORKERS=3)
+        # per-claim PASS1 map/NLI + PASS2 retrieval/map/NLI, replacing
+        # the three legacy whole-batch steps above.
+        ("claim_async_pipeline", "claim_async_pipeline_ms"),
         ("claim_claim_nli", "claim_claim_nli_ms"),
         ("final_claim_coverage", "final_coverage_ms"),
         # P0 (performance architecture pass): previously untracked

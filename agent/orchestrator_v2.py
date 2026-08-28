@@ -60,8 +60,7 @@ from agent.orchestrator.claims.lifecycle import (
     setup_claim_and_evidence_lifecycle,
     update_beliefs_link_answer_and_personality_cycle,
 )
-from agent.orchestrator.claims.mapping import run_claim_evidence_batch, run_claim_evidence_mapping_pass1
-from agent.orchestrator.claims.retrieval import apply_claim_resolution_and_second_retrieval
+from agent.orchestrator.claims.async_pipeline import run_async_claim_pipeline
 from agent.orchestrator.claims.disagreement import apply_claim_claim_disagreement
 from agent.claim_graph_shadow import run_claim_graph_shadow
 from agent.family_dependency_graph import apply_family_dependency_shadow
@@ -430,55 +429,54 @@ def process(
             claims_data, _claim_validator, reasoning_info, trace, log, verbose
         )
 
-        # Evidence mapping PASS1 — extracted to
-        # agent/orchestrator/claims/mapping.py (structural extraction;
-        # behavior unchanged).
-        semantic_grounding_score = run_claim_evidence_mapping_pass1(
-            claims_data, evidence_data, log, verbose
-        )
-
-        # Structural validation уже выполнена ДО Mapper.
-        # Здесь начинаются только epistemic проверки claim ↔ evidence.
-
-
-        # ---- CLAIM <-> EVIDENCE RELATION NLI ----
-        #
-        # Mapper определил semantic candidate links.
-        # Все claim <-> evidence пары классифицируются централизованно
-        # через batch helper.
-        #
-        # Helper:
-        #   - строит пары claim/evidence;
-        #   - сохраняет Source Quality metadata;
-        #   - выполняет batch NLI;
-        #   - записывает claim["evidence_relations"];
-        #   - возвращает число классифицированных отношений.
-        claim_relation_count = run_claim_evidence_batch(
-            claims_data,
-            evidence_data,
-            "PASS1",
-            log,
-            verbose,
-        )
-
-        if verbose:
-            log(
-                f"[Claim Evidence NLI] "
-                f"relations classified={claim_relation_count}"
-            )
-
+        # claim_setup_ms now covers structural validation only — the
+        # async claim pipeline below reports its own wall time
+        # separately (cost["claim_async_pipeline_ms"], surfaced in
+        # [PROFILE] as "claim_async_pipeline") so the two phases stay
+        # distinguishable instead of collapsing into one bucket.
         cost["claim_setup_ms"] = (
             (time.time() - _t0_claim_setup) * 1000
         )
 
-        # Claim Resolution Gate + second (claim-specific) retrieval pass —
-        # extracted to agent/orchestrator/claims/retrieval.py (structural
-        # extraction; behavior unchanged).
-        evidence_data = apply_claim_resolution_and_second_retrieval(
+        # Async claim pipeline (YANDI_AGENT_RETRIEVAL_PERFORMANCE_AUDIT.md
+        # P2 follow-up, "YANDI - ASYNC CLAIM PIPELINE") — replaces the
+        # three previously-sequential, whole-batch steps (PASS1 mapping,
+        # PASS1 NLI, PASS2 gate+retrieval+mapping+NLI) with a bounded
+        # (MAX_CLAIM_WORKERS=3) per-claim async pipeline: each claim
+        # moves through PASS1 map -> PASS1 NLI -> resolved? -> (done |
+        # PASS2 retrieval -> PASS2 map -> PASS2 NLI) independently, so a
+        # claim that's ready does not wait for its siblings' retrieval
+        # before entering NLI (P2 Part D/E proved this wait cost
+        # ~100-140s for the fastest claim). Structurally unchanged: PASS2
+        # still only ever touches claims that actually need it (P1-A
+        # scope, commit a082b55); NLI still runs through the exact same
+        # run_claim_evidence_batch() Ollama-calling function, funneled
+        # through a single controlled consumer so concurrent claim
+        # workers never trigger concurrent Ollama NLI calls (P2 Part
+        # H's measured 2-2.7x degradation under concurrent load is the
+        # reason this bound exists). classify_claim_epistemic_status()
+        # below is UNCHANGED — it was already a pure per-claim function
+        # called once after everything else, so it does not need to
+        # become streaming itself.
+        evidence_data = run_async_claim_pipeline(
             claims_data, evidence_data, enable_web, is_subjective_answer,
             _skip_rag, _request_fetch_cache, cost, log, verbose,
         )
 
+        # semantic_grounding_score is diagnostic-only (feeds a single
+        # [Claim Trace] log line in finalize_claim_trace_and_grounding,
+        # never a Trust/status computation — confirmed by reading that
+        # function) — recomputed here from claims_data's now-final
+        # (PASS1+PASS2) grounding state, same formula as
+        # get_claim_grounding_score() used to apply to the PASS1-only
+        # snapshot. The number this diagnostic reports can differ
+        # slightly (final grounding vs. PASS1-only grounding) — noted,
+        # harmless, does not change behavior.
+        semantic_grounding_score = (
+            sum(1 for c in claims_data if c.get("derived_from_evidence_ids"))
+            / len(claims_data)
+            if claims_data else 0.0
+        )
 
         # Claim epistemic status classification — extracted to
         # agent/orchestrator/claims/status.py. Epistemic Core v1 Phase 7:
