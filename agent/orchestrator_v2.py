@@ -70,6 +70,7 @@ from agent.epistemic_contradiction_shadow import (
     build_shadow_request_summary,
 )
 from agent.dependency_recheck import apply_dependency_recheck
+from agent.db.sql.shadow_write import shadow_record_question_and_run, pipeline_version
 from agent.orchestrator.synthesis import build_frame_and_synthesize
 from agent.orchestrator.pre_pipeline import run_pre_pipeline
 from agent.orchestrator.pipeline import run_standard_pipeline
@@ -274,6 +275,26 @@ def process(
         domain="general",
         meta={"query": query[:200]}
     )
+
+    # Этап 5 (SQL persistence migration): shadow-only question+run
+    # identity, ahead of the JSON canonical write path (unaffected
+    # either way — see agent/db/sql/shadow_write.py's fail-open
+    # contract, proven without a live DB in agent/db_sql_shadow_write_
+    # regression_test.py). _sql_question is None whenever the SQL layer
+    # isn't configured/reachable — every downstream shadow call already
+    # handles that silently. NOTE (documented limitation, not silently
+    # papered over): none of pre_pipeline's ~11 early-return short-
+    # circuit points call shadow_complete_run() — a run started here
+    # that exits early stays "running" in SQL until agent.db.sql.
+    # repositories.reconcile_stale_running_runs() is invoked (not yet
+    # wired into any daemon startup path — see the final report).
+    _sql_question = shadow_record_question_and_run(
+        raw_text=query, run_id=trace_id, started_at=trace.timestamp,
+        web_enabled=enable_web, validation_enabled=enable_validation,
+        pipeline_version=pipeline_version(), session_id=request.session_id or None,
+        log=log, verbose=verbose,
+    )
+    _sql_question_id = _sql_question["question_id"] if _sql_question else None
 
     # Pre-pipeline — extracted to agent/orchestrator/pre_pipeline.py
     # (structural extraction; behavior unchanged). 11 short-circuit
@@ -722,6 +743,7 @@ def process(
         claims_rejected=claims_rejected if 'claims_rejected' in locals() else None,
         total_claims=total_claims if 'total_claims' in locals() else None,
         epistemic_trust_gate_label=label if 'label' in locals() else None,
+        sql_question_id=_sql_question_id,
     )
 
 

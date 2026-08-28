@@ -10,20 +10,42 @@ schema mismatch, or any other SQL-layer failure degrades silently to
 given, never more than that (mandate §44: "Shadow SQL failure на этапе
 dual-write НЕ должен ломать production JSON answer path").
 
-Nothing in this module is wired into agent/orchestrator_v2.py or
-agent/orchestrator/response/writeback.py yet — per this project's own
-established discipline this session (see the 4G-2/4G-3 read-path
-precedent: build + prove first, wire as an explicit later step), that
-wiring is deliberately a SEPARATE decision, documented in the final
-report's "READY / NOT READY" section, not silently done here without a
-live database to prove it against.
+Wired into agent/orchestrator_v2.py (question+run start) and agent/
+orchestrator/response/writeback.py (answer+assessment+run completion)
+— safe to wire even with NO live database, because the fail-open
+contract above is itself proven (agent/db_sql_shadow_write_regression_
+test.py) against the REAL current "unconfigured" state, not a
+simulation: every call below costs one is_configured() env-var check
+(microseconds) and then returns None. Claim/evidence-level wiring
+(shadow_record_claim/shadow_record_evidence) is NOT wired into the
+production call graph yet — deliberately staged separately, see the
+final report's "READY / NOT READY" section.
 """
 from __future__ import annotations
 
+import subprocess
 from typing import Any, Callable, Optional
 
 from agent.db.sql.connection import get_connection, SqlUnavailable
 import agent.db.sql.repositories as repo
+
+_PIPELINE_VERSION_CACHE: Optional[str] = None
+
+
+def pipeline_version() -> Optional[str]:
+    """Short git commit hash, computed once and cached — NOT a per-
+    request subprocess call. None outside a git checkout (never raises)."""
+    global _PIPELINE_VERSION_CACHE
+    if _PIPELINE_VERSION_CACHE is None:
+        try:
+            out = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=2, cwd=__file__.rsplit("/agent/", 1)[0],
+            )
+            _PIPELINE_VERSION_CACHE = out.stdout.strip() or "unknown"
+        except Exception:
+            _PIPELINE_VERSION_CACHE = "unknown"
+    return _PIPELINE_VERSION_CACHE
 
 
 def _shadow(log, verbose: bool, label: str, fn: Callable[[Any], Any]) -> Optional[Any]:

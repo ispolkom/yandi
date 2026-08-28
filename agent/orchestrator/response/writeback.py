@@ -59,6 +59,7 @@ from agent.dataset_builder import get_dataset_builder
 from agent.orchestrator.epistemic.trust_gate import _calculate_delta_factors
 from agent.orchestrator.epistemic.canonical_trust import compute_canonical_trust
 from agent.orchestrator.runtime.profiling import report_pipeline_profile
+from agent.db.sql.shadow_write import shadow_complete_run
 
 _DOMAIN_TAG: dict[str, str] = {
     "general": "general",
@@ -306,6 +307,7 @@ def run_optimistic_respond(
     claims_rejected=None,
     total_claims=None,
     epistemic_trust_gate_label=None,
+    sql_question_id=None,
 ):
     log("[10] Optimistic respond...")
     responder = get_responder()
@@ -659,6 +661,12 @@ def run_optimistic_respond(
     # still see the pre-cutover value — a deliberate, documented scope
     # limit, not an oversight.
     if synthesis_result:
+        # Этап 5 (SQL shadow write): pure read, captured BEFORE the
+        # overwrite two lines below — the exact synthesizer-strand value
+        # that fed this call, for answer_assessment's diagnostic columns.
+        # No existing control flow or value touched.
+        _sql_synthesizer_strand = synthesis_result.trust_level
+
         _canonical_result = compute_canonical_trust(
             synthesis_result.trust_level,
             epistemic_trust_gate_label,
@@ -722,6 +730,23 @@ def run_optimistic_respond(
     # the canonical-Trust cutover just above — see this module's
     # regression test for a concrete case where they diverge.
     trace.add_observation("delivered_answer_text", optimistic.text)
+
+    # Этап 5 (SQL shadow write): fail-open, never touches the JSON path
+    # above or below it — see agent/db/sql/shadow_write.py's module
+    # docstring and agent/db_sql_shadow_write_regression_test.py.
+    shadow_complete_run(
+        run_id=trace_id,
+        question_id=sql_question_id,
+        delivered_answer_text=optimistic.text,
+        completed_at=datetime.now(),
+        canonical_trust=(_canonical_result["canonical_trust"] if synthesis_result else "UNVERIFIED"),
+        synthesizer_strand=(_sql_synthesizer_strand if synthesis_result else None),
+        trust_gate_strand=epistemic_trust_gate_label,
+        diverged=(_canonical_result["diverged"] if synthesis_result else False),
+        stricter_strand=(_canonical_result.get("stricter_strand") if synthesis_result else None),
+        reason=(_canonical_result.get("reason") if synthesis_result else None),
+        log=log, verbose=verbose,
+    )
 
     tracer.save_trace(trace)
     log(f"  · Трейс сохранен: {trace_id}")
