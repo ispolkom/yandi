@@ -169,41 +169,8 @@ class ExperienceMemory:
                 })
         # Сортируем по убыванию confidence
         lessons.sort(key=lambda x: x.get('confidence', 0.0), reverse=True)
-    def get_relevant_lessons(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """
-        Возвращает уроки, релевантные текущему запросу.
-        Использует простое сопоставление ключевых слов.
-        """
-        if not query:
-            return self.get_lessons(limit)
-        
-        query_words = set(query.lower().split())
-        scored_lessons = []
-        
-        for exp in self.experiences:
-            context = getattr(exp, "context", {})
-            if context and "lessons" in context and context["lessons"]:
-                exp_query = getattr(exp, "query", "").lower()
-                exp_words = set(exp_query.split())
-                overlap = len(query_words & exp_words)
-                score = overlap / max(len(query_words), 1)
-                
-                scored_lessons.append({
-                    "score": score,
-                    "lesson": {
-                        "query": getattr(exp, "query", ""),
-                        "domain": context.get("domain", "unknown"),
-                        "trust": context.get("trust", "UNVERIFIED"),
-                        "confidence": context.get("confidence", 0.0),
-                        "mistakes": context.get("mistakes", []),
-                        "lessons": context.get("lessons", []),
-                        "policy_changes": context.get("policy_changes", []),
-                        "timestamp": context.get("timestamp", ""),
-                    }
-                })
-        
-        scored_lessons.sort(key=lambda x: (x["score"], x["lesson"]["confidence"]), reverse=True)
-        return [item["lesson"] for item in scored_lessons[:limit]]
+        return lessons[:limit]
+
     def get_relevant_lessons(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
         """
         Возвращает уроки, релевантные текущему запросу.
@@ -241,7 +208,7 @@ class ExperienceMemory:
         # Сортируем по score и confidence
         scored_lessons.sort(key=lambda x: (x["score"], x["lesson"]["confidence"]), reverse=True)
         return [item["lesson"] for item in scored_lessons[:limit]]
-        return lessons[:limit]
+
     def get_stats(self) -> Dict:
         """Возвращает статистику по опыту"""
         acts = {}
