@@ -35,6 +35,7 @@ bootstrap credential (revoke_bootstrap()).
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Tuple
 
 from agent.db.sql.schema import ALL_TABLES_IN_ORDER, ALTER_STATEMENTS_IN_ORDER
@@ -45,10 +46,28 @@ from agent.db.sql.security_grants import (
 from agent.db.sql.security_triggers import immutability_triggers
 
 
+_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
 def ensure_database(conn, database_name: str = DATABASE_NAME) -> None:
     """CREATE DATABASE IF NOT EXISTS — safe to call any number of
     times. utf8mb4 matches every table's own DEFAULT CHARSET in
-    schema.py."""
+    schema.py.
+
+    MySQL identifiers (database/table names) cannot be parameterized
+    at all — %s binding only works for VALUES, never identifiers, a
+    real driver/protocol limitation, not a choice. `database_name`
+    defaults to the hardcoded DATABASE_NAME constant and every current
+    caller relies on that default, but this function accepts it as a
+    parameter — so it validates the identifier shape itself (mandate
+    §15: "Dynamic identifiers... ТОЛЬКО из hardcoded allow-list") rather
+    than trusting every future caller to remember never to pass
+    anything else through it."""
+    if not _IDENTIFIER_RE.match(database_name):
+        raise ValueError(
+            f"refusing to use {database_name!r} as a database identifier — "
+            f"must match {_IDENTIFIER_RE.pattern} (defense against identifier injection)"
+        )
     with conn.cursor() as cur:
         cur.execute(
             f"CREATE DATABASE IF NOT EXISTS `{database_name}` "
