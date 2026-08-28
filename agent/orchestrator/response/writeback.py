@@ -683,9 +683,6 @@ def run_optimistic_respond(
         if trace.outcome is not None:
             trace.outcome.trust_label = _canonical_result["canonical_trust"]
 
-    tracer.save_trace(trace)
-    log(f"  · Трейс сохранен: {trace_id}")
-
     if bad_state_prefix:
         synthesis_result.answer = bad_state_prefix + synthesis_result.answer
 
@@ -708,6 +705,26 @@ def run_optimistic_respond(
 
     if not optimistic.text.startswith(banner):
         optimistic.text = f"{banner}\n\n{optimistic.text}"
+
+    # P0 (storage audit, delivered-answer correctness): capture the
+    # LITERAL delivered text — byte-identical to what OrchestratorResponse
+    # .answer returns below — as its own trace observation, saved BEFORE
+    # tracer.save_trace() so it actually lands in the persisted JSONL line
+    # (previously this banner/prefix block ran AFTER save_trace, so
+    # nothing persisted ever saw it). trace.final_answer (set earlier from
+    # synthesis_result.answer, pre-optimistic-wrapping) intentionally KEEPS
+    # its existing "clean prose, no badges/banner/source-list" meaning for
+    # any consumer that wants that instead — this is additive, not a
+    # replacement, because the two are now provably different: the trust
+    # badge baked into optimistic.text at responder.respond() (above,
+    # earlier in this function) reflects synthesis_result.trust_level as
+    # it stood BEFORE this function's own reflection-mistake downgrade and
+    # the canonical-Trust cutover just above — see this module's
+    # regression test for a concrete case where they diverge.
+    trace.add_observation("delivered_answer_text", optimistic.text)
+
+    tracer.save_trace(trace)
+    log(f"  · Трейс сохранен: {trace_id}")
 
     return OrchestratorResponse(
         answer=optimistic.text,
