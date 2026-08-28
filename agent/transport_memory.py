@@ -123,6 +123,68 @@ def preferred_transport(
     return None
 
 
+def is_stoplisted(url: str) -> bool:
+    """
+    Permanent, no-TTL: True once direct AND proxy have BOTH genuinely
+    failed for this URL (stoplist_url() below), or once this domain/URL
+    was already flagged browser_required (the pre-existing Cloudflare-
+    double-failure case — a strict subset of "both transports failed",
+    folded into the same concept for backward compatibility with any
+    transport_memory.json written before this field existed, no
+    migration needed). Checked at both URL and domain level via
+    get_transport_state()'s existing merge (domain state, then
+    URL-specific state on top).
+    """
+    state = get_transport_state(url)
+    return bool(state.get("stoplisted")) or bool(state.get("browser_required"))
+
+
+def stoplist_url(url: str, direct_reason: str, proxy_reason: str) -> None:
+    """
+    Permanent ban, no TTL/expiry — matches the explicit product
+    decision (a temporarily-down site is treated as operationally
+    unusable; recoverable only by manually editing/clearing
+    registry/transport_memory.json). Called ONLY after direct AND
+    proxy have BOTH been attempted and BOTH failed with a genuine
+    transport-level reason (never for content-level rejects like
+    no_content/no_keywords — those say nothing about whether the URL
+    is reachable, only whether THIS particular query/page matched).
+
+    Domain-level promotion after >=2 independently stoplisted URLs on
+    the same domain — mirrors the existing browser_required_count>=2
+    pattern already used for the Cloudflare case, not a new policy.
+    """
+    domain = _domain(url)
+    now = time.time()
+
+    with _lock:
+        data = _load()
+
+        domains = data.setdefault("domains", {})
+        urls = data.setdefault("urls", {})
+
+        ustate = urls.setdefault(url, {})
+        dstate = domains.setdefault(domain, {})
+
+        if not ustate.get("stoplisted"):
+            ustate["stoplisted"] = True
+            ustate["stoplisted_at"] = now
+            ustate["stoplisted_reason"] = f"direct={direct_reason}+proxy={proxy_reason}"
+
+        stoplisted_count = sum(
+            1
+            for candidate_url, candidate_state in urls.items()
+            if _domain(candidate_url) == domain
+            and candidate_state.get("stoplisted") is True
+        )
+
+        if stoplisted_count >= 2:
+            dstate["stoplisted"] = True
+            dstate["stoplisted_at"] = now
+
+        _save(data)
+
+
 def record_transport_result(
     url: str,
     transport: str,
