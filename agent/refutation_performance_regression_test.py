@@ -55,7 +55,7 @@ def check(name: str, condition: bool, detail: str = ""):
 
 def _fake_search_factory(url_map):
     """url_map: query -> list of urls to 'discover' for that query."""
-    def _fake_search(query, max_results=10):
+    def _fake_search(query, max_results=10, fetch_cache=None):
         return list(url_map.get(query, [])), []
     return _fake_search
 
@@ -221,7 +221,7 @@ check("refutation search with zero discovered URLs -> empty snippets, no crash",
 # the realistic partial-failure shape is "one query yields zero URLs",
 # not an exception escaping the search call.
 
-def _partial_fail_search(query, max_results=10):
+def _partial_fail_search(query, max_results=10, fetch_cache=None):
     if query == "падает":
         return [], []
     return ["https://ok.example/partial"], []
