@@ -432,6 +432,7 @@ class Trace:
                     "node_id": e.node_id,
                     "validator_id": e.validator_id,
                     "model_id": e.model_id,
+                    "route_side": e.route_side,
                 }
                 # P5: no more [:10] cap — P4 §2 of the verification-memory
                 # brief ("не только первые 3") applies just as much to this

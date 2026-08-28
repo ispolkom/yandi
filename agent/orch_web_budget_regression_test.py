@@ -168,7 +168,7 @@ def _fake_ddgs_dupe(query, max_results=10, fetch_cache=None):
 with patch.object(tm, "REGISTRY_DIR", tmp_dir3), patch.object(tm, "MEMORY_FILE", tmp_file3), \
      patch.object(ows, "_search_with_ddgs", _fake_ddgs_dupe):
 
-    candidates, discovered, stoplist_excluded = _budgeted_side_candidates(
+    candidates, discovered, stoplist_excluded, _processed_excluded = _budgeted_side_candidates(
         ["dupe test query"], 3, SharedFetchCache(), "direct",
     )
 
@@ -196,7 +196,7 @@ with patch.object(tm, "REGISTRY_DIR", tmp_dir4), patch.object(tm, "MEMORY_FILE",
         ], []
 
     with patch.object(ows, "_search_with_ddgs", _fake_ddgs_stoplisted):
-        candidates2, discovered2, stoplist_excluded2 = _budgeted_side_candidates(
+        candidates2, discovered2, stoplist_excluded2, _processed_excluded2 = _budgeted_side_candidates(
             ["stoplist test query"], 3, SharedFetchCache(), "direct",
         )
 

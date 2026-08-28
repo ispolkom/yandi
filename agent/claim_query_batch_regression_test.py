@@ -202,7 +202,7 @@ class FakeSnippet:
     content = text
 
 
-def fake_scrape_stub(direct_query, counter_query, fetch_cache=None, claim_id=""):
+def fake_scrape_stub(direct_query, counter_query, fetch_cache=None, claim_id="", content_hash=""):
     result = MagicMock()
     result.snippets = [FakeSnippet()]
     return result

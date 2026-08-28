@@ -227,7 +227,7 @@ class FakeSnippet:
         self.content = text
 
 
-def fake_scrape(direct_query, counter_query, fetch_cache=None, claim_id=""):
+def fake_scrape(direct_query, counter_query, fetch_cache=None, claim_id="", content_hash=""):
     # Simulate: this claim's search discovered a URL that ANOTHER
     # claim will also discover, and go through the SAME shared cache
     # that retrieve_for_claims would have created.

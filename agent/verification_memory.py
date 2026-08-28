@@ -218,6 +218,7 @@ def persist_verification_evidence(
             node_id=ev.get("node_id"),
             validator_id=ev.get("validator_id"),
             model_id=ev.get("model_id"),
+            route_side=ev.get("route_side", "") or "",
         )
         trace.add_evidence(record)
         added += 1
@@ -265,6 +266,32 @@ def _query_index(content_hash: Optional[str], semantic_family_id: Optional[str])
             return rows
 
         return []
+    finally:
+        con.close()
+
+
+def _query_index_all(content_hash: str) -> List[sqlite3.Row]:
+    """
+    ALL historical occurrences of this content_hash — no LIMIT (P6 §3/
+    §16: processed history is a UNION across every past run, unlike
+    _query_index()'s single-most-recent-occurrence used for reassessment
+    LOAD, which stays untouched — these are deliberately two different
+    queries for two different jobs, not one query serving both).
+    """
+    if not content_hash:
+        return []
+
+    con = _db_connect()
+    con.row_factory = sqlite3.Row
+    try:
+        return con.execute(
+            """
+            SELECT * FROM claim_verification_index
+            WHERE content_hash = ?
+            ORDER BY observed_at DESC
+            """,
+            (content_hash,),
+        ).fetchall()
     finally:
         con.close()
 
@@ -354,13 +381,42 @@ def _reconstruct_evidence(
             "retrieval_origin": "claim_specific",
             "retrieval_claim_id": current_claim_id,
             "retrieval_claim_text": current_claim_text[:300],
+            # P6 (Этап 4 §9): describes which side THIS evidence was
+            # ORIGINALLY retrieved for (direct/counter/main) — carried
+            # through unchanged, same as source_uri; it is a property
+            # of the content's retrieval history, not of the current
+            # (memory) cycle.
+            "route_side": ev.get("route_side", "") or "",
 
             "route": "local_memory",
             "from_memory": True,
-            "origin_route": ev.get("route", "internet") or "internet",
-            "origin_trace_id": origin_trace_id,
-            "origin_observed_at": origin_observed_at,
-            "origin_source_cluster_id": ev.get("source_cluster_id"),
+            # P6 (Этап 4 §1, multi-hop provenance fix): if THIS historical
+            # record was itself already a memory reconstruction
+            # (ev["from_memory"] is True — i.e. the trace we're reading
+            # was already a reuse hop, not the original observation),
+            # preserve ITS origin_* chain unchanged rather than deriving
+            # a new one from the trace we happen to be reading right now.
+            # Without this, a 3rd-generation reuse (RUN3 reading RUN2,
+            # which itself reused RUN1) would silently rewrite
+            # origin_route to "local_memory" and origin_trace_id to
+            # RUN2 — losing the true original INTERNET root. Memory
+            # reuse must never create a new epistemic root, no matter
+            # how many hops deep.
+            **(
+                {
+                    "origin_route": ev.get("origin_route") or "internet",
+                    "origin_trace_id": ev.get("origin_trace_id") or origin_trace_id,
+                    "origin_observed_at": ev.get("origin_observed_at") or origin_observed_at,
+                    "origin_source_cluster_id": ev.get("origin_source_cluster_id") or ev.get("source_cluster_id"),
+                }
+                if ev.get("from_memory")
+                else {
+                    "origin_route": ev.get("route", "internet") or "internet",
+                    "origin_trace_id": origin_trace_id,
+                    "origin_observed_at": origin_observed_at,
+                    "origin_source_cluster_id": ev.get("source_cluster_id"),
+                }
+            ),
             # source_cluster_id intentionally left unset here — the
             # CURRENT cycle's assign_source_clusters() recomputes it
             # fresh over whatever's actually present this cycle (P4
@@ -371,6 +427,80 @@ def _reconstruct_evidence(
         })
 
     return reconstructed
+
+
+def get_historical_web_urls(
+    content_hash: str,
+    exclude_trace_id: Optional[str] = None,
+    log=None,
+    verbose: bool = False,
+) -> tuple:
+    """
+    P6 (Этап 4): "processed" URL set for a claim — the UNION of
+    source_uri values across EVERY historical trace occurrence of this
+    content_hash (§3: no LIMIT, unlike lookup_historical_evidence's
+    conservative single-most-recent-occurrence LOAD, which is a
+    DIFFERENT job and stays untouched — §15).
+
+    "Processed" = a persisted EvidenceRecord genuinely linked to this
+    claim via evidence_relations (§4) — exactly what
+    persist_verification_evidence() already restricts SAVE to, so no
+    new filtering rule is invented here; relation type (supports/
+    contradicts/uncertain/unrelated) does NOT matter (§4/§10 of the
+    Этап 3 brief already established unrelated counts too).
+
+    source_uri is returned AS STORED (not canonicalized) — callers that
+    need to compare against discovery candidates canonicalize on their
+    own side (agent.orch_web_scraper already has SharedFetchCache.
+    canonicalize in scope; importing it here would create a circular
+    import, since orch_web_scraper imports THIS module).
+
+    Returns (url_set, historical_occurrences) — occurrence count is the
+    number of distinct historical trace rows found (for the
+    [ProcessedSources] observability line, §17), not the URL count.
+    """
+    rows = _query_index_all(content_hash)
+    if exclude_trace_id:
+        rows = [r for r in rows if r["trace_id"] != exclude_trace_id]
+
+    urls: set = set()
+    seen_traces: set = set()
+
+    for row in rows:
+        trace_dict = _read_trace_line(row["jsonl_file"], row["byte_offset"])
+        if not trace_dict:
+            continue
+
+        seen_traces.add(row["trace_id"])
+
+        historical_claim = next(
+            (c for c in trace_dict.get("claims", []) if c.get("claim_id") == row["claim_id"]),
+            None,
+        )
+        if not historical_claim:
+            continue
+
+        evidence_by_id = {
+            e.get("evidence_id"): e
+            for e in trace_dict.get("evidence", [])
+            if e.get("evidence_id")
+        }
+
+        for rel in historical_claim.get("evidence_relations", []) or []:
+            ev = evidence_by_id.get(rel.get("evidence_id"))
+            if not ev:
+                continue
+            uri = ev.get("source_uri")
+            if uri:
+                urls.add(uri)
+
+    if verbose and log:
+        log(
+            f"[ProcessedSources] content_hash={(content_hash or '-')[:12]} "
+            f"historical_occurrences={len(seen_traces)} processed_urls={len(urls)}"
+        )
+
+    return urls, len(seen_traces)
 
 
 def lookup_historical_evidence(
