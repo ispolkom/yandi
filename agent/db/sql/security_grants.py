@@ -1,0 +1,158 @@
+"""
+agent/db/sql/security_grants.py — Этап 5E-S S2: DB role/privilege
+design (mandate §10/§53).
+
+DESIGNED, NOT EXECUTED against any live server in this pass — see
+SECURITY_ARCHITECTURE.md §0/§7/§9. No credentials exist in this
+environment to create these roles with (verified this pass: `sudo -n
+mysql` fails with "a password is required", no YANDI_SQL_USER/PASSWORD
+in the environment). agent/db/sql/bootstrap.py is the only intended
+future caller of the functions here, and only against a server the
+operator has explicitly decided to bootstrap (SECURITY_ARCHITECTURE.md
+§4's required owner decision).
+
+Every GRANT here targets ONLY `{DATABASE_NAME}.*` — never `*.*` —
+EXCEPT the handful of privileges MySQL's own grant model makes global-
+only regardless of what any application wants (CREATE USER, GRANT
+OPTION scoping is inherent to MySQL, not a YANDI design choice — see
+`yandi_bootstrap_statements()`'s docstring). This matters because this
+machine's Percona instance is SHARED (SECURITY_ARCHITECTURE.md §4) —
+a `*.*` grant would touch other tenants' schemas.
+
+Every privilege below carries a one-line justification (mandate
+§10.3: "Каждый privilege должен быть объяснён").
+"""
+from __future__ import annotations
+
+from typing import List, Tuple
+
+from agent.db.sql.schema import ALL_TABLES_IN_ORDER, TABLE_CLASSIFICATION
+
+DATABASE_NAME = "yandi_epistemic"
+
+_ALL_TABLES = [n for n, _ in ALL_TABLES_IN_ORDER]
+CLASS_AB_TABLES = [n for n in _ALL_TABLES if TABLE_CLASSIFICATION.get(n) in ("A", "B")]
+CLASS_C_TABLES = [n for n in _ALL_TABLES if TABLE_CLASSIFICATION.get(n) == "C"]
+CLASS_D_TABLES = [n for n in _ALL_TABLES if TABLE_CLASSIFICATION.get(n) == "D"]
+
+# Privileges that must NEVER appear in a runtime/readonly grant, under
+# any circumstance — the regression suite scans for these literally.
+FORBIDDEN_FOR_RUNTIME = (
+    "SUPER", "GRANT OPTION", "CREATE USER", "FILE", "PROCESS",
+    "DROP", "ALTER", "CREATE", "TRUNCATE", "SHUTDOWN", "RELOAD",
+    "REPLICATION", "EXECUTE",
+)
+FORBIDDEN_FOR_READONLY = FORBIDDEN_FOR_RUNTIME + ("INSERT", "UPDATE", "DELETE")
+
+
+def create_user_statement(username: str, host: str, password: str) -> Tuple[str, tuple]:
+    """CREATE USER's username/host/password are all string-literal
+    positions in MySQL grammar (single-quoted, not backtick-quoted
+    identifiers) — genuinely parameterizable, unlike table/database
+    names. `username`/`host` are still expected to come from this
+    module's own hardcoded role names (mandate §15: dynamic identifiers
+    only from a hardcoded allow-list), never from arbitrary input;
+    `password` is the one value a caller (bootstrap.py) is expected to
+    generate freshly per-install, never hardcoded here."""
+    return (
+        "CREATE USER IF NOT EXISTS %s@%s IDENTIFIED BY %s",
+        (username, host, password),
+    )
+
+
+def yandi_bootstrap_statements(username: str, host: str, password: str) -> List[Tuple[str, tuple]]:
+    """
+    YANDI_BOOTSTRAP — TEMPORARY. Exists only for the duration of initial
+    install / controlled schema migration (mandate §10.1). Must be
+    revoked/dropped immediately after (bootstrap.py's own
+    `revoke_bootstrap()`, this pass — see its docstring for why that
+    function's OWN execution is also blocked here).
+
+    CREATE USER and GRANT OPTION are global-only privileges in MySQL's
+    grant model — there is no per-database "CREATE USER" — so this is
+    the ONE role in this design that necessarily touches `*.*`. This is
+    a MySQL constraint, not a YANDI design choice; the mitigation is
+    TEMPORAL (this role does not persist), not scope-based.
+    """
+    stmts = [create_user_statement(username, host, password)]
+    stmts.append((
+        f"GRANT CREATE, DROP, ALTER, INDEX, REFERENCES, CREATE VIEW, "
+        f"TRIGGER, CREATE USER, GRANT OPTION ON *.* TO %s@%s",
+        (username, host),
+    ))
+    # Database-scoped DDL for the actual schema/role creation work.
+    stmts.append((
+        f"GRANT ALL PRIVILEGES ON `{DATABASE_NAME}`.* TO %s@%s",
+        (username, host),
+    ))
+    return stmts
+
+
+def yandi_migrator_statements(username: str, host: str, password: str) -> List[Tuple[str, tuple]]:
+    """
+    YANDI_MIGRATOR — for schema upgrades only (mandate §10.2). Local
+    only (`host` is expected to be 'localhost', enforced by
+    bootstrap.py, not by this function — this function just generates
+    the GRANT text for whatever host it's given). DDL scoped to
+    `{DATABASE_NAME}.*` only — no CREATE USER, no GRANT OPTION, no
+    global privilege of any kind, unlike bootstrap.
+    """
+    return [
+        create_user_statement(username, host, password),
+        (
+            f"GRANT CREATE, ALTER, INDEX, REFERENCES, CREATE VIEW, TRIGGER, "
+            f"DROP ON `{DATABASE_NAME}`.* TO %s@%s",
+            (username, host),
+        ),
+    ]
+
+
+def yandi_runtime_statements(username: str, host: str, password: str) -> List[Tuple[str, tuple]]:
+    """
+    YANDI_RUNTIME — the actual application process (mandate §10.3).
+
+        SELECT   on every table — the app has to be able to read its
+                 own memory (read API, dedup lookups, projections).
+        INSERT   on every table — every canonical write in this
+                 codebase is an INSERT (append-only by construction,
+                 see agent/db/sql/repositories.py).
+        UPDATE   ONLY on class C (derived projections: `belief`,
+                 `semantic_edge` — rebuildable, mutation is their
+                 whole point) and class D (`verification_run` — one
+                 narrow, trigger-guarded status transition, see
+                 SECURITY_ARCHITECTURE.md §6). NEVER on a class A/B
+                 table — that is the entire point of this role.
+        (nothing else) — no DELETE anywhere, no DDL, no admin
+                 privilege of any kind (FORBIDDEN_FOR_RUNTIME).
+    """
+    stmts = [create_user_statement(username, host, password)]
+    stmts.append((
+        f"GRANT SELECT, INSERT ON `{DATABASE_NAME}`.* TO %s@%s",
+        (username, host),
+    ))
+    for table in CLASS_C_TABLES + CLASS_D_TABLES:
+        stmts.append((
+            f"GRANT UPDATE ON `{DATABASE_NAME}`.`{table}` TO %s@%s",
+            (username, host),
+        ))
+    return stmts
+
+
+def yandi_readonly_statements(username: str, host: str, password: str) -> List[Tuple[str, tuple]]:
+    """
+    YANDI_READONLY — human-operator direct SQL access (mandate §10.4).
+    SELECT only, zero write privilege of any kind. Does NOT receive the
+    application encryption key (that is not a GRANT — it lives entirely
+    outside SQL, see keys.py) — a SELECT against sensitive columns
+    through this account returns ciphertext, never plaintext knowledge.
+    """
+    return [
+        create_user_statement(username, host, password),
+        (f"GRANT SELECT ON `{DATABASE_NAME}`.* TO %s@%s", (username, host)),
+    ]
+
+
+def revoke_all_statement(username: str, host: str) -> Tuple[str, tuple]:
+    """Used to retire YANDI_BOOTSTRAP after install/migration completes
+    (mandate §10.1: "После установки: DROP / REVOKE / убрать credential")."""
+    return ("DROP USER IF EXISTS %s@%s", (username, host))

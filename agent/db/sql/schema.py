@@ -700,3 +700,46 @@ ALTER_STATEMENTS_IN_ORDER = [
 # (mandate §1/§14) — a regression test greps every DDL string above for
 # these tokens and must find zero matches.
 _BANNED_TOKENS = ("is_true", "verified_truth", "absolute_truth", "truth_certificate")
+
+# ── TABLE CLASSIFICATION (Этап 5E-S, mandate §5) ─────────────────────────
+# Single source of truth for what agent/db/sql/security_grants.py
+# (privilege design) and agent/db/sql/security_triggers.py
+# (immutability enforcement) both key off of — classification must not
+# drift between "what privileges a role gets" and "what triggers exist"
+# by being redefined twice.
+#
+#   A — canonical immutable identity: one row per identity, INSERT (or
+#       find-or-create SELECT+INSERT / INSERT IGNORE) only, NEVER UPDATE.
+#   B — canonical versioned/append-only: many rows accumulate over time,
+#       each individual row is immutable once written (a "history").
+#   C — derived projection: current-state row, rebuildable in full from
+#       A/B history — UPDATE is legitimate here (mandate §5: "PROJECTION
+#       IS DISPOSABLE. HISTORY IS NOT.").
+#   D — operational, narrowly mutable: not pure history, not a full
+#       projection either — see verification_run's own justification in
+#       SECURITY_ARCHITECTURE.md §6 for why it stays D instead of being
+#       migrated to a class-B event log in this pass.
+#   E — security/crypto metadata (future: integrity_event, key_metadata
+#       — none exist as tables yet in this pass; reserved).
+TABLE_CLASSIFICATION = {
+    "schema_migrations": "A",
+    "question": "A",
+    "question_occurrence": "A",
+    "claim_family": "A",
+    "source_resource": "A",
+    "answer_version": "B",
+    "answer_assessment": "B",
+    "family_member": "B",
+    "claim_occurrence": "B",
+    "source_observation": "B",
+    "evidence_relation": "B",
+    "belief_assessment_history": "B",
+    "recheck_event": "B",
+    "epistemic_contradiction_observation": "B",
+    "ai_observation": "B",
+    "ai_reported_source": "B",
+    "run_error": "B",
+    "belief": "C",
+    "semantic_edge": "C",
+    "verification_run": "D",
+}
