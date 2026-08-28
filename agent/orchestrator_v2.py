@@ -490,7 +490,8 @@ def process(
         # agent/orchestrator/claims/status.py (structural extraction;
         # behavior unchanged).
         epistemic_grounding_score, support_grounding_score = finalize_claim_trace_and_grounding(
-            claims_data, trace, rejected_structural_claims, semantic_grounding_score, log, verbose
+            claims_data, trace, rejected_structural_claims, semantic_grounding_score, log, verbose,
+            evidence_data=evidence_data,
         )
 
         # Belief update + claim<->answer linker + personality cycle —

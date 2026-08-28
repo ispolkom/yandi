@@ -556,6 +556,10 @@ try:
         "evidence_id": "e1", "relation": "supports", "method": "nli", "source_claim": "evidence one text",
         "error": None, "source_class": "academic", "quality_score": 0.9, "evidence_eligible": True,
         "evidence_role": "direct", "retrieval_origin": "web", "directness": 0.75,
+        # P5 (verification memory): from_memory threaded through so the
+        # P1-A gate can tell a memory-reconstructed relation apart from
+        # a fresh one — False here since e1 is ordinary (non-memory) evidence.
+        "from_memory": False,
     }], str(by_id_m["c1"]["evidence_relations"]))
     check("mapping: c3 absent from classifier output -> evidence_relations=[] (no crash)", by_id_m["c3"]["evidence_relations"] == [])
     check("mapping: relation_count return value == total relations written", relation_count == 1, str(relation_count))

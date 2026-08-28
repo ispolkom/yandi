@@ -34,6 +34,15 @@ from agent.source_clustering import assign_source_clusters
 
 
 def _claim_has_effective_evidence(claim):
+    """
+    P5 (verification memory, P4 §10): a relation derived from historical
+    memory evidence (rel["from_memory"] is True) must NOT, by itself,
+    make a claim look "already resolved" and skip PASS2 — LOCAL MEMORY
+    is one comparison channel, not a reason to stop looking for NEW
+    evidence this cycle. A fresh (non-memory) direct+eligible supports/
+    contradicts relation still resolves the claim exactly as before —
+    this is the one added condition, not a rewritten gate.
+    """
     for rel in claim.get("evidence_relations", []) or []:
         if (
             rel.get("evidence_role") == "direct"
@@ -42,6 +51,7 @@ def _claim_has_effective_evidence(claim):
                 "supports",
                 "contradicts",
             }
+            and not rel.get("from_memory")
         ):
             return True
 

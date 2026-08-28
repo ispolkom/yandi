@@ -12,9 +12,10 @@ claim["evidence_relations"] by claims/mapping.py::run_claim_evidence_batch()
 was silently dropped in Trace.add_claim_raw() (see
 YANDI_EPISTEMIC_ARCHITECTURE_AUDIT.md §3.1). This suite proves the fix:
 the round trip now reconstructs relation, relation_method and source_claim
-for all four relation types, respects the existing [:3] truncation cap
-(same reasoning as derived_from_evidence_ids), and stays backward
-compatible with claim dicts that have no evidence_relations key at all.
+for all four relation types, persists ALL relations with no truncation
+cap (P5/verification-memory — see section 3 below for why the old [:3]
+cap was removed, not just raised), and stays backward compatible with
+claim dicts that have no evidence_relations key at all.
 
 Run: /home/iam/venv/bin/python3 -m agent.epistemic_relation_persistence_regression_test
 """
@@ -68,7 +69,7 @@ rec = round_tripped["claims"][0]
 rels_by_ev = {r["evidence_id"]: r for r in rec["evidence_relations"]}
 
 check(
-    "round trip: exactly 3 relations survive (all within the [:3] cap)",
+    "round trip: all 3 relations survive (no truncation)",
     len(rec["evidence_relations"]) == 3,
     f"{rec['evidence_relations']}",
 )
@@ -117,7 +118,14 @@ check(
     f"{rec2['evidence_relations']}",
 )
 
-# ── 3. Cap: more than 3 relations -> only first 3 persisted (same as derived_from_evidence_ids) ──
+# ── 3. P5 (verification memory): NO cap — all relations persist ──
+#
+# Was: only the first 3 of N relations survived to_dict() (an old size-
+# management truncation). P4 §2 of the verification-memory brief made
+# this an explicit bug ("не только первые 3" — the exact same problem
+# that starved Trace.evidence to 3 of 27 real evidence items in a live
+# run) — the cap was removed, not just raised, for both
+# derived_from_evidence_ids and evidence_relations.
 
 claim_many = {
     "claim_id": "cl_ccc33333",
@@ -137,8 +145,8 @@ trace3.add_claim_raw(claim_many)
 rt3 = json.loads(json.dumps(trace3.to_dict(), ensure_ascii=False))
 rec3 = rt3["claims"][0]
 check(
-    "cap: 5 relations in runtime -> exactly 3 survive to_dict() (matches derived_from_evidence_ids[:3])",
-    len(rec3["evidence_relations"]) == 3 and len(rec3["derived_from_evidence_ids"]) == 3,
+    "no cap: 5 relations in runtime -> all 5 survive to_dict() (derived_from_evidence_ids uncapped too)",
+    len(rec3["evidence_relations"]) == 5 and len(rec3["derived_from_evidence_ids"]) == 5,
     f"relations={len(rec3['evidence_relations'])} ids={len(rec3['derived_from_evidence_ids'])}",
 )
 
