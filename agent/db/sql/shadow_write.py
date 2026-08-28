@@ -146,6 +146,17 @@ def shadow_record_claim(
     _shadow(log, verbose, "record_claim", _do)
 
 
+def shadow_reconcile_stale_runs(*, older_than_seconds: int = 3600, log=None, verbose: bool = False) -> Optional[int]:
+    """
+    Should be called once at process/daemon startup (NOT wired into any
+    startup path yet — this codebase's actual daemon entrypoint wasn't
+    touched in this pass, see the final report's READY/NOT READY
+    section). Returns the number of runs reconciled, or None if the SQL
+    layer isn't reachable.
+    """
+    return _shadow(log, verbose, "reconcile_stale_runs", lambda conn: repo.reconcile_stale_running_runs(conn, older_than_seconds))
+
+
 def shadow_record_evidence(
     *, claim_id: str, run_id: str, resource_type: str, canonical_uri: Optional[str],
     observation_route: str, origin_observation_id: Optional[int], observed_at,
