@@ -35,7 +35,7 @@ from typing import Any, Dict, List
 
 from agent.orch_schemas import WebQueryResult
 from agent.orch_web_query import _call_ollama
-from agent.orch_web_scraper import scrape, SharedFetchCache
+from agent.orch_web_scraper import scrape_budgeted, SharedFetchCache
 from agent.source_quality import evaluate_source_quality
 from agent.claim_relation import (
     is_relevant,
@@ -71,17 +71,6 @@ _query_generation_lock = threading.Lock()
 # MAX_CLAIMS rather than all of it.
 QUERY_BATCH_SIZE = 4
 
-# Финальное число evidence для одного claim.
-MAX_RESULTS_PER_CLAIM = 3
-
-# ВАЖНО:
-# обычный scraper ранжирует по Source Quality ещё до того,
-# как claim retriever проверяет соответствие конкретному claim.
-#
-# Поэтому для claim-specific pass берём более широкий pool,
-# затем применяем claim semantic relevance и только после этого
-# выбираем финальные evidence.
-CLAIM_RETRIEVAL_POOL = 10
 
 
 def _extract_json(text: str) -> dict:
@@ -809,22 +798,24 @@ def retrieve_claim_evidence(
 
     _t0_web_request = time.time()
 
-    try:
-        web_result = scrape(
-            query_result,
-            max_results=CLAIM_RETRIEVAL_POOL,
+    # P4 (web budget 3+3): scrape_budgeted() replaces the old single
+    # scrape(query_result, max_results=CLAIM_RETRIEVAL_POOL=10) call.
+    # query_result.queries is [direct_query, counter_query] by
+    # construction (formulate_claim_evidence_queries() and its batch
+    # counterpart both build the list in that exact order - "Создай
+    # РОВНО 2 поисковых запроса: 1. DIRECT_EVIDENCE 2. COUNTER_EVIDENCE").
+    # Each side now gets its own independent max-3 fetch budget instead
+    # of a single shared max-10 pool that could silently starve one
+    # side (see YANDI_AGENT_RETRIEVAL_PERFORMANCE_AUDIT.md P4).
+    direct_q = query_result.queries[0] if len(query_result.queries) > 0 else ""
+    counter_q = query_result.queries[1] if len(query_result.queries) > 1 else ""
 
-            # Для claim-specific retrieval domain diversity
-            # применяется слишком рано.
-            #
-            # Сначала:
-            #   subject gate
-            #   semantic claim relevance
-            #   Source Quality
-            #
-            # И только затем можно ограничивать финальный набор.
-            domain_diversity=False,
+    try:
+        web_result = scrape_budgeted(
+            direct_q,
+            counter_q,
             fetch_cache=fetch_cache,
+            claim_id=claim.get("claim_id", ""),
         )
     except Exception as exc:
         print(
@@ -1066,7 +1057,17 @@ def retrieve_claim_evidence(
         f"snippets={len(web_result.snippets)}"
     )
 
-    return evidence_records[:MAX_RESULTS_PER_CLAIM]
+    # P4 (web budget 3+3): previously truncated to MAX_RESULTS_PER_CLAIM
+    # (3), back when fetch itself was uncapped at up to CLAIM_RETRIEVAL_
+    # POOL=10 candidates - a real, needed safety margin then. Now that
+    # scrape_budgeted() already caps fetch at <=6 (3 direct + 3
+    # counter), this list can never exceed 6 to begin with, and
+    # truncating further would risk silently discarding counter-side
+    # evidence whenever direct-side items happen to rank higher by
+    # role/quality - defeating the point of giving counter its own
+    # dedicated, independent budget. Sort (still useful for downstream
+    # priority) kept; the cut removed.
+    return evidence_records
 
 
 def _query_relevance_score(

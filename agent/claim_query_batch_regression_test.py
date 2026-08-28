@@ -202,7 +202,7 @@ class FakeSnippet:
     content = text
 
 
-def fake_scrape_stub(web_query, max_results=10, domain_diversity=False, fetch_cache=None):
+def fake_scrape_stub(direct_query, counter_query, fetch_cache=None, claim_id=""):
     result = MagicMock()
     result.snippets = [FakeSnippet()]
     return result
@@ -211,7 +211,7 @@ def fake_scrape_stub(web_query, max_results=10, domain_diversity=False, fetch_ca
 from agent.orch_schemas import WebQueryResult as _WQR
 
 with patch.object(cer, "formulate_claim_evidence_queries", _mock_formulate_single):
-    with patch.object(cer, "scrape", fake_scrape_stub):
+    with patch.object(cer, "scrape_budgeted", fake_scrape_stub):
         with patch.object(cer, "extract_claim_from_source", return_value="Юпитер является газовым гигантом."):
             with patch.object(cer, "_subject_anchor_matches", return_value=(True, ["title"])):
                 with patch.object(cer, "is_relevant", return_value=True):
@@ -236,7 +236,7 @@ check("retrieve_claim_evidence with precomputed queries still returns evidence",
 # Non-regression: WITHOUT precomputed_query_result, the per-claim path still works.
 generation_call_count["n"] = 0
 with patch.object(cer, "formulate_claim_evidence_queries", _mock_formulate_single):
-    with patch.object(cer, "scrape", fake_scrape_stub):
+    with patch.object(cer, "scrape_budgeted", fake_scrape_stub):
         with patch.object(cer, "extract_claim_from_source", return_value="Юпитер является газовым гигантом."):
             with patch.object(cer, "_subject_anchor_matches", return_value=(True, ["title"])):
                 with patch.object(cer, "is_relevant", return_value=True):

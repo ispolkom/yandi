@@ -127,13 +127,13 @@ except NameError as e:
 
 _orig_extract = cer.extract_claim_from_source
 _orig_is_relevant = cer.is_relevant
-_orig_scrape = cer.scrape
+_orig_scrape = cer.scrape_budgeted
 
 
 def _restore():
     cer.extract_claim_from_source = _orig_extract
     cer.is_relevant = _orig_is_relevant
-    cer.scrape = _orig_scrape
+    cer.scrape_budgeted = _orig_scrape
 
 
 earth_snippet = WebSnippet(
@@ -167,7 +167,7 @@ unrelated_snippet = WebSnippet(
     relevance=0.8,
 )
 
-cer.scrape = lambda *a, **kw: WebScrapeResult(
+cer.scrape_budgeted = lambda *a, **kw: WebScrapeResult(
     snippets=[earth_snippet, unrelated_snippet],
     total_chars=100,
     urls=[earth_snippet.url, unrelated_snippet.url],
@@ -194,7 +194,7 @@ check(
 
 # ── 4. Exception/fallback path: a genuine scrape failure still degrades gracefully ──
 
-cer.scrape = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("network down"))
+cer.scrape_budgeted = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("network down"))
 try:
     records_err = retrieve_claim_evidence(
         _no_anchor_claim,
