@@ -78,7 +78,7 @@ from agent.orch_clarifier import ClarificationSession
 from agent.orch_enricher import enrich_query
 from agent.orch_registry_search import search_registry, CONF_THRESHOLD
 from agent.orch_web_query import formulate_queries, formulate_refutation_queries
-from agent.orch_web_scraper import scrape, SharedFetchCache
+from agent.orch_web_scraper import SharedFetchCache, scrape_budgeted_side, STAGE6_MAIN_BUDGET
 from agent.orch_timeout import step_timer
 from agent.orch_reputation import add_decision_event
 from agent.epistemic_router import (
@@ -900,9 +900,23 @@ def run_standard_pipeline(
                 for i, q in enumerate(wq_result.queries[:3]):
                     trace.add_reasoning(f"query_evolution_{i}", {"query": q}, "generated", [])
 
+                # P4 (web budget 3+3): stage 6 main side now gets its
+                # own hard fetch budget (STAGE6_MAIN_BUDGET=3) instead
+                # of the old scrape()'s default MAX_RESULTS-per-query
+                # with no real fetch cap (see orch_web_scraper.py
+                # scrape_budgeted_side() docstring for why this is a
+                # standalone call rather than sharing one function
+                # with the counter/refutation call in synthesis.py).
                 web_result, dt, timed_out = step_timer(
                     "web_scrape",
-                    partial(scrape, wq_result, fetch_cache=_request_fetch_cache),
+                    partial(
+                        scrape_budgeted_side,
+                        wq_result.queries[:3],
+                        STAGE6_MAIN_BUDGET,
+                        fetch_cache=_request_fetch_cache,
+                        side="main",
+                        scope="initial",
+                    ),
                 )
                 cost["web_ms"] = (time.time() - t0) * 1000
                 registry.update_latency("web_scrape", dt)

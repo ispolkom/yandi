@@ -952,7 +952,7 @@ _orig_synthesize = synthesis_mod.synthesize
 _orig_classify_sources = synthesis_mod.classify_sources
 _orig_extract_main_claim = synthesis_mod.extract_main_claim
 _orig_is_relevant = synthesis_mod.is_relevant
-_orig_scrape = synthesis_mod.scrape
+_orig_scrape = synthesis_mod.scrape_budgeted_side
 
 
 class _FakeGraph:
@@ -1035,10 +1035,10 @@ try:
     # Refutation branch: query_frame carries refutation_queries -> scrape()
     # called, refutation_snippets populated and returned, trace.add_source
     # invoked, folded into the hypothesis graph text.
-    def _fake_scrape(wq_result, fetch_cache=None):
-        return SimpleNamespace(queries=wq_result.queries, snippets=[SimpleNamespace(url="http://ref.example", text="refutation text", content="refutation text")])
+    def _fake_scrape(queries, budget, fetch_cache=None, side="counter", scope="initial"):
+        return SimpleNamespace(queries=queries, snippets=[SimpleNamespace(url="http://ref.example", text="refutation text", content="refutation text")])
 
-    synthesis_mod.scrape = _fake_scrape
+    synthesis_mod.scrape_budgeted_side = _fake_scrape
 
     query_frame_r = {"refutation_queries": ["опровержение X"]}
     cost_r = {}
@@ -1090,7 +1090,7 @@ finally:
     synthesis_mod.classify_sources = _orig_classify_sources
     synthesis_mod.extract_main_claim = _orig_extract_main_claim
     synthesis_mod.is_relevant = _orig_is_relevant
-    synthesis_mod.scrape = _orig_scrape
+    synthesis_mod.scrape_budgeted_side = _orig_scrape
 
 
 # ============================================================

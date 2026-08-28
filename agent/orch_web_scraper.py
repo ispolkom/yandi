@@ -364,6 +364,17 @@ DISCOVERY_RESULTS = 20
 FETCH_TIMEOUT = 15
 MAX_CONTENT_LENGTH = 5000
 
+# P4 (web budget 3+3): hard, per-side NETWORK FETCH budget for
+# scrape_budgeted() (claim-specific PASS2 retrieval). This is a fetch
+# CEILING, not a target — "attempt at most 3 direct-side and 3
+# counter-side candidates," never "keep searching until 3 independent
+# sources are found." Independence (source_cluster) is determined
+# AFTER fetch, over whatever was actually fetched this cycle; a future
+# verification-memory cycle, not this one, is responsible for
+# broadening coverage if these 6 attempts turn out to share roots.
+PASS2_DIRECT_BUDGET = 3
+PASS2_COUNTER_BUDGET = 3
+
 # Причины отклонения источников
 REJECT_REASONS = {
     "fetch_failed": "не удалось загрузить страницу",
@@ -890,6 +901,353 @@ def _search_with_ddgs(
         print(f"  [scraper] DDGS error: {e}")
     
     return urls, rejected
+
+
+def _budgeted_side_candidates(
+    queries: List[str],
+    budget: int,
+    fetch_cache: "SharedFetchCache",
+    side: str,
+) -> tuple[List[str], int, int]:
+    """
+    ONE side (e.g. direct/counter, or main/counter) of a budgeted
+    discovery -> exact-dedup -> stoplist-exclusion -> budget-cap funnel
+    (P4 §6/§7/§12). Accepts a LIST of queries because a "side" is not
+    always one query — PASS2 (scrape_budgeted) has exactly one query
+    per side, but stage 6 (scrape_budgeted_side) can have up to 3
+    alternative main-query formulations or 2-3 refutation queries; all
+    of them feed the SAME candidate pool for that side before dedup/
+    stoplist/cap, same as the old scrape()'s multi-query discovery loop
+    did for a single undifferentiated pool.
+
+    Returns (candidate_urls_capped_at_budget, discovered_count,
+    stoplist_excluded_count) — NO fetch happens here, this is
+    candidate SELECTION only.
+
+    Independent of the other side by construction — this function
+    never sees or is affected by the other side's query/results, which
+    is what makes "counter saturation never blocks direct/main and
+    vice versa" (P4 §4) true structurally, not just by convention.
+    """
+    discovered: List[str] = []
+
+    for query in queries or []:
+        if not query or len(query) < 3:
+            continue
+        urls, _rejected = _search_with_ddgs(
+            query, max_results=budget, fetch_cache=fetch_cache,
+        )
+        discovered.extend(urls)
+
+    if not discovered:
+        return [], 0, 0
+
+    # Exact URL dedup (P4 §6) — canonicalized, same normalization
+    # SharedFetchCache itself uses, not a second dedup concept.
+    seen = set()
+    deduped = []
+    for url in discovered:
+        key = SharedFetchCache.canonicalize(url)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(url)
+
+    # Stoplist exclusion BEFORE budget (P4 §7) — a stoplisted URL
+    # never occupies one of the 3 slots; it simply isn't a valid
+    # network candidate at all.
+    stoplist_excluded = 0
+    eligible = []
+    for url in deduped:
+        if is_stoplisted(url):
+            stoplist_excluded += 1
+            print(f"  [scraper][{side}] stoplist SKIP (pre-budget): {url[:60]}...")
+            continue
+        eligible.append(url)
+
+    # Hard cap (P4 §1/§5) — no top-up if some of these later turn out
+    # to be reprints of each other or to fail; that is next cycle's
+    # job, not this one's.
+    return eligible[:budget], len(discovered), stoplist_excluded
+
+
+def _fetch_budgeted_tagged_urls(
+    tagged_urls: List[tuple],
+    fetch_cache: "SharedFetchCache",
+) -> tuple:
+    """
+    Shared fetch lifecycle for scrape_budgeted() and
+    scrape_budgeted_side() — takes an already-budgeted, already-tagged
+    (url, origin) list and fetches each via the SAME interleaved
+    direct-then-proxy-immediately lifecycle (_fetch_url_with_proxy_
+    fallback) as scrape(), stoplisting genuine transport failures the
+    same way. `origin` is a caller-defined label ("direct"/"counter" or
+    "main"/"counter") used only for per-origin fetched counts and log
+    tagging — this function doesn't interpret it.
+
+    Returns (snippets, total_chars, rejected, fetched_by_origin,
+    proxy_fetched) — proxy_fetched is the count of successes among
+    those that specifically needed the proxy transport (direct having
+    failed first), for the [WebBudget]/final-summary proxy_attempts
+    metric.
+    """
+    snippets: List[WebSnippet] = []
+    total_chars = 0
+    rejected: List[Dict[str, str]] = []
+    fetched_by_origin: Dict[str, int] = {}
+    proxy_fetched = 0
+
+    if not tagged_urls:
+        return snippets, total_chars, rejected, fetched_by_origin, proxy_fetched
+
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(5, len(tagged_urls))
+    )
+
+    futures = {
+        executor.submit(
+            _fetch_url_with_proxy_fallback, url, "", fetch_cache,
+        ): (url, origin)
+        for url, origin in tagged_urls
+    }
+
+    done, not_done = concurrent.futures.wait(
+        futures, timeout=(FETCH_TIMEOUT * 2) + 5,
+    )
+
+    for future in done:
+        url, origin = futures[future]
+
+        try:
+            result_dict, reason, transport_used, stoplist_reasons = future.result()
+
+            if result_dict:
+                snippets.append(WebSnippet(
+                    url=result_dict["url"],
+                    title=result_dict["title"],
+                    content=result_dict["content"],
+                    text=result_dict["text"],
+                    relevance=0.7,
+                    origin=origin,
+                ))
+                total_chars += len(result_dict["text"])
+                fetched_by_origin[origin] = fetched_by_origin.get(origin, 0) + 1
+
+                if transport_used == "proxy":
+                    proxy_fetched += 1
+                    print(f"  [scraper][{origin}] proxy OK: {url[:60]}... ({len(result_dict['text'])} chars)")
+                else:
+                    print(f"  [scraper][{origin}] OK: {url[:60]}... ({len(result_dict['text'])} chars)")
+                continue
+
+            if stoplist_reasons is not None:
+                direct_reason, proxy_reason = stoplist_reasons
+                stoplist_url(url, direct_reason, proxy_reason)
+                print(f"  [scraper][{origin}] STOPLISTED (direct={direct_reason} proxy={proxy_reason}): {url[:60]}...")
+            else:
+                print(f"  [scraper][{origin}] reject: {url[:60]}... ({reason or 'unknown'})")
+
+            rejected.append({"url": url, "reason": reason or "unknown"})
+
+        except Exception as e:
+            rejected.append({"url": url, "reason": "fetch_failed"})
+            print(f"  [scraper][{origin}] error: {url[:60]}... ({e})")
+
+    for future in not_done:
+        url, origin = futures[future]
+        future.cancel()
+        rejected.append({"url": url, "reason": "timeout"})
+        print(f"  [scraper][{origin}] TIMEOUT (direct+proxy lifecycle): {url[:60]}...")
+
+    executor.shutdown(wait=False, cancel_futures=True)
+
+    return snippets, total_chars, rejected, fetched_by_origin, proxy_fetched
+
+
+def scrape_budgeted(
+    direct_query: str,
+    counter_query: str,
+    direct_budget: int = PASS2_DIRECT_BUDGET,
+    counter_budget: int = PASS2_COUNTER_BUDGET,
+    fetch_cache: "Optional[SharedFetchCache]" = None,
+    claim_id: str = "",
+) -> WebScrapeResult:
+    """
+    P4 (web budget 3+3), claim-specific (PASS2) retrieval. Replaces
+    the old single scrape(web_query_with_2_queries, max_results=
+    CLAIM_RETRIEVAL_POOL=10) call, which merged direct+counter
+    discovery into one undifferentiated pool (losing query origin) and
+    could select up to 10 URLs per claim with no independent per-side
+    cap — the primary source of the "up to 8 claims x 10 URLs" breadth
+    this task exists to bound.
+
+    Two INDEPENDENT funnels (P4 §2/§12), each: discovery -> exact
+    dedup -> stoplist exclusion -> hard budget cap -> fetch. Neither
+    side's exhaustion affects the other (P4 §4 — fixes a real bug:
+    the old scrape()'s shared discovery loop could break after the
+    FIRST query alone hit DISCOVERY_RESULTS, silently skipping the
+    second query's search entirely; each side here gets its own
+    _search_with_ddgs() call, unaffected by the other).
+
+    Reuses (not reimplements): _search_with_ddgs, SharedFetchCache
+    (dedup + canonicalize), is_stoplisted/stoplist_url,
+    _fetch_url_with_proxy_fallback (the same interleaved direct-then-
+    proxy-immediately lifecycle from the stoplist patch — one URL,
+    direct+proxy together, still costs exactly ONE budget slot, per
+    P4 §8).
+
+    No relevance/quality filtering or ranking here — the caller
+    (retrieve_claim_evidence) already runs its own subject-anchor/
+    semantic-relevance/source-quality gates on whatever this returns;
+    duplicating that here would be a second, competing gate, not a
+    minimal patch.
+    """
+    if fetch_cache is None:
+        fetch_cache = SharedFetchCache()
+
+    direct_candidates, direct_discovered, direct_stoplist_excluded = (
+        _budgeted_side_candidates([direct_query], direct_budget, fetch_cache, "direct")
+    )
+    counter_candidates, counter_discovered, counter_stoplist_excluded = (
+        _budgeted_side_candidates([counter_query], counter_budget, fetch_cache, "counter")
+    )
+
+    print(
+        f"[WebBudget] scope=claim claim_id={claim_id or 'unknown'} "
+        f"direct_candidates={direct_discovered} "
+        f"direct_stoplist_excluded={direct_stoplist_excluded} "
+        f"direct_selected={len(direct_candidates)} "
+        f"counter_candidates={counter_discovered} "
+        f"counter_stoplist_excluded={counter_stoplist_excluded} "
+        f"counter_selected={len(counter_candidates)}"
+    )
+
+    tagged_urls = (
+        [(u, "direct") for u in direct_candidates]
+        + [(u, "counter") for u in counter_candidates]
+    )
+
+    if not tagged_urls:
+        result = WebScrapeResult(snippets=[], total_chars=0, urls=[])
+        setattr(result, "_rejected", [])
+        setattr(result, "_total_found", 0)
+        return result
+
+    snippets, total_chars, rejected, fetched_by_origin, proxy_fetched = _fetch_budgeted_tagged_urls(
+        tagged_urls, fetch_cache,
+    )
+
+    print(
+        f"[WebBudget] scope=claim claim_id={claim_id or 'unknown'} "
+        f"direct_fetched={fetched_by_origin.get('direct', 0)} "
+        f"counter_fetched={fetched_by_origin.get('counter', 0)} "
+        f"proxy_fetched={proxy_fetched}"
+    )
+
+    result = WebScrapeResult(
+        snippets=snippets,
+        total_chars=total_chars,
+        urls=[s.url for s in snippets],
+    )
+    setattr(result, "_rejected", rejected)
+    setattr(result, "_total_found", len(tagged_urls))
+
+    fc = fetch_cache.summary()
+    print(
+        f"[Shared Fetch Cache] (running) "
+        f"requests={fc['requests']} "
+        f"network_fetches={fc['network_fetches']} "
+        f"saved={fc['saved']}"
+    )
+
+    return result
+
+
+# P4 (web budget 3+3): stage-6 (initial, whole-question) side budget.
+STAGE6_MAIN_BUDGET = 3
+STAGE6_COUNTER_BUDGET = 3
+
+
+def scrape_budgeted_side(
+    queries: List[str],
+    budget: int,
+    fetch_cache: "Optional[SharedFetchCache]" = None,
+    side: str = "main",
+    scope: str = "initial",
+) -> WebScrapeResult:
+    """
+    P4 (web budget 3+3), question-scope (stage 6) retrieval for ONE
+    side (main or counter/refutation) of the whole-question web step.
+
+    Same discovery -> exact dedup -> stoplist exclusion -> hard budget
+    cap -> fetch funnel as scrape_budgeted()'s per-side helper (both
+    reuse _budgeted_side_candidates / _fetch_budgeted_tagged_urls),
+    exposed standalone because stage 6's main (agent/orchestrator/
+    pipeline.py) and counter/refutation (agent/orchestrator/
+    synthesis.py) calls live in two different pipeline stages, not
+    adjacent calls that could share one function call without a real
+    cross-file restructuring of when refutation runs relative to main
+    — out of scope for this patch (P4 §3: stage 6 gets the SAME 3+3
+    philosophy, not a merged call site).
+
+    Each call is independent by construction, same guarantee as
+    scrape_budgeted()'s two sides (P4 §4) — one side's exhaustion
+    cannot affect the other because they are, structurally, two
+    entirely separate invocations (this was already true for stage 6
+    even before this patch, per the INSPECT finding that stage 6's
+    main/refutation were already two separate scrape() calls — the
+    counter-starvation bug only existed inside PASS2's single shared
+    scrape() call).
+    """
+    if fetch_cache is None:
+        fetch_cache = SharedFetchCache()
+
+    candidates, discovered, stoplist_excluded = _budgeted_side_candidates(
+        queries, budget, fetch_cache, side,
+    )
+
+    print(
+        f"[WebBudget] scope={scope} side={side} "
+        f"{side}_candidates={discovered} "
+        f"{side}_stoplist_excluded={stoplist_excluded} "
+        f"{side}_selected={len(candidates)}"
+    )
+
+    tagged_urls = [(u, side) for u in candidates]
+
+    if not tagged_urls:
+        result = WebScrapeResult(snippets=[], total_chars=0, urls=[])
+        setattr(result, "_rejected", [])
+        setattr(result, "_total_found", 0)
+        return result
+
+    snippets, total_chars, rejected, fetched_by_origin, proxy_fetched = _fetch_budgeted_tagged_urls(
+        tagged_urls, fetch_cache,
+    )
+
+    print(
+        f"[WebBudget] scope={scope} side={side} "
+        f"{side}_fetched={fetched_by_origin.get(side, 0)} "
+        f"proxy_fetched={proxy_fetched}"
+    )
+
+    result = WebScrapeResult(
+        snippets=snippets,
+        total_chars=total_chars,
+        urls=[s.url for s in snippets],
+    )
+    setattr(result, "_rejected", rejected)
+    setattr(result, "_total_found", len(tagged_urls))
+
+    fc = fetch_cache.summary()
+    print(
+        f"[Shared Fetch Cache] (running) "
+        f"requests={fc['requests']} "
+        f"network_fetches={fc['network_fetches']} "
+        f"saved={fc['saved']}"
+    )
+
+    return result
 
 
 def scrape(

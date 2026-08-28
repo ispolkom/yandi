@@ -227,7 +227,7 @@ class FakeSnippet:
         self.content = text
 
 
-def fake_scrape(web_query, max_results=10, domain_diversity=False, fetch_cache=None):
+def fake_scrape(direct_query, counter_query, fetch_cache=None, claim_id=""):
     # Simulate: this claim's search discovered a URL that ANOTHER
     # claim will also discover, and go through the SAME shared cache
     # that retrieve_for_claims would have created.
@@ -244,7 +244,7 @@ def fake_scrape(web_query, max_results=10, domain_diversity=False, fetch_cache=N
     return fake_result
 
 
-with patch.object(cer, "scrape", fake_scrape):
+with patch.object(cer, "scrape_budgeted", fake_scrape):
     with patch.object(cer, "formulate_claim_evidence_queries", return_value=MagicMock(queries=["jupiter test query"])):
         with patch.object(cer, "extract_claim_from_source", return_value="Юпитер является газовым гигантом."):
             with patch.object(cer, "_subject_anchor_matches", return_value=(True, ["title"])):

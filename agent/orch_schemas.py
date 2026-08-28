@@ -134,6 +134,12 @@ class WebSnippet:
     content: str = ""
     text: str = ""
     relevance: float = 0.5
+    # P4 (web budget 3+3): which side of a budgeted claim-specific
+    # retrieval this snippet came from - "direct"/"counter", or "" for
+    # any caller that doesn't distinguish (e.g. the whole-question
+    # stage-6 scrape() calls, unchanged). Additive, default-empty, no
+    # existing reader/writer of WebSnippet is affected.
+    origin: str = ""
 
 
 @dataclass

@@ -27,10 +27,9 @@ from typing import Any, Dict
 
 from agent.claim_relation import classify_sources, extract_main_claim, is_relevant
 from agent.hypothesis_builder import build_hypothesis_graph
-from agent.orch_schemas import WebQueryResult
 from agent.orch_synthesizer import synthesize
 from agent.orch_timeout import step_timer
-from agent.orch_web_scraper import scrape
+from agent.orch_web_scraper import scrape_budgeted_side, STAGE6_COUNTER_BUDGET
 
 
 def blind_analysis(query: str, local_answer: str, search_result, web_result) -> Dict[str, Any]:
@@ -146,16 +145,23 @@ def build_frame_and_synthesize(
     if "refutation_queries" in query_frame and query_frame["refutation_queries"]:
         log("[Refutation] Сканирование опровержений...")
         try:
-            # WebQueryResult уже импортирован на уровне модуля (строка 35).
-            # Локальный re-import здесь превращал WebQueryResult в local
-            # variable для ВСЕЙ функции process() (Python scoping), что
-            # приводило к UnboundLocalError на более раннем использовании
-            # (строка ~2024, web query timeout fallback), выполняющемся
-            # до этой строки.
-            refutation_wq = WebQueryResult(queries=query_frame["refutation_queries"])
+            # P4 (web budget 3+3): stage 6 counter/refutation side now
+            # gets its own hard fetch budget (STAGE6_COUNTER_BUDGET=3)
+            # instead of the old scrape()'s default MAX_RESULTS-per-
+            # query with no real fetch cap (see orch_web_scraper.py
+            # scrape_budgeted_side() docstring for why this is a
+            # standalone call rather than sharing one function with
+            # the main-side call in pipeline.py).
             refutation_result, dt_ref, timed_out_ref = step_timer(
                 "refutation_scrape",
-                partial(scrape, refutation_wq, fetch_cache=request_fetch_cache),
+                partial(
+                    scrape_budgeted_side,
+                    query_frame["refutation_queries"],
+                    STAGE6_COUNTER_BUDGET,
+                    fetch_cache=request_fetch_cache,
+                    side="counter",
+                    scope="initial",
+                ),
             )
             log("[Refutation DEBUG] refutation_result type: " + str(type(refutation_result)))
             if refutation_result:
