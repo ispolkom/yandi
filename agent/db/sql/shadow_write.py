@@ -146,6 +146,101 @@ def shadow_record_claim(
     _shadow(log, verbose, "record_claim", _do)
 
 
+def shadow_record_claims_and_evidence(
+    *, run_id: str, claims_data: list, evidence_data: list, log=None, verbose: bool = False,
+) -> None:
+    """
+    Bulk shadow write for a run's FINALIZED claims + evidence, meant to
+    be called from the exact point agent/orchestrator/claims/status.py::
+    finalize_claim_trace_and_grounding() calls agent.verification_
+    memory.persist_verification_evidence() — claims_data/evidence_data
+    are already in their final JSON-persisted shape there. ONE
+    transaction for the whole batch (mandate §45: never a connection/
+    commit per row).
+
+    Resource identity mapping (the §6 correction, applied to REAL
+    runtime evidence dict shape):
+        observation_route = ev["route"]            -- all 5 channels valid
+        resource_type      = ev["origin_route"] if ev["route"] ==
+                              "local_memory" else ev["route"]
+                              -- a replay's resource is what it ORIGINALLY
+                              was, never "local_memory" itself.
+
+    Only evidence with resource_type == "internet" and a real source_uri
+    is shadow-written in this pass — network_node/ai_chat/local_model
+    resources have no canonical identity source yet (V1 scope, same as
+    agent.verification_memory.compute_stable_root()).
+
+    KNOWN LIMITATION (documented, not silently papered over):
+    origin_observation_id is NOT populated here — reconstructing which
+    SQL-side observation a local_memory replay pointed at would need a
+    resource+run+time lookup this pass didn't build. The JSON-side
+    provenance chain (origin_route/origin_trace_id/...) is unaffected;
+    only the SQL replay-chain FK stays NULL for now. See
+    agent/db/sql/MIGRATION_STATUS.md.
+
+    family_id linkage (claim_family/family_member) is deliberately NOT
+    written from this bulk path either — claims_data doesn't carry
+    canonical_text, and get_or_create_claim_family() needs it. That
+    belongs at claim_family_registry.py's own find_or_link_claim() call
+    site, a separate, deliberate wiring decision (not done here).
+    """
+    def _do(conn):
+        evidence_by_id = {
+            ev.get("evidence_id"): ev for ev in (evidence_data or []) if ev.get("evidence_id")
+        }
+
+        for claim in claims_data or []:
+            claim_id = claim.get("claim_id")
+            if not claim_id:
+                continue
+
+            repo.record_claim_occurrence(
+                conn, claim_id, run_id, claim.get("claim_text", ""),
+                claim.get("content_hash"), claim.get("claim_type"),
+                claim.get("claim_confidence"), claim.get("verification_status"),
+                claim.get("semantic_family_id"), claim.get("query_context"),
+                claim.get("support_count", 0), claim.get("contradiction_count", 0),
+            )
+
+            for rel in claim.get("evidence_relations", []) or []:
+                ev = evidence_by_id.get(rel.get("evidence_id"))
+                if not ev:
+                    continue
+
+                route = ev.get("route") or "internet"
+                resource_type = ev.get("origin_route") if route == "local_memory" else route
+                if resource_type != "internet":
+                    continue  # V1 scope: only internet resources have canonical identity
+                canonical_uri = ev.get("source_uri")
+                if not canonical_uri:
+                    continue
+
+                resource_id = repo.get_or_create_resource(
+                    conn, "internet", canonical_uri=canonical_uri, observed_at=ev.get("observed_at"),
+                )
+                observation_id = repo.record_source_observation(
+                    conn, resource_id, run_id, route,
+                    origin_observation_id=None,  # see docstring: known limitation
+                    observed_at=ev.get("observed_at"),
+                    source_class=ev.get("source_class"),
+                    quality_score=ev.get("quality_score"),
+                    content_excerpt=(ev.get("content_excerpt") or "")[:2000],
+                )
+                relation = rel.get("relation")
+                if relation not in ("supports", "contradicts", "uncertain", "unrelated"):
+                    continue
+                repo.record_evidence_relation(
+                    conn, claim_id, observation_id, relation,
+                    directness=rel.get("directness"),
+                    evidence_eligible=bool(rel.get("evidence_eligible", False)),
+                    evidence_role=rel.get("evidence_role"),
+                    counted_via=rel.get("counted_via"),
+                )
+
+    _shadow(log, verbose, "record_claims_and_evidence", _do)
+
+
 def shadow_reconcile_stale_runs(*, older_than_seconds: int = 3600, log=None, verbose: bool = False) -> Optional[int]:
     """
     Should be called once at process/daemon startup (NOT wired into any
