@@ -479,6 +479,32 @@ def process(
             if claims_data else 0.0
         )
 
+        # P10 (Этап 4G-1): claim family identity assignment moved BEFORE
+        # classify_claim_epistemic_status() (was: right after it, still
+        # before finalize — see the Этап 4C history below). Confirmed by
+        # INSPECT (Этап 4F/4G-1): assign_claim_family_identity() only
+        # reads claim_text/claim_id/epistemic_result.domain/
+        # is_subjective_answer — none of that depends on
+        # verification_status/support_count/contradiction_count/
+        # counted_via (classify_claim_epistemic_status's own outputs),
+        # and status.py has zero references to semantic_family_id in
+        # either direction. No behavior change to either function is
+        # intended or expected by this reordering — see the dedicated
+        # old-vs-new regression suite that proves it.
+        #
+        # P7 (Этап 4C, Finding A, still the reason this must run before
+        # finalize_claim_trace_and_grounding() below): that function
+        # persists claims via trace.add_claim_raw() (and, since P5,
+        # indexes them into claim_verification_index), so
+        # claim["semantic_family_id"] has to already exist by then or it
+        # never reaches the persisted trace at all (confirmed live: this
+        # was previously called from update_beliefs_link_answer_and_
+        # personality_cycle(), AFTER finalize — semantic_family_id was
+        # structurally null on every non-cache-hit run that session).
+        assign_claim_family_identity(
+            claims_data, epistemic_result, is_subjective_answer, cost, log, verbose,
+        )
+
         # Claim epistemic status classification — extracted to
         # agent/orchestrator/claims/status.py. Epistemic Core v1 Phase 7:
         # now cluster-aware (evidence_data passed in) — see that
@@ -486,19 +512,6 @@ def process(
         # Phase 8: return value captured for the claim-graph shadow's
         # diagnostic comparison log only — no other reader.
         _claim_status_counts = classify_claim_epistemic_status(claims_data, log, verbose, evidence_data)
-
-        # P7 (Этап 4C, Finding A): claim family identity assignment MUST
-        # run before finalize_claim_trace_and_grounding() below — that
-        # function persists claims via trace.add_claim_raw() (and, since
-        # P5, indexes them into claim_verification_index), so
-        # claim["semantic_family_id"] has to already exist by then or it
-        # never reaches the persisted trace at all (confirmed live: this
-        # was previously called from update_beliefs_link_answer_and_
-        # personality_cycle(), AFTER finalize — semantic_family_id was
-        # structurally null on every non-cache-hit run this session).
-        assign_claim_family_identity(
-            claims_data, epistemic_result, is_subjective_answer, cost, log, verbose,
-        )
 
         # Final claim trace + epistemic grounding — extracted to
         # agent/orchestrator/claims/status.py (structural extraction;
