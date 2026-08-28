@@ -317,6 +317,37 @@ def shadow_record_belief_assessment(
     _shadow(log, verbose, "record_belief_assessment", _do)
 
 
+def shadow_record_recheck_event(
+    *, family_id: str, outcome: str, run_id: Optional[str] = None,
+    trigger_reason: Optional[str] = None, started_at=None, reason: Optional[str] = None,
+    domain: Optional[str] = None, canonical_text: Optional[str] = None,
+    log=None, verbose: bool = False,
+) -> None:
+    """
+    Wired into agent/family_dependency_graph.py::FamilyDependencyGraph.
+    record_recheck() — all 3 of agent/dependency_recheck.py's call sites
+    (no_belief / success / error outcomes) go through that one method.
+
+    domain/canonical_text (when the caller has them — dependency_
+    recheck.py always does, from the family it already looked up)
+    trigger a defensive get_or_create_claim_family() first, in the SAME
+    transaction: recheck_event.family_id carries an FK to claim_family
+    (family_id), and a recheck can legitimately target a family this
+    SQL layer never saw created (e.g. it was created while SQL was
+    unconfigured, or before this migration existed) — without this,
+    that FK violation would silently drop the whole recheck_event, the
+    same class of gap shadow_record_claim_family() already closes for
+    claim_occurrence. INSERT IGNORE means this is a safe no-op when the
+    family already exists.
+    """
+    def _do(conn):
+        if domain and canonical_text:
+            repo.get_or_create_claim_family(conn, family_id, domain, canonical_text)
+        repo.record_recheck_event(conn, family_id, outcome, run_id, trigger_reason, started_at, reason)
+
+    _shadow(log, verbose, "record_recheck_event", _do)
+
+
 def shadow_reconcile_stale_runs(*, older_than_seconds: int = 3600, log=None, verbose: bool = False) -> Optional[int]:
     """
     Should be called once at process/daemon startup (NOT wired into any

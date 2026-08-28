@@ -655,6 +655,7 @@ def process(
         # exactly like Phase 8/11's).
         apply_dependency_recheck(
             _family_dependency_stats, _belief_manager, cost, log, verbose,
+            run_id=trace_id,
         )
 
         # Final Claim Coverage — extracted to
