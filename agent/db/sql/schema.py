@@ -428,6 +428,93 @@ CREATE TABLE IF NOT EXISTS epistemic_contradiction_observation (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
+# ── AI_OBSERVATION / AI_REPORTED_SOURCE ──────────────────────────────────
+# Architectural stub for a FUTURE capability — no AI-chat transport, no
+# Claude/Gemini/ChatGPT/DeepSeek/Qwen API calls, no browser automation,
+# no AI_CHAT route activation, and no independence counting exist
+# anywhere in this codebase yet. This is schema only: a place for a
+# future AI_OBSERVATION collector to write into without a second,
+# incompatible persistence design being invented later. APPEND-ONLY,
+# both tables — an AI's self-report is a historical utterance, never
+# corrected in place.
+#
+# CONCEPT: AI SELF-REPORTED PROVENANCE.
+#
+# SELF-REPORTED PROVENANCE IS AN OBSERVATION, NOT VERIFIED PROVENANCE.
+#
+# When an external AI model is asked (a future standard YANDI prompt,
+# not built here) whether it used live search/external sources for a
+# specific answer, its own answer to THAT question is itself just
+# another self-report — not evidence YANDI has independently verified.
+# "AI model says: I used NASA" means reported_source = NASA, never
+# verified_provenance_root = NASA. Only a LATER, independent YANDI
+# check (a future PROVENANCE_RESOLUTION step, deliberately NOT built
+# here) could ever connect a reported_uri to a real SOURCE_RESOURCE —
+# which is exactly why AI_REPORTED_SOURCE carries NO foreign key to
+# source_resource: that FK would assert an identity nothing has proven.
+#
+# WHY THIS IS TWO NEW TABLES, NOT AN EXTENSION OF SOURCE_RESOURCE/
+# SOURCE_OBSERVATION (the INSPECT conclusion this pass reached): those
+# two model "a real observation of a real resource" — SOURCE_RESOURCE's
+# identity is a canonical_uri/uri_hash; SOURCE_OBSERVATION is exactly
+# ONE observation of exactly ONE resource per row. An AI self-report is
+# structurally different on both counts: (a) the "resource" being
+# identified is a provider+model, which has no URI at all and no
+# working identity/dedup path today (source_resource.uri_hash is the
+# only UNIQUE key, and it is NULL for any non-internet resource_type —
+# MySQL does not enforce uniqueness across NULLs, so get_or_create_
+# resource() would silently create a fresh, undeduplicated row every
+# single call for a "resource_type='ai_chat'" observation with no URI);
+# (b) ONE AI answer can report MANY external sources at once (1-to-N),
+# which SOURCE_OBSERVATION's one-observation-one-resource shape cannot
+# express without fabricating N separate "resources" for strings the
+# model merely claimed, exactly the "AI_REPORTED_SOURCE == SOURCE_
+# RESOURCE" conflation the concept above forbids. Reusing the existing
+# tables would require either lying about resource identity or
+# smuggling self-reported strings in as if they were independently
+# observed — both worse than two small, honestly-named new tables.
+#
+# Do NOT treat multiple AI observations reporting the same source name
+# as independent provenance roots: Gemini, Claude, and ChatGPT all
+# reporting "NASA" are three AI_OBSERVATION rows that may all point at
+# ONE real provenance root, or none — never three independent roots by
+# virtue of being three different providers. That judgment belongs to
+# the future PROVENANCE_RESOLUTION step (UNRESOLVED/MATCHED/AMBIGUOUS/
+# REJECTED — not implemented here), never to a count of AI_OBSERVATION
+# rows.
+
+AI_OBSERVATION = """
+CREATE TABLE IF NOT EXISTS ai_observation (
+    ai_observation_id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+    provider                      VARCHAR(40) NOT NULL,   -- e.g. 'anthropic','google','openai' — free text, no enum: providers are not YANDI's to enumerate closed
+    model_id                      VARCHAR(80) NOT NULL,   -- e.g. 'claude-opus-5', 'gemini-3-pro'
+    run_id                        VARCHAR(40) NULL,       -- the YANDI run that triggered this observation, if any (nullable: e.g. a council-chat exchange with no owning verification run)
+    prompt_identity                CHAR(64) NULL,          -- sha256 of the prompt/request text — identity/dedup key, not the raw prompt itself
+    answer_excerpt                  TEXT NULL,              -- excerpt only, matches source_observation.content_excerpt's own no-raw-dump discipline
+    provenance_mode_reported        ENUM('MODEL_KNOWLEDGE','LIVE_SOURCES','MIXED','UNKNOWN') NOT NULL,
+    live_search_used_reported       ENUM('YES','NO','UNKNOWN') NOT NULL,
+    provenance_parse_status          VARCHAR(30) NOT NULL,   -- e.g. 'parsed'/'malformed'/'missing' — small controlled vocabulary, left open (no parser exists yet to enumerate it against)
+    observed_at                     DATETIME NOT NULL,
+    CONSTRAINT fk_aiobs_run FOREIGN KEY (run_id)
+        REFERENCES verification_run(run_id),
+    KEY idx_aiobs_provider_model (provider, model_id),
+    KEY idx_aiobs_run (run_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+AI_REPORTED_SOURCE = """
+CREATE TABLE IF NOT EXISTS ai_reported_source (
+    ai_reported_source_id  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    ai_observation_id       BIGINT NOT NULL,
+    ordinal                  INT NULL,
+    reported_name             VARCHAR(255) NULL,
+    reported_uri              VARCHAR(2048) NULL,   -- self-reported by the AI, NEVER canonicalized/deduped against source_resource here — see module note above
+    CONSTRAINT fk_airs_observation FOREIGN KEY (ai_observation_id)
+        REFERENCES ai_observation(ai_observation_id),
+    KEY idx_airs_observation (ai_observation_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
 # ── RUN_ERROR ────────────────────────────────────────────────────────────
 # APPEND-ONLY, minimal, per mandate §20: NOT a debug warehouse. No stack
 # traces, no prompt dumps, no stdout.
@@ -466,6 +553,8 @@ ALL_TABLES_IN_ORDER = [
     ("semantic_edge", SEMANTIC_EDGE),
     ("recheck_event", RECHECK_EVENT),
     ("epistemic_contradiction_observation", EPISTEMIC_CONTRADICTION_OBSERVATION),
+    ("ai_observation", AI_OBSERVATION),
+    ("ai_reported_source", AI_REPORTED_SOURCE),
     ("run_error", RUN_ERROR),
 ]
 

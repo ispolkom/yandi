@@ -85,7 +85,26 @@ happen.** What IS proven, and how:
 - Production wiring positions (8 checks, `db_sql_wiring_regression_test.py`) — real call-graph position checks + a real `run_optimistic_respond()` call proving the wiring doesn't change behavior with SQL unconfigured.
 - Claim/evidence wiring + resource/route mapping (15 checks, `db_sql_claims_evidence_shadow_regression_test.py`) — same technique, plus the local_memory-replay and non-internet-skip cases against real evidence-dict shapes.
 
-**Also currently blocked**: this machine's GPU driver went down mid-session, making the ~3 regression files that make real Ollama embedding/LLM calls (family identity batching, dependency recheck, claim family persistence) impractically slow under CPU fallback. They were last confirmed GREEN immediately before the 5E claim/evidence wiring commit; that commit's own verification used a curated set of fast, non-model-call tests instead of the full suite. **Re-run the full 60-file regression suite once the GPU is back**, before treating 5E as fully re-confirmed.
+**GPU note (resolved)**: the GPU driver outage mentioned in an earlier version of this file has recovered — `nvidia-smi` confirms the card is back and healthy. The full regression suite (66 files as of this pass, all Ollama-calling tests included) has been re-run green multiple times since, and a full, uncached, real-web live run (`process()` called directly, ~540s wall clock, 24 claims, real retrieval/NLI/synthesis) completed with zero exceptions and the SQL shadow-write wiring firing correctly (`record_question_and_run` → `record_claim_family` ×24 → `record_claims_and_evidence` → `complete_run`, all `SKIPPED (SQL unavailable)` as expected, fail-open, no crash).
+
+## AI SELF-REPORTED PROVENANCE (schema-only architectural stub)
+
+`ai_observation`/`ai_reported_source` tables exist in `schema.py` as a
+**forward-looking stub only** — no AI-chat transport, no provider API
+calls, no browser automation, no `AI_CHAT` route activation, no Trust
+change, no independence counting, and (deliberately) no repository or
+shadow-write functions for these two tables exist anywhere yet. INSPECT
+conclusion: the existing `source_resource`/`source_observation` model
+cannot hold this without breaking its own semantics (a provider+model
+has no URI to dedupe on; one AI answer can report many sources at
+once, which the one-observation-one-resource shape can't express
+without fabricating resources for strings the model merely claimed) —
+hence two small, new, additive tables rather than an extension.
+`ai_reported_source` carries **no FK to `source_resource`** — a
+self-reported source name/URI is never wired as proven identity.
+See `agent/db_sql_ai_provenance_schema_regression_test.py` for the
+regression proving this stays true, and `schema.py`'s own comment
+block for the full rationale (search for "SELF-REPORTED PROVENANCE").
 
 ## What is NOT wired yet (deliberate)
 
