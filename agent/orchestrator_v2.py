@@ -65,6 +65,10 @@ from agent.orchestrator.claims.async_pipeline import run_async_claim_pipeline
 from agent.orchestrator.claims.disagreement import apply_claim_claim_disagreement
 from agent.claim_graph_shadow import run_claim_graph_shadow
 from agent.family_dependency_graph import apply_family_dependency_shadow
+from agent.epistemic_contradiction_shadow import (
+    run_epistemic_contradiction_shadow,
+    build_shadow_request_summary,
+)
 from agent.dependency_recheck import apply_dependency_recheck
 from agent.orchestrator.synthesis import build_frame_and_synthesize
 from agent.orchestrator.pre_pipeline import run_pre_pipeline
@@ -563,6 +567,34 @@ def process(
         _family_dependency_stats = apply_family_dependency_shadow(
             claims_data, _disagreement_result, log, verbose,
         )
+
+        # Epistemic Core v1 P10 (Этап 4G-4): read-only shadow classifier
+        # over Phase 11's persisted contradicts edges — evidence-grounded
+        # support roots on both sides, NOT a gate. See agent/epistemic_
+        # contradiction_shadow.py's module docstring for the full
+        # inertness contract (fail-open, no threshold, no mutation of
+        # claims/evidence/belief/Trust/answer). Phase 12 right below
+        # reads ONLY _family_dependency_stats (computed above, untouched
+        # by this call) — it never receives this call's return value, so
+        # it is structurally unable to be gated or suppressed by it.
+        _contradiction_shadow_stats = run_epistemic_contradiction_shadow(
+            claims_data, evidence_data, log=log, verbose=verbose,
+        )
+        _shadow_summary = build_shadow_request_summary(
+            claims_data, _contradiction_shadow_stats, _family_dependency_stats,
+        )
+        trace.add_observation("epistemic_contradiction_shadow", _shadow_summary)
+        if verbose:
+            log(
+                "[EpistemicEventShadow] SUMMARY "
+                f"edges_checked={_shadow_summary['edges_checked']} "
+                f"candidates_true={_shadow_summary['candidates_true']} "
+                f"candidates_false={_shadow_summary['candidates_false']} "
+                f"current_recheck_candidates={_shadow_summary['current_recheck_candidates']} "
+                f"touched_this_request={_shadow_summary['touched_this_request']} "
+                f"touched_yes_shadow_yes={_shadow_summary['touched_current_yes_shadow_yes']} "
+                f"touched_yes_shadow_no={_shadow_summary['touched_current_yes_shadow_no']}"
+            )
 
         # Epistemic Core v1 Phase 12: bounded, controlled re-evaluation of
         # whatever RECHECK_CANDIDATEs Phase 11 found this request. Real
