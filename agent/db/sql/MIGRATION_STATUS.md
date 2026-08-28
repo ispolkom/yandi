@@ -106,6 +106,27 @@ See `agent/db_sql_ai_provenance_schema_regression_test.py` for the
 regression proving this stays true, and `schema.py`'s own comment
 block for the full rationale (search for "SELF-REPORTED PROVENANCE").
 
+## NETWORK_NODE PROVENANCE (documentation-only extension contract)
+
+No new tables. INSPECT conclusion (mandate's own explicit ask): the
+schema is extensible enough for now — a future `NODE_OBSERVATION`/
+`NODE_REPORTED_SOURCE`/`PROVENANCE_RESOLUTION` design is documented in
+`schema.py` (search "NETWORK_NODE PROVENANCE — extension contract"),
+structurally mirroring `AI_OBSERVATION`, answering all 10 of the
+mandate's own SQL_ARCHITECTURE_CHECK questions inline. One real
+structural fix: `source_resource.node_id` was `VARCHAR(40)` — too
+narrow for this codebase's actual node identity
+(`node/src/core/identity.rs::NodeIdentity::node_id()`, a real
+Ed25519/X25519-derived 32-byte `HashId`, hex-encoded to exactly 64
+chars) — widened to `VARCHAR(64)` before any writer exists. Also
+documented: a DIFFERENT, already-active, unrelated "node_id" concept
+(`agent/orch_federation.py`/`agent/orch_reputation.py`'s short labels
+for local background-validation council members, e.g.
+`"local-qwen14b-a"`) must not be confused with the future P2P identity.
+`NETWORK_NODE_PROVENANCE_INVARIANTS` in `schema.py` holds the 9
+required invariants verbatim, for future code to assert against. See
+`agent/db_sql_network_node_provenance_regression_test.py`.
+
 ## What is NOT wired yet (deliberate)
 
 - non-`internet` evidence (`network_node`/`ai_chat`/`local_model`, after replay-resolution) is skipped entirely by the claim/evidence shadow write, not given a fabricated identity — matches `agent.verification_memory.compute_stable_root()`'s existing V1 scope. This is the one item from the original list that stays as-is; everything else that used to be listed here is now wired (see "Since the previous status snapshot" above).

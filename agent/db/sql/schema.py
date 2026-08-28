@@ -259,7 +259,26 @@ CREATE TABLE IF NOT EXISTS source_resource (
                                                  -- enforced on the fixed-width
                                                  -- hash instead (standard
                                                  -- pattern, not app-only trust)
-    node_id               VARCHAR(40) NULL,     -- network_node resources (inactive)
+    node_id               VARCHAR(64) NULL,     -- network_node resources (inactive).
+                                                 -- STRUCTURAL FIX (future NETWORK_NODE
+                                                 -- provenance hook INSPECT): was
+                                                 -- VARCHAR(40) — too narrow for this
+                                                 -- codebase's REAL node identity
+                                                 -- (node/src/core/identity.rs::
+                                                 -- NodeIdentity::node_id(), a 32-byte
+                                                 -- Ed25519-derived HashId, hex-encoded
+                                                 -- to exactly 64 chars). Widened before
+                                                 -- any writer exists, zero migration
+                                                 -- risk. Do NOT confuse this with
+                                                 -- agent/orch_federation.py's/agent/
+                                                 -- orch_reputation.py's OWN unrelated
+                                                 -- "node_id" — short human-readable
+                                                 -- labels for LOCAL background-
+                                                 -- validation council members
+                                                 -- ("local-qwen14b-a", "council-claude"),
+                                                 -- not P2P peer identity at all. See
+                                                 -- the NETWORK_NODE PROVENANCE
+                                                 -- extension-contract note below.
     validator_id          VARCHAR(40) NULL,     -- ai_chat resources (inactive)
     model_id               VARCHAR(40) NULL,     -- local_model resources (inactive)
     first_observed_at     DATETIME NOT NULL,
@@ -514,6 +533,120 @@ CREATE TABLE IF NOT EXISTS ai_reported_source (
     KEY idx_airs_observation (ai_observation_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
+
+# ── NETWORK_NODE PROVENANCE — extension contract (documentation only) ───
+#
+# Architectural stub for a FUTURE P2P capability. NOT built here: any
+# network protocol, node discovery, DHT, onion routing, reputation
+# protocol, consensus, voting, distributed Trust, remote revalidation,
+# cryptographic signing beyond what node/src/core/identity.rs already
+# provides, or a NETWORK_NODE route activation. This is documentation
+# and one structural fix (source_resource.node_id widened above), not
+# new tables — the INSPECT conclusion below is "extensible enough for
+# now", matching mandate §19's "если схема уже расширяема — не создавать
+# сейчас десять таблиц".
+#
+# CONCEPT (shared with AI_OBSERVATION above — one fundamental rule):
+#
+#     SELF-REPORT != VERIFIED PROVENANCE.
+#
+#     REMOTE NODE PROVENANCE IS A CLAIM ABOUT PROVENANCE.
+#     IT IS NOT PROVENANCE UNTIL LOCALLY RESOLVED.
+#
+#     DO NOT COUNT NODES. COUNT DISTINGUISHABLE PROVENANCE ROOTS.
+#
+# NODE IDENTITY — REUSE, do not invent a second scheme: node/src/core/
+# identity.rs::NodeIdentity::node_id() (== .address, a real Ed25519/
+# X25519-derived 32-byte HashId, hex-encoded to exactly 64 chars,
+# persisted encrypted at rest) is the one real cryptographic node
+# identity this codebase has. NOT an IP address, hostname, or temporary
+# connection ID — those are transport endpoints, not epistemic identity,
+# and can change without the node's identity changing.
+#
+# DO NOT CONFUSE with a DIFFERENT, ALREADY-ACTIVE "node_id" concept:
+# agent/orch_federation.py and agent/orch_reputation.py already use
+# "node_id" for short human-readable labels identifying LOCAL
+# background-validation council members ("local-qwen14b-a",
+# "council-claude", "yandi-council" — see the live "[BG] Ноды: [...]"
+# log line). Those are not P2P peers and have nothing to do with remote
+# node provenance — a future NETWORK_NODE implementation must not
+# silently conflate the two "node_id" namespaces.
+#
+# SQL_ARCHITECTURE_CHECK — 10 questions answered (mandate's own §18):
+#
+#  1. Represent a remote node observation without breaking SOURCE_
+#     RESOURCE? NO, for the same structural reason AI_OBSERVATION
+#     needed its own tables: a node's self-report is 1-to-N (many
+#     claims, many sources, an upstream node it says IT used) and
+#     hierarchical (nested upstream provenance), which SOURCE_
+#     OBSERVATION's one-observation-of-one-resource shape cannot
+#     express without fabricating resources for things only claimed.
+#     A future NODE_OBSERVATION would be structurally analogous to
+#     AI_OBSERVATION, not a SOURCE_OBSERVATION extension.
+#  2. Where does node identity live? source_resource.node_id (widened
+#     to VARCHAR(64) above) once resource_type='network_node' is ever
+#     activated — reusing the Rust HashId, per "REUSE EXISTING IDENTITY"
+#     above, not a second identifier.
+#  3. Where does network observation live? A future NODE_OBSERVATION
+#     table (not built here): remote_node_id, run_id (nullable — an
+#     exchange need not belong to one YANDI run), remote_answer,
+#     remote_canonical_trust_reported, remote_confidence_reported,
+#     protocol_version, payload_schema_version, payload_hash (mandate
+#     §16: hash for integrity audit, never the raw packet),
+#     observed_at. Claims would need their own child table (a node's
+#     answer can carry several), same 1-to-N shape as AI_REPORTED_SOURCE.
+#  4. Represent reported provenance? A future NODE_REPORTED_SOURCE,
+#     structurally identical to AI_REPORTED_SOURCE — reported route
+#     (one of LOCAL_MODEL/LOCAL_MEMORY/INTERNET/NETWORK_NODE/AI_CHAT),
+#     reported name/uri, NO foreign key to source_resource (same
+#     critical invariant AI_REPORTED_SOURCE already enforces).
+#  5. Represent a nested upstream node? A self-referencing FK on the
+#     future NODE_OBSERVATION (upstream_observation_id), exactly the
+#     same pattern SOURCE_OBSERVATION.origin_observation_id already
+#     proves out for local_memory replay chains — reused, not invented.
+#  6. Preserve lineage? exchange_id + parent_exchange_id + hop_depth
+#     columns on the future NODE_OBSERVATION (or a small dedicated
+#     EXCHANGE table) — enough for a FUTURE loop-detection pass to
+#     walk without this pass implementing any traversal itself.
+#  7. Avoid false independence? Never count NODE_OBSERVATION rows (or
+#     distinct node_ids) as independent roots. Independence is decided
+#     at the level of REAL, LOCALLY RESOLVED provenance roots (the same
+#     job agent/epistemic_source_independence.py already does for
+#     internet sources) — never by node/provider count. NODE_A,
+#     NODE_C, and a Gemini observation all reporting "NASA" collapse to
+#     candidates for ONE root, never three.
+#  8. Connect a remote reported source to a later locally resolved
+#     SOURCE_RESOURCE? A future PROVENANCE_RESOLUTION step (not built
+#     here): reported_uri -> canonicalize (reuse SharedFetchCache's
+#     canonicalizer, not a second one) -> local fetch -> a REAL
+#     source_observation -> a resolution status (UNRESOLVED / MATCHED /
+#     AMBIGUOUS / REJECTED). Never a direct FK asserting the identity
+#     before that work happens.
+#  9. Represent a node's answer changing over time? Append-only
+#     NODE_OBSERVATION, one row per exchange — same ANSWER_VERSION-style
+#     discipline this schema already uses everywhere else; never an
+#     UPDATE of a "current" node answer.
+# 10. Represent node-reported Trust separately from local canonical
+#     Trust? remote_canonical_trust_reported as a plain stored field on
+#     NODE_OBSERVATION — an observation of what the OTHER node claims,
+#     never merged into or compared against answer_assessment.
+#     canonical_trust by anything in this pass.
+#
+# FUTURE INVARIANTS (mandate §21 — kept as a checkable list so future
+# code/tests can assert against the canonical wording instead of each
+# re-deriving it):
+
+NETWORK_NODE_PROVENANCE_INVARIANTS = (
+    "NODE_ID != INDEPENDENT_ROOT",
+    "NODE_RELAY != NEW_ROOT",
+    "MEMORY_REPLAY != NEW_ROOT",
+    "REMOTE_REPORTED_SOURCE != LOCALLY_VERIFIED_SOURCE",
+    "REMOTE_REPORTED_TRUST != LOCAL_CANONICAL_TRUST",
+    "REMOTE_AI_REPORT != LOCAL_AI_OBSERVATION",
+    "SELF_REPORTED_PROVENANCE != VERIFIED_PROVENANCE",
+    "SAME URL THROUGH MULTIPLE NODES != MULTIPLE ROOTS",
+    "HISTORICAL OBSERVATIONS ARE APPEND-ONLY",
+)
 
 # ── RUN_ERROR ────────────────────────────────────────────────────────────
 # APPEND-ONLY, minimal, per mandate §20: NOT a debug warehouse. No stack
