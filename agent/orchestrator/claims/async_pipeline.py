@@ -73,6 +73,30 @@ from agent.source_clustering import assign_source_clusters
 
 MAX_CLAIM_WORKERS = 3
 
+# P2-C (adaptive NLI micro-batching): bounded coalescing window the
+# single NLI consumer waits, after its first queued item, for siblings
+# to also become ready before flushing.
+#
+# Measured (live baseline, coalesce_wait_s=0.0, YANDI_AGENT_RETRIEVAL_
+# PERFORMANCE_AUDIT.md P2-C): real NLI-request inter-arrival gaps,
+# n=14, p50=3.073s p75=20.570s p90=26.209s max=31.674s. Most gaps are
+# tens of seconds (PASS2 claims are network-retrieval-bound, inherently
+# spread out) — only the first few PASS1-only-resolved claims (no
+# network dependency, complete close together) ever have a realistic
+# chance to merge. Simulated candidates 0/0.25/0.5/1/2s against this
+# distribution: 0.25s catches nothing (0% reduction), 1s catches one
+# merge (~7% call reduction), 2s catches the early PASS1 cluster more
+# fully (~20% call reduction, 15->12 physical calls on the measured
+# shape). 2.0s selected: the best-justified candidate from the task's
+# own suggested list — a real, if modest, reduction, while adding at
+# most 2s of latency to the few early claims it ever affects, and
+# staying ~50-75x smaller than the old 100-140s global barrier (P2
+# Part E/K) it must never resemble (item 5's hard bound). This is a
+# genuinely limited win, not a large one — reported honestly, not
+# oversold; most of the pipeline's NLI calls remain batch-size-1
+# because most claims are simply never ready at the same time.
+NLI_COALESCE_WAIT_S = 2.0
+
 # Consumer poll interval while waiting for the first queued item. NOT a
 # batching delay (P2 Part 6 explicitly forbids a blind sleep(100-300ms)
 # batching wait) — this only bounds how quickly the consumer notices a
@@ -89,28 +113,53 @@ class _NLIBatcher:
     underlying synchronous, Ollama-calling run_claim_evidence_batch()
     at a time — there is structurally no second consumer, so "max
     concurrent NLI consumer calls == 1" holds by construction, not by
-    a lock that could be bypassed.
+    a lock that could be bypassed. P2-C did not change this — the
+    coalescing window added below only delays WHEN the single
+    consumer flushes, never adds a second consumer.
 
-    Micro-batching (P2 Part 6): never sleeps to accumulate a batch.
-    Blocks (briefly, _QUEUE_POLL_S) only when the queue is empty;
-    once one item is available, immediately drains whatever else is
-    ALREADY queued (non-blocking get_nowait loop) before dispatching.
-    A solitary ready claim is never delayed waiting for a sibling that
-    may or may not arrive soon.
+    Adaptive micro-batching (P2-C, follow-up to P2's "mostly batch
+    size 1 in practice" finding): after the FIRST item in an empty
+    queue arrives, waits up to `coalesce_wait_s` (default 0.0 —
+    exactly the P2 behavior, no wait) for siblings to also become
+    ready, using the queue's own blocking get() bounded by the
+    remaining window (not a fixed sleep) so it returns the instant
+    something arrives rather than waiting out the full window
+    regardless. Once the window elapses (or is skipped, at
+    coalesce_wait_s=0.0), drains whatever is currently queued
+    (non-blocking) before dispatching ONE batch call. A solitary ready
+    claim, with coalesce_wait_s=0.0, is never delayed at all; with a
+    nonzero window it is delayed by AT MOST that window — never by an
+    unbounded wait for a sibling that may or may not arrive.
     """
 
-    def __init__(self, evidence_data: List[Dict[str, Any]], log, verbose: bool):
+    def __init__(
+        self,
+        evidence_data: List[Dict[str, Any]],
+        log,
+        verbose: bool,
+        coalesce_wait_s: float = 0.0,
+    ):
         self._queue: "asyncio.Queue" = asyncio.Queue()
         self._evidence_data = evidence_data
         self._log = log
         self._verbose = verbose
+        self._coalesce_wait_s = coalesce_wait_s
         self.total_calls = 0
         self.max_observed_batch = 0
         self.batch_sizes: List[int] = []
+        # P2-C measurement (item 1): every submit() enqueue timestamp,
+        # for inter-arrival gap analysis independent of batching policy.
+        self.enqueue_timestamps: List[float] = []
+        # Per-flush diagnostic records (item 1's "for every actual
+        # Ollama NLI call" fields).
+        self.flush_records: List[Dict[str, Any]] = []
 
     async def submit(self, claim: Dict[str, Any], label: str) -> None:
         fut: "asyncio.Future" = asyncio.get_event_loop().create_future()
-        await self._queue.put((claim, label, fut))
+        enqueue_ts = time.time()
+        self.enqueue_timestamps.append(enqueue_ts)
+        pair_count = len(claim.get("derived_from_evidence_ids") or [])
+        await self._queue.put((claim, label, fut, enqueue_ts, pair_count))
         await fut
 
     async def run_until(self, stop_event: "asyncio.Event") -> None:
@@ -125,19 +174,68 @@ class _NLIBatcher:
 
             batch = [first]
 
+            # Bounded coalescing window (item 3/5) — CONDITIONAL, not
+            # applied uniformly. Measured data (YANDI_AGENT_RETRIEVAL_
+            # PERFORMANCE_AUDIT.md P2-C) shows PASS1 submissions (no
+            # network dependency — mapping/embedding only) can cluster
+            # within a couple seconds of each other, while PASS2
+            # submissions (network-retrieval-bound) are ALWAYS tens of
+            # seconds apart in this workload — never close enough to
+            # benefit from any bounded window. Waiting unconditionally
+            # would add up to coalesce_wait_s of pure latency to EVERY
+            # solitary flush (asyncio.wait_for blocks for the FULL
+            # remaining timeout when nothing arrives — it does not
+            # "give up early" just because a merge looks unlikely),
+            # which would re-introduce exactly the kind of avoidable
+            # per-claim delay this whole redesign exists to remove —
+            # worst case landing on the slowest (typically PASS2)
+            # claim's own critical path. Gating on the first item's
+            # label is the measured, targeted signal item 3 asks for
+            # ("only if measurements show another request is likely to
+            # arrive soon"), not a guess.
+            if self._coalesce_wait_s > 0 and first[1].startswith("PASS1"):
+                window_deadline = time.time() + self._coalesce_wait_s
+                while True:
+                    remaining = window_deadline - time.time()
+                    if remaining <= 0:
+                        break
+                    try:
+                        nxt = await asyncio.wait_for(self._queue.get(), timeout=remaining)
+                        batch.append(nxt)
+                    except asyncio.TimeoutError:
+                        break
+
+            # Drain-now (item 6): whatever's ALREADY queued at this
+            # point is free to collect — no additional wait per item.
             while True:
                 try:
                     batch.append(self._queue.get_nowait())
                 except asyncio.QueueEmpty:
                     break
 
+            flush_ts = time.time()
             claims_in_batch = [item[0] for item in batch]
-            label = batch[0][1]
+            # P2-C item 8: PASS1 and PASS2 items share the exact same
+            # NLI protocol (run_claim_evidence_batch's batch_label is
+            # used ONLY for a diagnostic log line — confirmed by
+            # reading agent/orchestrator/claims/mapping.py, no branch
+            # on it anywhere else) — safe to combine physically. Label
+            # reflects a mixed batch honestly instead of silently
+            # reporting the first item's label for a batch that may
+            # contain the other pass too.
+            distinct_labels = sorted({item[1] for item in batch})
+            label = distinct_labels[0] if len(distinct_labels) == 1 else "+".join(distinct_labels)
+            enqueue_times_in_batch = [item[3] for item in batch]
+            pair_counts_in_batch = [item[4] for item in batch]
 
             self.total_calls += 1
             self.max_observed_batch = max(self.max_observed_batch, len(claims_in_batch))
             self.batch_sizes.append(len(claims_in_batch))
 
+            oldest_wait = flush_ts - min(enqueue_times_in_batch)
+            newest_wait = flush_ts - max(enqueue_times_in_batch)
+
+            gen_t0 = time.time()
             try:
                 await asyncio.to_thread(
                     run_claim_evidence_batch,
@@ -148,7 +246,30 @@ class _NLIBatcher:
                     self._verbose,
                 )
             finally:
-                for _, _, fut in batch:
+                gen_wall = time.time() - gen_t0
+
+                self.flush_records.append({
+                    "batch_id": self.total_calls,
+                    "flush_ts": flush_ts,
+                    "request_count": len(batch),
+                    "claim_count": len(claims_in_batch),
+                    "pair_count": sum(pair_counts_in_batch),
+                    "oldest_wait": oldest_wait,
+                    "newest_wait": newest_wait,
+                    "generation_wall": gen_wall,
+                })
+
+                if self._verbose:
+                    self._log(
+                        f"[NLI Batcher] batch_id={self.total_calls} "
+                        f"label={label} requests={len(batch)} "
+                        f"pairs={sum(pair_counts_in_batch)} "
+                        f"oldest_wait={oldest_wait:.3f}s "
+                        f"newest_wait={newest_wait:.3f}s "
+                        f"generation_wall={gen_wall:.3f}s"
+                    )
+
+                for _, _, fut, _, _ in batch:
                     if not fut.done():
                         fut.set_result(None)
 
@@ -269,10 +390,11 @@ async def _run_async_claim_pipeline_impl(
     log,
     verbose: bool,
     profile: Dict[str, Any],
+    coalesce_wait_s: float = 0.0,
 ) -> List[Dict[str, Any]]:
     embedding_cache = EvidenceEmbeddingCache()
     evidence_lock = asyncio.Lock()
-    nli_batcher = _NLIBatcher(evidence_data, log, verbose)
+    nli_batcher = _NLIBatcher(evidence_data, log, verbose, coalesce_wait_s=coalesce_wait_s)
     semaphore = asyncio.Semaphore(MAX_CLAIM_WORKERS)
     stop_event = asyncio.Event()
     active_counter = {"active": 0, "max_active": 0}
@@ -314,6 +436,8 @@ async def _run_async_claim_pipeline_impl(
     profile["nli_total_calls"] = nli_batcher.total_calls
     profile["nli_max_batch"] = nli_batcher.max_observed_batch
     profile["nli_batch_sizes"] = nli_batcher.batch_sizes
+    profile["nli_enqueue_timestamps"] = nli_batcher.enqueue_timestamps
+    profile["nli_flush_records"] = nli_batcher.flush_records
 
     return evidence_data
 
@@ -328,6 +452,7 @@ def run_async_claim_pipeline(
     cost: Dict[str, Any],
     log,
     verbose: bool,
+    coalesce_wait_s: float = NLI_COALESCE_WAIT_S,
 ) -> List[Dict[str, Any]]:
     """
     Synchronous entry point (called from the still-synchronous
@@ -354,6 +479,7 @@ def run_async_claim_pipeline(
         _run_async_claim_pipeline_impl(
             claims_data, evidence_data, enable_web, is_subjective_answer,
             skip_rag, fetch_cache, log, verbose, profile,
+            coalesce_wait_s=coalesce_wait_s,
         )
     )
 
@@ -367,9 +493,31 @@ def run_async_claim_pipeline(
             f"[Async Claim Pipeline] "
             f"claims={len(claims_data)} "
             f"max_concurrent_workers={profile.get('max_active_claim_workers', 0)} "
+            f"coalesce_wait_s={coalesce_wait_s} "
             f"nli_calls={profile.get('nli_total_calls', 0)} "
             f"nli_batch_sizes={profile.get('nli_batch_sizes', [])} "
             f"wall={cost['claim_async_pipeline_ms']/1000:.2f}s"
         )
+
+        # P2-C item 1: inter-arrival gap distribution, independent of
+        # batching policy — measures how far apart claims' NLI requests
+        # actually arrive, which is what any coalescing-window choice
+        # must be justified against.
+        ts = sorted(profile.get("nli_enqueue_timestamps", []))
+        if len(ts) > 1:
+            gaps = sorted(b - a for a, b in zip(ts, ts[1:]))
+
+            def _pct(p):
+                idx = min(len(gaps) - 1, int(round(p * (len(gaps) - 1))))
+                return gaps[idx]
+
+            log(
+                f"[NLI Inter-Arrival] n_gaps={len(gaps)} "
+                f"p50={_pct(0.50):.3f}s p75={_pct(0.75):.3f}s "
+                f"p90={_pct(0.90):.3f}s max={gaps[-1]:.3f}s"
+            )
+        # Per-batch detail is already logged in real time as
+        # [NLI Batcher] lines inside _NLIBatcher.run_until() — not
+        # repeated here to avoid duplicate log volume.
 
     return result

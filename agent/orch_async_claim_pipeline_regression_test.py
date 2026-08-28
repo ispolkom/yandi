@@ -143,8 +143,14 @@ def _run_pipeline(claim_ids, evidence_data=None):
          patch.object(pipeline_mod, "run_claim_evidence_batch", _fake_run_claim_evidence_batch), \
          patch.object(pipeline_mod, "retrieve_claim_evidence", _fake_retrieve_claim_evidence), \
          patch.object(pipeline_mod, "assign_source_clusters", lambda *a, **k: None):
+        # coalesce_wait_s=0.0 explicit: this file tests determinism/
+        # concurrency-bounds/exception-isolation/P1-A-scope, not NLI
+        # batching policy (that's agent/orch_nli_coalescing_regression_
+        # test.py's job) — pinning to the pre-P2-C default keeps this
+        # suite's own concerns separated and fast.
         pipeline_mod.run_async_claim_pipeline(
             claims_data, evidence_data, True, False, False, None, cost, _noop_log, True,
+            coalesce_wait_s=0.0,
         )
 
     return claims_data, evidence_data, cost
@@ -306,6 +312,7 @@ with patch.object(pipeline_mod, "map_claims_to_evidence", _fake_map_claims_to_ev
      patch.object(pipeline_mod, "assign_source_clusters", lambda *a, **k: None):
     pipeline_mod.run_async_claim_pipeline(
         claims_p1a, seed_evidence, True, False, False, None, cost_p1a, _noop_log, True,
+        coalesce_wait_s=0.0,
     )
 
 check(
