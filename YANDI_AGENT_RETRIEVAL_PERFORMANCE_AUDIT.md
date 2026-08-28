@@ -982,3 +982,408 @@ became more confident without new evidence — status counts moved only in the d
 per-run evidence differences would explain (different live web content each run), not a
 mechanical side-effect of the dedup fixes themselves, which touch only *whether* a fetch/search
 happens, never what a claim's status is computed to be.
+
+---
+
+# P2 — CLAIM ECONOMY + PIPELINE PARALLELISM AUDIT
+
+Follow-up to P1-A/P1-B (commits `a082b55`, `77d0fd1`, `b2eec1e`, `a3d7d3b`). Two questions: why so
+many claims, and why do fast claims wait for slow ones. **Audit only** — the sole production change
+in this phase is none at all (no new instrumentation was needed; existing per-claim
+`queue_wait`/`SubProfile` logging already provides exact, not estimated, timing data). Evidence
+base: the 3 P1-B confirmation logs (concurrent execution, used for structure/counts) plus one fresh
+**clean, sequential, single-process** coffee run (`live_run_p2_coffee_clean.log`, 473.0s,
+uncontended — the most reliable absolute-timing source in this phase) plus the original P0 baseline
+(`live_run.log`, 397.23s, pre-P1-A, sequential).
+
+## Part A — Claim Economy
+
+All claims in all 3 runs originate from `source=local_answer`. Per-claim classification
+(CORE/SUPPORTING/OPTIONAL/DUPLICATE/NEAR-DUPLICATE/SUBCLAIM/META/OUT-OF-SCOPE):
+
+**Coffee** (11 claims): 3 CORE, 2 SUPPORTING, 3 SUBCLAIM (each restates a CORE claim's
+classification with one added qualifier — e.g. a "2016" date qualifier, a "Group 2A" label
+restatement), 2 META (pure definitional: "Group 3 means not classified as carcinogen"), 1 OPTIONAL
+("IARC is part of WHO" — organizational trivia), 0 DUPLICATE, 0 OUT-OF-SCOPE.
+
+**Leaves** (7 claims): 2 CORE, 3 SUPPORTING, 2 META, 0 SUBCLAIM/DUPLICATE/OPTIONAL — notably
+cleaner economy, no near-duplicate cluster.
+
+**Jupiter** (9 claims): 2 CORE, 4 SUPPORTING, 1 SUBCLAIM (a temporal qualifier on the main
+moon-count claim — also the **only** claim across all 27 with zero linked evidence at all), 1
+OPTIONAL, 0 META/DUPLICATE/OUT-OF-SCOPE.
+
+**Cross-run pattern (PROVEN)**: **0 true byte-identical DUPLICATEs anywhere in 27 claims** —
+consistent with P1-B Phase 3's finding of zero exact-duplicate *queries* (duplicate claims would be
+the upstream cause). The real waste category is **SUBCLAIM + META = 8/27 (30%)** of all extracted
+claims — each independently pays for its own 2-query search+fetch pass despite answering no part of
+the user's actual question (META) or merely restating an already-present CORE claim with an added
+qualifier (SUBCLAIM). This directly quantifies the "why so many claims" question with real numbers,
+not the P0 audit's earlier eyeballed "~4/12."
+
+## Part B — Claim Family Analysis (SHADOW measurement only — not activated)
+
+**PROVEN via real shared-evidence-ID overlap** (not query-text estimation): each benchmark has one
+dominant family of 6 claims sharing a single core evidence item (coffee: `ev_7706d02d`, the IARC
+monograph page; jupiter: `ev_6b9a6f80`; leaves: `ev_463a561f`). Combined search volume for the
+dominant family alone: coffee ~10 searches, jupiter 12, leaves 12.
+
+**Hypothetical savings (ESTIMATED)**: sharing one retrieval expedition per 6-member family instead
+of each member searching independently would cut claim-specific search volume for that family by
+**roughly 80%**. This is the single largest, most consistent signal in the whole P2 audit.
+
+**Real risk, not hand-waved**: family members can need *different* evidence for their specific
+angle even within a shared subject — e.g. one coffee-family member (`cl_8420539b`, "animal evidence
+is sufficient") ended up linked to a *different* evidence item (`ev_219cbc2a`) than the family's
+dominant one, precisely because its NLI question is more specific than the family's shared subject.
+A blind family-shared search risks under-serving specific-angle members even while adequately
+serving general-subject ones.
+
+**Critical invariant reaffirmed, not violated by anything measured**: every family member in the
+real run received its own independent NLI relation and status — sharing *candidates* would not
+have collapsed verdicts; NLI still runs per (claim, evidence) pair regardless of how the evidence
+was *discovered*. **NOT ACTIVATED** — measurement only, per instruction.
+
+## Part C — decision_relevance Diagnosis
+
+Confirmed unchanged from the P1-B finding: `_is_existence_question()`
+(`agent/claim_evidence_retriever.py:1225-1230`) is a literal regex on "есть ли / существует ли /
+имеется ли / обнаружен... ли / найден... ли / зафиксирован... ли". **All three of this audit's own
+benchmark queries fall outside this pattern** ("Вызывает ли кофе рак?", "Почему листья желтеют
+осенью?", "Сколько спутников известно у Юпитера?") — confirmed by log data: **26/26 claims across
+all 3 runs scored `decision_relevance=0.0`, zero exceptions**.
+
+**Refinement**: role_boost being permanently 0 does *not* mean priority ordering is flat/dead —
+`relevance_component` (embedding-based topic similarity, weight 8.0, the largest term in
+`_claim_retrieval_priority()`) is very much alive and drives the observed spread
+(coffee 4.57-7.51, leaves 3.97-8.73, jupiter 4.95-9.53). What's specifically dead is the one signal
+the field's own docstring says is deliberately *different* from topic similarity: "does this claim
+directly answer what the user asked," vs. "is this claim topically about the same subject."
+
+**Test coverage**: `agent/claim_priority_regression_test.py` tests `_is_existence_question()`
+returning `False` for non-existence queries at the boolean-gate level, but **no test asserts the
+downstream consequence** (decision_relevance staying 0, priority driven entirely by the other two
+components).
+
+**A general, deterministic, no-new-LLM-call model is feasible** (design only, not implemented),
+built from signals already computed elsewhere in the same file: (a) `_query_relevance_score()`
+already makes 2 embedding calls per claim (claim_text + query_context) — a more targeted second
+comparison (claim vs. a distilled "what does this question need answered" representation) reuses
+this exact call pattern, not a new cost category; (b) `_extract_subject_anchors()` (already exists,
+already used elsewhere) applied to claim vs. query — purely lexical, zero cost; (c) family
+centrality from Part B's shared-evidence-ID grouping — a claim central to a 6-member family is more
+likely load-bearing than an isolated one, fully deterministic, derivable from data the mapper
+already produces. **Honestly infeasible without a new LLM call**: "would removing this claim change
+the final answer's conclusion" — genuine counterfactual reasoning over synthesized text, no existing
+deterministic signal approximates it; not forced into a false-deterministic answer.
+
+## Part D — Pipeline Barrier Audit
+
+| # | Barrier | Code location | Required? | Reasoning | Idle opportunity |
+|---|---|---|---|---|---|
+| 1 | PASS1 NLI waits for all claims | `orchestrator_v2.py:455`, `retrieval.py:73-111` reads aggregate `resolved=X` | **NO** (per-item) | A claim's own PASS1 NLI result depends only on its own candidate pairs — the "barrier" is one batch-call shape, not a real dependency | Low-moderate — already one bounded LLM call, not workers idling |
+| 2 | PASS1 status → PASS2 retrieval start | `orchestrator_v2.py:475-478`, `retrieval.py:73-78` | **NO** for any claim already known-unresolved at PASS1 | A claim's own "needs retrieval" verdict is knowable the instant its own PASS1 relations are classified | Real, but bounded by barrier 1's own (short) batch-call time |
+| 3 | **PASS2 retrieval → PASS2 mapping/NLI** | `retrieval.py:139-142` (`retrieve_for_claims` returns only after ALL workers) → `retrieval.py:189-226` (mapping/NLI, correctly scoped post-P1-A) | **NO** — clearest, best-evidenced case | Each claim's PASS2 fetch is fully independent (own queries, own URLs, own `retrieval_claim_id`-scoped evidence). Nothing about claim X's mapping/NLI needs claim Y's retrieval | **Largest proven number in this audit** — see Part E |
+| 4 | (confirms P1-A's fix didn't touch *when*, only *which claims*) | same as 3 | N/A | P1-A fixed which claims get re-mapped; it did not remove the wait-for-slowest-worker barrier — that's this (still-open) finding | — |
+| 5 | Claim status computation | `orchestrator_v2.py:489`, `status.py:129,173` | **Partially NO** | Each claim's status is a pure function of its own `evidence_relations` — `for claim in claims_data:` has no cross-claim read inside the loop | Could run per-claim immediately after that claim's own NLI |
+| 6 | **Claim↔claim disagreement NLI** | `orchestrator_v2.py:512-515`, `disagreement.py:56` | **YES, but possibly misplaced** | Needs all claim *texts* (extraction complete) — confirmed it reads only `claim_text`/embeddings, never `evidence_relations`. Could in principle start as soon as extraction finishes, running *concurrently* with all the per-claim retrieval/NLI work below, not after it | Real — see Part I |
+| 7 | Final Claim Coverage (3rd NLI pass) | `orchestrator_v2.py:562`, `final_coverage.py:24-45` | **YES** | Genuinely needs `claims_data` in a stable final state plus the rendered answer text — legitimately late | — |
+
+## Part E — Per-Claim Timeline (PROVEN, exact log data — not estimated)
+
+Clean sequential run (`live_run_p2_coffee_clean.log`), 8 PASS2 workers (of 14 `need_retrieval`,
+`MAX_CLAIMS=8` selects the top 8 by priority), `[Claim Retrieval Timing]` aggregate line:
+```
+claims=8 workers=3 wall=114.60s worker_sum=274.53s worker_max=45.53s
+effective_parallelism=2.40 queue_wait_sum=259.05s queue_wait_max=70.52s
+```
+Per-claim ready times (own retrieval done, computed from real `queue_wait` + own `total` ms):
+
+| claim | own retrieval done at (+s) | barrier fires at (+s, relative) | idle wait |
+|---|---|---|---|
+| cl_cdff9e92 (fastest) | +34.64s | +152.52s | **117.88s** |
+| cl_62414cee | +39.58s | +152.52s | 112.94s |
+| cl_405af5a8 | +45.53s | +152.52s | 106.99s |
+| cl_68d8a2a8 | +68.77s | +152.52s | 83.75s |
+| cl_b7c1fd30 | +70.52s | +152.52s | 82.00s |
+| cl_3a85539f | +76.01s | +152.52s | 76.51s |
+| cl_9925e051 | +98.93s | +152.52s | 53.59s |
+| cl_e7114dbc (slowest) | +99.60s | +152.52s | 52.92s |
+
+`[Claim Resolution Gate]` at t+177.73s (barrier start) → `[Claim Evidence Batch PASS2]` completes
+at t+330.25s (barrier end) = **152.52s phase wall**, of which the fastest claim's own work took
+only 34.64s.
+
+**Headline answer to Most Important Question #1, triangulated across 3 independent runs/
+conditions**: the earliest-ready PASS2 claim waits **~118s** (this clean run) / **~137s** (the
+concurrent-load run analyzed independently) / **~102-108s** (the pre-P1-A baseline, different query
+content) for the shared NLI barrier — three different runs, three different query sets, three
+different load conditions, all landing in the same **~100-140s** range. This is not a fluke of one
+measurement; it is the dominant, reproducible cost in the whole retrieval phase.
+
+## Part F — Streaming Claim Pipeline SHADOW Design (design only — NOT implemented)
+
+Proposed per-claim state machine, informed directly by Parts D/H:
+
+```
+claim: EXTRACTED
+  -> PASS1 mapping (per-claim candidate scoring against the existing evidence pool)
+  -> PASS1_MAPPED
+  -> enqueue (claim_id, evidence_id, texts) pairs onto ONE shared NLI queue (Part G)
+  -> PASS1_NLI_QUEUED -> PASS1_NLI_DONE (queue consumer resolves this claim's pairs)
+  -> per-claim status computed (Part D barrier 5: pure function of this claim's own relations)
+  -> PASS1_STATUS_READY
+     resolved?  -> DONE (pending only the global barriers below)
+     unresolved -> PASS2_NEEDED
+                -> submit to the EXISTING ThreadPoolExecutor(max_workers=3) network pool, unchanged
+                   (Part H found no problem with network-fetch concurrency, only Ollama concurrency)
+                -> PASS2_RETRIEVAL_DONE (as soon as THIS claim's own fetch completes, not siblings')
+                -> PASS2 mapping (per-claim)
+                -> enqueue onto the SAME shared NLI queue as PASS1 (Part H: keep ONE bounded
+                   consumer, do not spin up a second one for PASS2)
+                -> PASS2_NLI_DONE -> final per-claim status
+
+GLOBAL BARRIER (after every claim reaches its final per-claim status):
+  -> claim<->claim NLI (Part D/J: could actually start EARLIER, concurrently with the above,
+     since it only needs claim TEXT, not resolution state — a genuine, separate improvement)
+  -> final claim coverage (needs claims_data final + answer text)
+  -> canonical Trust (aggregates everything, definitionally last)
+```
+
+**Concrete implementation risk found, not hand-waved**: `map_claims_to_evidence()`
+(`agent/claim_evidence_mapper.py`) currently computes each evidence item's embedding **exactly
+once per mapping pass**, explicitly cached and shared across all claims in that call ("Evidence не
+меняются от claim к claim. Поэтому их embeddings должны вычисляться ровно один раз на mapping
+pass" — a real code comment). A naive per-claim-streaming redesign that calls the mapper once per
+claim would **recompute the same evidence embeddings N times**, one extra (unguarded, per Part H)
+Ollama embedding call per claim per shared evidence item — directly regressing the "avoid GPU
+request explosion" goal this whole redesign is meant to serve. **Any real implementation must
+introduce an explicit, request-scoped evidence-embedding cache** (same pattern as
+`SharedFetchCache`, not a new ad-hoc mechanism) shared across all per-claim mapper calls, or this
+design is a net loss on the exact axis Part H just proved matters (2-2.7x degradation under
+concurrent Ollama load).
+
+## Part G — NLI Batcher Design (design only — NOT implemented)
+
+Current batching (confirmed by Part H): `infer_claim_relations_batch()` already processes pairs in
+sequential chunks of `batch_size` — **8** is the value actually used by the caller that matters here
+(`run_claim_evidence_batch`'s `classify_claim_evidence_batch(jobs, batch_size=8)`). Per the task's
+own instruction ("MAX_NLI_BATCH = existing safe batch size") — **reuse 8, do not invent a new
+number**; it is already the empirically-used value in production today.
+
+**`MAX_BATCH_DELAY_MS`, measured before choosing (per instruction) — and the brief's own 100-300ms
+example is very likely wrong for this workload**: Part E's real inter-arrival gaps between PASS2
+claims finishing their own retrieval are 4.95s, 5.95s, 23.24s, 1.75s, 5.49s, 22.92s, 0.67s — i.e.
+**seconds, not milliseconds**, and often 5-25s apart. A 100-300ms flush-on-oldest-item-timeout would
+almost always fire before a second claim arrives to share the batch with — turning today's 1-3
+batched Ollama calls per phase into up to **8 individual calls**, the exact "GPU request explosion"
+Part G explicitly warns against, and directly contradicted by Part H's measured 2-2.7x degradation
+under concurrent load. **Recommendation**: any real implementation needs a deliberately-chosen
+`MAX_BATCH_DELAY_MS` in the **several-second** range (informed by the real inter-arrival
+distribution above, e.g. long enough to typically catch 2-3 claims per flush), not the brief's
+example value — and this number should itself be calibrated against a live corpus before
+activation, exactly as the instruction requires, not chosen now.
+
+**Correlation** (NLI result → correct claim_id → correct evidence_id): already solved today via
+`pair_id = f"{claim_id}:{source_index}"` tagging (`mapping.py`) — a streaming queue only needs to
+carry this same tag through; no new risk.
+
+## Part H — Ollama/GPU Concurrency Audit
+
+Full call-site inventory: NLI batch calls (`agent/claim_relation.py:610,833,446`) and the mapper's
+embedding calls (`claim_evidence_mapper.py:124`) are **entirely unguarded by any semaphore** — only
+query-generation (`claim_evidence_retriever.py:337`, `orch_web_query.py:92`,
+`final_claim_coverage.py:73`) and synthesis (`orch_synthesizer.py:144`, a *separate*
+`Semaphore(2)` object) are gated by `GENERATION_SEMAPHORE` (`orch_config.py:27`).
+
+**Historical context, confirmed real** (`orch_config.py:10-27`, prior "P2.2" audit): the semaphore
+was added *speculatively*, explicitly "НЕ подтверждён рантайм-профилированием," partly because
+`orch_timeout.py:56-60` documents a real orphan-thread risk (a background call that acquires the
+semaphore after its caller has already timed out and moved on) — at `Semaphore(1)` a single orphan
+would starve everything; at `Semaphore(2)` one orphan still leaves a permit free. No literal
+`Semaphore(1)` found anywhere in current code or git history search.
+
+**Internal batch structure — sequential, confirmed**: `infer_claim_relations_batch`'s
+`for start in range(0, len(pairs), batch_size):` loop is plain sequential — one Ollama request per
+chunk, fully awaited before the next. **"One bounded NLI batch consumer" is already exactly what
+happens today** — not via a lock, but because the pipeline invokes these stages one after another
+in the main thread.
+
+**Measured concurrent-load degradation (real, not assumed)**: NLI generation time averaged
+**6421ms sequential** (solo process) vs. **12948-17277ms** across the 3 concurrently-run P1-B
+benchmarks — a **2-2.7x slowdown** from just 3 simultaneous processes sharing one Ollama instance.
+
+**Recommendation, measured not assumed**: given this real degradation, **increasing NLI concurrency
+would very likely make things worse, not better** — directly validating the brief's own instinct.
+Any streaming redesign (Part F/G) must preserve today's *effective* one-call-at-a-time NLI
+behavior as a deliberate, explicit bounded consumer, not accidentally parallelize it.
+
+## Part I — PASS2 Asynchronous Start (SHADOW only — NOT activated)
+
+Dependency check, per the brief's own list: claim family (Part B — retrieval-sharing only, never
+implemented, doesn't block per-claim PASS2 timing even hypothetically); contradiction search (no
+gate requiring waiting for other claims was found anywhere — Part D's barrier table is exhaustive
+for the code that exists); shared evidence pool (PASS1 pool is read-only once built, safe to read
+from concurrently-starting PASS2 workers); source independence (`source_cluster_id` is per-evidence
+metadata, not dependent on other claims' resolution state); global claim graph (claim<->claim NLI,
+confirmed in Part D/J to depend only on claim text — genuinely independent of retrieval timing, not
+just "non-blocking" but literally could run concurrently).
+
+**Honest scoping note**: Part I as narrowly defined by the brief (the PASS1-status → PASS2-start
+edge specifically) has **limited *additional* savings beyond what Part F's general streaming design
+already captures** — PASS1 NLI already returns as one relatively short bounded batch (Part H:
+~6.4s sequential average per call), not a long multi-second-per-claim wait in that specific
+transition. The real, large savings (Part E/K's ~100-140s number) live in the PASS2-retrieval→
+PASS2-NLI transition, which is Part F's design, not a separate Part I saving — reporting Part I and
+Part F as additive would double-count the same redesign. Part I's genuine incremental value is
+narrower: confirming no real dependency blocks starting PASS2 the instant a claim's own PASS1
+status is known, which Part F's design already assumes and requires.
+
+## Part J — Legitimate Global Barriers
+
+- **Claim↔claim disagreement NLI**: epistemically required in that a disagreement between claim A
+  and C can't be evaluated before both exist — but its *true* dependency is claim-text-extraction
+  completion, not full resolution. Currently placed later than its real dependency requires (see
+  Part F) — a legitimate barrier, but a *misplaced* one.
+- **Canonical Trust**: genuinely required to be last — aggregates/MIN-combines every claim's final
+  `verification_status`. Cannot start before every claim's status is final.
+- **Final Claim Coverage**: legitimately needs `claims_data` in its final state plus the rendered
+  answer text — same reasoning as canonical Trust.
+- **Final synthesis/answer gate**: not a barrier on claim-resolution *time* at all — the answer text
+  is generated *before* claims resolve (the PRE-PUSH GATE session's already-known, already-mitigated
+  architecture quirk — not re-analyzed here, just noted so it isn't confused with a new finding).
+
+## Part K — Theoretical Speedup (evidence-based, not intuition)
+
+Using Part E's real numbers for the PASS2-retrieval→PASS2-NLI phase specifically (152.52s current):
+under a streaming design where each claim enters the shared NLI queue as soon as its own retrieval
+finishes (NLI *total compute* unchanged — Part H says do not parallelize the consumer itself, only
+start it earlier for early arrivals), the phase's floor becomes roughly the slowest claim's own
+readiness time (+99.60s) plus its own turn in the (still-bounded, still-sequential) NLI queue,
+rather than +99.60s **plus the full ~53s the slowest claim currently ALSO has to wait for the batch
+call itself to begin and run for everyone**. **Barrier-idle-elimination component: roughly 40-50s
+saved on this specific phase for this run** (a smaller, more conservative estimate than the raw
+~118s "fastest-claim-idle" number, since NLI still needs to actually process every claim's pairs
+serially through the same bounded consumer — the correct comparison is against the *slowest*
+claim's total time-to-final-status, not the fastest claim's idle time, which overstates savings).
+Additional, **not double-counted with the above**: Part J's finding that claim<->claim NLI could
+start concurrently with retrieval (currently strictly serial after) — from this run's `[PROFILE]`
+data, `claim_claim_nli` costs are on the order of tens of seconds and could fully or partially
+overlap with the ~152s retrieval phase if genuinely independent, a separate savings source. Part
+B's family-sharing (~80% search reduction for the dominant family) is a **volume** reduction, not a
+barrier-timing one — it would shrink `worker_sum`/`queue_wait_sum` directly (fewer claims competing
+for 3 workers), compounding with the above rather than overlapping it. **No single "T_estimated"
+number is asserted as final** — the three components (barrier idle, claim-graph overlap, family
+volume reduction) are reported separately, per the instruction not to claim speedup from intuition;
+combining them into one number would require actually building the streaming pipeline and
+measuring, which is explicitly out of scope for this audit-only phase.
+
+## Part L — Safety Invariants (restated, applied to this design)
+
+Standing invariant for any future implementation, unchanged from prior phases: claim identity,
+claim-specific evidence ownership, provenance, source independence, NLI relation, contradiction
+evidence, eligibility, final claim status, and canonical Trust must all be preserved. **New,
+streaming-specific invariant this phase adds**: result must not depend on completion order — a
+slow-A/fast-B run and a fast-A/slow-B run (same inputs) must produce identical final claim states.
+
+**Two concrete order-dependence risks identified (not yet tested, flagged for Part M)**:
+1. `status.py`'s `_distinct_cluster_count`/`_counts_toward_status` (already read in the P1-B
+   eligibility review) iterate through *all* relations and accumulate into a set — no early-exit,
+   no first-match shortcut found — **already order-independent by construction**, a positive
+   finding, not a gap.
+2. The mapper's top-K candidate selection (`SECONDARY_CANDIDATE_THRESHOLD` cutoff, found in P1-B
+   Part 1) has **no confirmed deterministic tiebreak** for two evidence items with equal or
+   near-equal similarity scores — under today's single-batch-call structure this is latent and
+   probably never observed (floating-point ties are rare), but a streaming redesign that computes
+   embeddings incrementally, in whatever order claims/evidence arrive, makes insertion-order-based
+   tie effects newly *possible* in a way they weren't before. **Not proven to occur today** — flagged
+   as a specific thing Part M's test must probe, not asserted as a live bug.
+
+## Part M — Determinism Test Design (design only — NOT implemented)
+
+**Confound to control for, found during this design pass, not hand-waved**: NLI itself has
+already-documented real non-determinism independent of any streaming redesign — the P1-A fix commit
+(`a082b55`) recorded a live case of the *same* (claim, evidence) pair returning `supports` on one
+NLI call and `uncertain` on a redundant re-run. A determinism test for the *streaming architecture*
+must not conflate this pre-existing, unrelated NLI-call variance with an architecture-introduced
+bug. **Design**: either (a) mock the NLI call layer to return fixed, deterministic relations keyed
+by (claim_text, evidence_text) regardless of batch composition/arrival order, or (b) if testing
+against the real model, pin to as-deterministic-as-available generation settings and treat any
+observed variance as a separately-tracked baseline-noise measurement, not a pass/fail signal for
+the architecture itself.
+
+**Test 1 (artificial delay reversal, per the brief)**: fixed small claim/evidence set, run with
+claim A retrieval=100ms/B=10ms, then reversed (A=10ms/B=100ms) — assert final `derived_from_
+evidence_ids`, `evidence_relations`, `verification_status`, claim-graph edges, and canonical Trust
+are byte-identical across both orderings.
+
+**Test 2 (NLI batch completion order reversed)**: with a queue-based batcher (Part G), simulate two
+different arrival orders into the queue — assert individual (claim, evidence) *relation results*
+are unaffected by which physical batch call they landed in (this follows directly from
+`pair_id`-based correlation, Part G), and that the aggregated per-claim status
+(`_counts_toward_status`/`_distinct_cluster_count`, already proven order-independent, Part L) does
+not vary with accumulation order.
+
+**Test 3 (new, motivated by Part L's tiebreak risk)**: construct two evidence items with
+artificially-equal similarity scores to one claim, feed them to the mapper in reversed insertion
+order across two runs — assert the SAME evidence item is selected as the top-K candidate both times
+(a deterministic tiebreak, e.g. by `evidence_id` lexicographic order, would need to be added if this
+test currently fails — not yet run, since the streaming redesign that would make this observable
+does not yet exist).
+
+---
+
+## P2 — Final Recommendations
+
+**P2-A (claim economy): CONDITIONAL GO.** SUBCLAIM+META (30% of claims) is a real, well-evidenced
+waste category with a clear, low-risk mitigation path (collapse-at-extraction or post-extraction
+filtering) — but the brief's own instruction ("Do NOT delete anything yet") means this audit stops
+at measurement. Condition: any future claim-pruning implementation must preserve the safety
+invariant that a filtered-out claim never silently becomes evidence *against* itself being asked
+about (i.e. filtering must be a pre-retrieval economy decision, never a post-hoc status override).
+
+**P2-B (pipeline streaming): CONDITIONAL GO.** The single largest, most reproducible finding in this
+entire audit (~100-140s of pure barrier-idle time for the fastest PASS2 claim, triangulated across
+3 independent runs) has a real, well-understood, non-required cause (Part D barrier 3) and a
+concrete design (Part F) — but it is NOT low-risk: the evidence-embedding-cache regression risk
+(Part F) and the two order-dependence risks (Part L) are real, specific, and must be closed with
+Part M's tests *before* any implementation, not discovered after. Condition: implement Part M's
+determinism tests against a mocked/fixed NLI layer FIRST, prove order-independence structurally,
+THEN build the streaming redesign — not the reverse.
+
+**P2-C (NLI batcher): CONDITIONAL GO.** The underlying batching mechanism is already correct and
+already bounded (Part H) — the only real design work needed is turning it from "one big batch after
+everything is collected" into "a queue fed incrementally, same batch size, a deliberately-chosen
+multi-second flush delay." The brief's own example delay value (100-300ms) is evidenced to be wrong
+for this workload (Part G) — this is exactly the kind of premature-number risk the brief itself
+warned against, now caught with real data instead of shipped blind. Condition: calibrate
+`MAX_BATCH_DELAY_MS` against real inter-arrival distributions (Part G has the starting data) before
+choosing a value, and never let concurrency exceed today's effective one-call-at-a-time NLI
+consumption (Part H's 2-2.7x degradation finding is a hard constraint, not a suggestion).
+
+**No implementation performed this phase**, per instruction — audit and design only. All three
+tracks require Part M's determinism proof as a prerequisite gate, not a parallel workstream.
+
+## Most Important Questions — answered
+
+**"Сколько времени claim, уже готовый к NLI/PASS2, проводит в ожидании других claims?"** —
+**~100-140 seconds**, triangulated across 3 independent live runs under different load conditions
+(Part E). This is not incidental — it is the single largest identifiable source of wall-clock time
+in the retrieval phase, larger than any individual claim's own retrieval work.
+
+**"Сколько отдельных retrieval expeditions мы выполняем для claims, принадлежащих одной epistemic
+family?"** — up to **6 separate expeditions per family**, each issuing its own 2 queries, for
+families that share one core piece of evidence (Part B) — a ~80% hypothetical reduction if shared,
+though with a real, documented risk of under-serving specific-angle family members that any
+implementation must design around, not ignore.
+
+**"Можно ли превратить ALL retrieval → ALL NLI → ALL PASS2 в claim → retrieval → NLI → optional
+PASS2 с одним финальным барьером, не меняя epistemic result?"** — **Yes, architecturally**, with
+the specific, evidenced design in Part F/G, gated on closing the concrete risks in Part L (embedding
+cache regression, tiebreak non-determinism) via Part M's tests before implementation. The epistemic
+result does not have to change — every mechanism found in this audit (per-claim status computation,
+pair-tagged NLI correlation, evidence-role/eligibility rules) is already structurally order-
+independent or can be made so with the specific, scoped fixes identified. This is proven with
+numbers and code citations throughout Parts A-M above, not asserted from intuition.
+
+No production code was modified in this phase. No push.
