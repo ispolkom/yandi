@@ -320,16 +320,72 @@ def run_epistemic_contradiction_shadow(
         }
 
 
+def build_shadow_request_summary(
+    claims_data: List[Dict[str, Any]],
+    contradiction_stats: Dict[str, Any],
+    family_dependency_stats: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Этап 4G-4: JSON-safe (plain ints/strings/None only — never the raw
+    `_roots_a_raw`/`_roots_b_raw` sets inside contradiction_stats
+    "events", which are NOT serializable) per-request diagnostic
+    summary, meant for trace.add_observation() — never the canonical
+    claim/evidence/Trust/verdict schema.
+
+    Deliberately keeps TWO separate notions apart (Этап 4G-4 §5): the
+    global registry scan (contradiction_stats — ALL persisted
+    contradicts edges, most of which have nothing to do with THIS
+    request) vs a request-SCOPED subset (edges where at least one side
+    is a semantic_family_id that actually appears among claims_data
+    this cycle). A live run must never present a stale whole-registry
+    number as if it says something about the current question — the
+    caller gets both, clearly labeled, and decides.
+
+    current_recheck_candidates is Phase 12's OWN, already-computed
+    candidate count (family_dependency_stats["recheck_candidate_
+    details"], read-only) — not recomputed here, so this can never
+    drift from what Phase 12 itself actually saw this request.
+    """
+    families_this_request = {
+        c.get("semantic_family_id")
+        for c in (claims_data or [])
+        if c.get("semantic_family_id")
+    }
+
+    events = contradiction_stats.get("events") or []
+    touched_events = [
+        e for e in events
+        if e.get("family_a") in families_this_request
+        or e.get("family_b") in families_this_request
+    ]
+
+    return {
+        "edges_checked": contradiction_stats.get("contradicts_edges_evaluated", 0),
+        "candidates_true": contradiction_stats.get("candidates_true", 0),
+        "candidates_false": contradiction_stats.get("candidates_false", 0),
+        "shadow_error": contradiction_stats.get("error"),
+        "current_recheck_candidates": len(
+            (family_dependency_stats or {}).get("recheck_candidate_details") or []
+        ),
+        "touched_this_request": len(touched_events),
+        "touched_current_yes_shadow_yes": sum(1 for e in touched_events if e.get("candidate")),
+        "touched_current_yes_shadow_no": sum(1 for e in touched_events if not e.get("candidate")),
+    }
+
+
 # ============================================================
-# NOT YET WIRED INTO PRODUCTION (Этап 4G-3, deliberate scope limit):
+# PRODUCTION WIRING (Этап 4G-4): SHADOW OBSERVABILITY ONLY
 # ============================================================
 #
-# No caller in agent/orchestrator_v2.py invokes
-# run_epistemic_contradiction_shadow() yet — same posture as Этап
-# 4G-2's get_family_historical_evidence(): a fully tested, callable
-# read path, with the actual wiring decision left as a separate,
-# explicit step. The natural call site (if/when approved) is right
-# after apply_family_dependency_shadow() in orchestrator_v2.py, using
-# the SAME claims_data/evidence_data/log/verbose already in scope
-# there, wrapped exactly as apply_dependency_recheck() already is —
-# see this module's report for the exact proposed diff.
+# agent/orchestrator_v2.py calls run_epistemic_contradiction_shadow()
+# right after apply_family_dependency_shadow() and BEFORE
+# apply_dependency_recheck() — the SAME claims_data/evidence_data/log/
+# verbose already in scope there, no pipeline restructuring. Its
+# return value is summarized via build_shadow_request_summary() and
+# recorded on the trace via trace.add_observation() for later
+# inspection; apply_dependency_recheck() right after it is called
+# EXACTLY as before, reading only _family_dependency_stats — it never
+# receives this call's return value, so it is structurally unable to
+# be gated, suppressed, or otherwise altered by this shadow classifier
+# (proven by agent/epistemic_contradiction_shadow_wiring_regression_
+# test.py's call-order + non-mutation checks).
