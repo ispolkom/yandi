@@ -75,6 +75,35 @@ app.include_router(_translate_router)
 app.include_router(_orch_router)
 app.include_router(_agent_router)
 
+
+@app.on_event("startup")
+async def _reconcile_stale_sql_runs() -> None:
+    """
+    Этап 5 (SQL persistence migration, MIGRATION_STATUS.md §41 gap
+    closed): agent.db.sql.repositories.reconcile_stale_running_runs()
+    (wrapped fail-open as shadow_reconcile_stale_runs()) was documented
+    as "should be called once at process/daemon startup" but was never
+    wired into any entrypoint. This process — pet/council_chat_
+    server.py — IS that daemon: chat_orch.py's router (mounted above)
+    calls agent.orchestrator_v2.process() in-process for every request,
+    which is the sole writer of verification_run rows. Both launch
+    paths (start.sh's direct `python3 pet/council_chat_server.py`,
+    start_headless.sh's `uvicorn pet.council_chat_server:app`) hit this
+    FastAPI startup event, unlike the `if __name__ == "__main__":`
+    block below, which only the first one reaches.
+
+    Fail-open by construction, same contract as every other shadow_*
+    call (agent/db/sql/shadow_write.py) — a missing/unreachable SQL
+    layer means this silently does nothing, exactly like every request
+    already handles that; it never blocks or delays startup on a DB
+    problem.
+    """
+    from agent.db.sql.shadow_write import shadow_reconcile_stale_runs
+
+    reconciled = shadow_reconcile_stale_runs(log=print, verbose=True)
+    if reconciled:
+        print(f"[SqlShadow] startup reconciliation: {reconciled} stale run(s) marked aborted")
+
 import time as _time
 
 # Три отдельных очереди — по одной на каждый Firefox
