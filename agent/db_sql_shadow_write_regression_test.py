@@ -85,6 +85,9 @@ sw.shadow_record_claim(
 )
 check("A: shadow_record_claim does not raise with no DB configured", True)
 
+r_reconcile = sw.shadow_reconcile_stale_runs(log=_noop_log, verbose=True)
+check("A: shadow_reconcile_stale_runs returns None (no raise) with no DB configured", r_reconcile is None, f"{r_reconcile}")
+
 sw.shadow_record_evidence(
     claim_id="cl_1", run_id="t1", resource_type="internet", canonical_uri="https://x.example/a",
     observation_route="internet", origin_observation_id=None, observed_at=time.time(),
