@@ -241,6 +241,42 @@ def shadow_record_claims_and_evidence(
     _shadow(log, verbose, "record_claims_and_evidence", _do)
 
 
+def shadow_record_claim_family(
+    *, family_id: str, domain: str, canonical_text: str, claim_id: str,
+    log=None, verbose: bool = False,
+) -> None:
+    """
+    Wired into agent/orchestrator/claims/lifecycle.py::
+    assign_claim_family_identity() — the exact point agent.
+    claim_family_registry.ClaimFamilyRegistry.find_or_link_claim()
+    already runs, BEFORE finalize_claim_trace_and_grounding() and its
+    bulk shadow_record_claims_and_evidence() call.
+
+    This ordering matters beyond mirroring the JSON write: claim_
+    occurrence.family_id carries a FOREIGN KEY to claim_family(family_
+    id) (schema.py). shadow_record_claims_and_evidence() inserts claim_
+    occurrence rows with family_id set whenever a claim already has
+    semantic_family_id — on a real live DB, without this function
+    running first in the same run, every one of those inserts would hit
+    an FK violation and the whole claim_occurrence row would silently
+    fail to shadow-write (fail-open swallows the exception, per design,
+    but that would mean NO claim occurrences persist for any claim that
+    got a family — a correctness gap, not a cosmetic one). Calling this
+    here closes it: get_or_create_claim_family() commits in its own
+    transaction before the bulk path ever runs.
+
+    canonical_text is write-once at the SQL layer (repo.get_or_create_
+    claim_family uses INSERT IGNORE) — matches the confirmed current
+    Python behavior (ClaimFamilyRegistry never rewrites an existing
+    family's canonical_text either).
+    """
+    def _do(conn):
+        repo.get_or_create_claim_family(conn, family_id, domain, canonical_text)
+        repo.link_family_member(conn, family_id, claim_id)
+
+    _shadow(log, verbose, "record_claim_family", _do)
+
+
 def shadow_reconcile_stale_runs(*, older_than_seconds: int = 3600, log=None, verbose: bool = False) -> Optional[int]:
     """
     Should be called once at process/daemon startup (NOT wired into any

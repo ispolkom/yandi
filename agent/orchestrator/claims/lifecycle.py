@@ -17,6 +17,7 @@ from agent.evidence_pool import build_canonical_evidence_pool, merge_evidence
 from agent.claim_identity import compute_claim_content_hash
 from agent.source_clustering import assign_source_clusters
 from agent.claim_family_registry import get_claim_family_registry
+from agent.db.sql.shadow_write import shadow_record_claim_family
 
 
 def setup_claim_and_evidence_lifecycle(
@@ -263,6 +264,26 @@ def assign_claim_family_identity(
                 claim_text, claim_id, domain, log=log, verbose=verbose, stats=_stats,
             )
             claim["semantic_family_id"] = family_id
+
+            # Этап 5 (SQL persistence migration, mandate §12): shadow-
+            # write claim_family/family_member here, in the SAME request
+            # that just linked this claim in the JSON registry — see
+            # shadow_record_claim_family()'s docstring for why this must
+            # run BEFORE the bulk claim/evidence shadow write (FK on
+            # claim_occurrence.family_id). canonical_text is read back
+            # from the in-memory registry (same direct-attribute-read
+            # pattern agent/dependency_recheck.py already uses), never
+            # recomputed — find_or_link_claim() is the sole writer of
+            # canonical_text and already ran above.
+            if family_id:
+                _canonical_text = next(
+                    (f.get("canonical_text") for f in registry.families if f.get("family_id") == family_id),
+                    claim_text,
+                )
+                shadow_record_claim_family(
+                    family_id=family_id, domain=domain, canonical_text=_canonical_text,
+                    claim_id=claim_id, log=log, verbose=verbose,
+                )
     except Exception as e:
         if verbose:
             log(f"[Claim Family] Ошибка линковки семей: {e}")
