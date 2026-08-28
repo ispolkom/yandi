@@ -45,6 +45,28 @@ def _now() -> datetime:
     return datetime.utcnow()
 
 
+def _coerce_datetime(value):
+    """P0 FIX (found while investigating origin_observation_id, mandate
+    §15): every timestamp this module accepts from a caller has to reach
+    a DATETIME column. Two real production call sites pass a raw Unix-
+    epoch float instead (agent.orch_tracer.Trace.timestamp, forwarded as
+    started_at/asked_at from orchestrator_v2.py's shadow_record_question_
+    and_run() call) — a bare float bound to a DATETIME column is not a
+    valid MySQL datetime literal (pymysql just embeds the numeric value;
+    the server rejects it), which the shadow layer's fail-open contract
+    would have swallowed silently: EVERY question/run row would have
+    failed to write on a real live DB, never caught because no live DB
+    has existed yet to fail against. None passes through unchanged (the
+    `X = _coerce_datetime(X) or _now()` idiom below still falls back to
+    _now() for a genuinely absent timestamp); an already-correct datetime
+    passes through unchanged too."""
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        return datetime.utcfromtimestamp(value)
+    return value
+
+
 def _question_hash(raw_text: str) -> str:
     return hashlib.sha256(canonicalize_claim_text(raw_text).encode("utf-8")).hexdigest()
 
@@ -63,7 +85,7 @@ def resolve_question(
     """Find-or-create QUESTION by canonical_hash; ALWAYS insert a new
     QUESTION_OCCURRENCE (the raw text is never deduplicated — that's
     the whole point of splitting the two entities, mandate §7)."""
-    asked_at = asked_at or _now()
+    asked_at = _coerce_datetime(asked_at) or _now()
     h = _question_hash(raw_text)
 
     with conn.cursor() as cur:
@@ -94,7 +116,7 @@ def start_run(
     web_enabled: bool = False, validation_enabled: bool = False,
     pipeline_version: Optional[str] = None, schema_version: int = 1,
 ) -> None:
-    started_at = started_at or _now()
+    started_at = _coerce_datetime(started_at) or _now()
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO verification_run "
@@ -107,7 +129,7 @@ def start_run(
 
 
 def complete_run(conn, run_id: str, completed_at=None, final_answer_id: Optional[int] = None) -> None:
-    completed_at = completed_at or _now()
+    completed_at = _coerce_datetime(completed_at) or _now()
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE verification_run SET status='completed', completed_at=%s, "
@@ -124,7 +146,7 @@ def fail_run(
     mid-run — see reconcile_stale_running_runs() below for how that
     second case is detected after the fact)."""
     assert outcome in ("failed", "aborted")
-    completed_at = completed_at or _now()
+    completed_at = _coerce_datetime(completed_at) or _now()
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE verification_run SET status=%s, completed_at=%s, "
@@ -153,7 +175,7 @@ def record_answer_version(conn, question_id: int, answer_text: str, run_id: str,
     question's current latest version — exact-hash v1 (mandate §9: no
     silent semantic-equivalence invention). Reuses the existing
     answer_id when the text is byte-identical to the latest version."""
-    created_at = created_at or _now()
+    created_at = _coerce_datetime(created_at) or _now()
     h = _text_hash(answer_text)
 
     with conn.cursor() as cur:
@@ -186,7 +208,7 @@ def record_answer_assessment(
     diverged: bool = False, stricter_strand: Optional[str] = None,
     reason: Optional[str] = None, created_at=None,
 ) -> int:
-    created_at = created_at or _now()
+    created_at = _coerce_datetime(created_at) or _now()
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO answer_assessment "
@@ -204,7 +226,7 @@ def get_or_create_claim_family(conn, family_id: str, domain: str, canonical_text
     behavior, agent/claim_family_registry.py) — INSERT IGNORE, never
     UPDATE, so a second call with different text for the same family_id
     is silently a no-op, not a rewrite."""
-    created_at = created_at or _now()
+    created_at = _coerce_datetime(created_at) or _now()
     with conn.cursor() as cur:
         cur.execute(
             "INSERT IGNORE INTO claim_family (family_id, domain, canonical_text, created_at, updated_at) "
@@ -214,7 +236,7 @@ def get_or_create_claim_family(conn, family_id: str, domain: str, canonical_text
 
 
 def link_family_member(conn, family_id: str, claim_id: str, linked_at=None) -> None:
-    linked_at = linked_at or _now()
+    linked_at = _coerce_datetime(linked_at) or _now()
     with conn.cursor() as cur:
         cur.execute(
             "INSERT IGNORE INTO family_member (family_id, claim_id, linked_at) VALUES (%s, %s, %s)",
@@ -249,7 +271,7 @@ def get_or_create_resource(
     """V1 activates only resource_type='internet' with canonical_uri
     set — node/validator/model identity columns are schema-ready but no
     caller in this codebase passes them yet (mandate §4)."""
-    observed_at = observed_at or _now()
+    observed_at = _coerce_datetime(observed_at) or _now()
     uri_hash = _text_hash(canonical_uri) if canonical_uri else None
 
     with conn.cursor() as cur:
@@ -276,7 +298,7 @@ def record_source_observation(
 ) -> int:
     if rejection_reason is not None and rejection_reason not in REJECTION_REASONS:
         raise ValueError(f"rejection_reason {rejection_reason!r} not in controlled vocabulary {REJECTION_REASONS}")
-    observed_at = observed_at or _now()
+    observed_at = _coerce_datetime(observed_at) or _now()
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO source_observation "
@@ -294,7 +316,7 @@ def record_evidence_relation(
     directness: Optional[float] = None, evidence_eligible: bool = False,
     evidence_role: Optional[str] = None, counted_via: Optional[str] = None, created_at=None,
 ) -> int:
-    created_at = created_at or _now()
+    created_at = _coerce_datetime(created_at) or _now()
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO evidence_relation "
@@ -307,7 +329,7 @@ def record_evidence_relation(
 
 
 def record_run_error(conn, run_id: str, failed_stage: str, error_class: str, short_message: Optional[str] = None, created_at=None) -> None:
-    created_at = created_at or _now()
+    created_at = _coerce_datetime(created_at) or _now()
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO run_error (run_id, failed_stage, error_class, short_message, created_at) "
