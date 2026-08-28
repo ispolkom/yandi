@@ -80,6 +80,23 @@ class SharedFetchCache:
         self.inflight_waits = 0
         self.network_fetches = 0
 
+        # P1-B (YANDI_AGENT_RETRIEVAL_PERFORMANCE_AUDIT.md Phase 3):
+        # request-scoped SEARCH-QUERY dedup, same object/instance as
+        # the URL fetch cache above — deliberately NOT a parallel
+        # subsystem. Two different claims (or a claim's search vs. the
+        # initial/refutation search) can independently generate the
+        # EXACT SAME search-engine query text; without this, that pays
+        # for the DDGS network call twice for identical results, on
+        # top of whatever URL-level fetch dedup already happens
+        # downstream. Keyed by NORMALIZED query text only (never fuzzy/
+        # semantic similarity) — see normalize_query()'s docstring for
+        # why exact-text identity cannot merge a support query with a
+        # contradiction query.
+        self._query_results: Dict[str, tuple] = {}
+        self._query_events: Dict[str, threading.Event] = {}
+        self.query_requests = 0
+        self.query_hits = 0
+
     @staticmethod
     def canonicalize(url: str) -> str:
         """
@@ -102,6 +119,79 @@ class SharedFetchCache:
         except Exception:
             return url
 
+    @staticmethod
+    def normalize_query(query: str) -> str:
+        """
+        Conservative normalization for exact-duplicate detection ONLY:
+        collapse whitespace, casefold. Deliberately does NOT strip
+        punctuation beyond whitespace collapsing, and deliberately does
+        NOT do any semantic/fuzzy matching — the task's own instruction
+        is explicit that a near-duplicate (paraphrase) query must only
+        ever be MEASURED, never merged, and that dedup must never
+        conflate a support-intent query with a contradiction-intent
+        query just because their text looks similar. Normalizing this
+        conservatively means two queries only ever collapse to the same
+        key when they are, character-for-character (modulo case and
+        whitespace run-length), the SAME search — which by construction
+        cannot cross a support/counter query boundary generated from
+        genuinely different prompts, since those are never designed to
+        produce identical text.
+        """
+        return " ".join((query or "").split()).casefold()
+
+    def get_or_search(self, query: str, search_fn):
+        """
+        Same request-scoped, thread-safe, in-flight-coalescing pattern
+        as get_or_fetch() above, applied to search-engine queries
+        instead of URL fetches. search_fn: callable(query) -> (urls,
+        rejected). Called AT MOST ONCE per normalized query text for
+        this cache instance's lifetime (one user request).
+        """
+        key = self.normalize_query(query)
+
+        if not key:
+            return search_fn(query)
+
+        with self._lock:
+            self.query_requests += 1
+
+            if key in self._query_results:
+                self.query_hits += 1
+                print(f"  [scraper] query cache HIT: {query[:80]!r}")
+                return self._query_results[key]
+
+            existing_event = self._query_events.get(key)
+
+            if existing_event is None:
+                event = threading.Event()
+                self._query_events[key] = event
+                is_owner = True
+            else:
+                event = existing_event
+                is_owner = False
+
+        if not is_owner:
+            event.wait(timeout=FETCH_TIMEOUT + 10)
+
+            with self._lock:
+                if key in self._query_results:
+                    self.query_hits += 1
+                    print(f"  [scraper] query cache HIT (in-flight): {query[:80]!r}")
+                    return self._query_results[key]
+            # Owner never populated a result — fetch it ourselves
+            # rather than return nothing (same fallback as
+            # get_or_fetch()).
+
+        result = None
+        try:
+            result = search_fn(query)
+        finally:
+            with self._lock:
+                self._query_results[key] = result
+                event.set()
+
+        return result
+
     def get_or_fetch(self, url: str, transport: str, fetch_fn):
         """
         fetch_fn: callable(url) -> (result, reason). Called AT MOST
@@ -117,6 +207,18 @@ class SharedFetchCache:
 
             if key in self._results:
                 self.hits += 1
+                # P1-B (YANDI_AGENT_RETRIEVAL_PERFORMANCE_AUDIT.md
+                # Phase 4/6): explicit, provable HIT marker. Without
+                # this, a URL fetched by N different claim-workers
+                # prints N "proxy OK"/"OK" lines with identical
+                # payload size regardless of whether 1 or N real
+                # network fetches happened (every caller prints its
+                # own copy of the SAME cached result) — making the
+                # log alone look like duplicate fetches even when the
+                # cache is working correctly. This line makes the
+                # distinction directly observable instead of requiring
+                # code-tracing to prove it.
+                print(f"  [scraper] fetch cache HIT ({transport}): {url[:70]}")
                 return self._results[key]
 
             existing_event = self._events.get(key)
@@ -136,6 +238,7 @@ class SharedFetchCache:
             with self._lock:
                 if key in self._results:
                     self.hits += 1
+                    print(f"  [scraper] fetch cache HIT (in-flight, {transport}): {url[:70]}")
                     return self._results[key]
             # Owner never populated a result (crashed before the
             # finally block below, which should not happen, but this
@@ -173,6 +276,9 @@ class SharedFetchCache:
             "network_fetches": self.network_fetches,
             "saved": saved,
             "hit_ratio": (saved / total) if total else 0.0,
+            "query_requests": self.query_requests,
+            "query_hits": self.query_hits,
+            "query_searches": self.query_requests - self.query_hits,
         }
 
 
@@ -593,14 +699,29 @@ def _fetch_url_proxy(
             pass
 
 
-def _search_with_ddgs(query: str, max_results: int = MAX_RESULTS) -> tuple[List[str], List[Dict[str, str]]]:
+def _search_with_ddgs(
+    query: str,
+    max_results: int = MAX_RESULTS,
+    fetch_cache: "Optional[SharedFetchCache]" = None,
+) -> tuple[List[str], List[Dict[str, str]]]:
     """
     Поиск через DuckDuckGo.
     Возвращает (список URL, список отклонённых с причинами)
+
+    fetch_cache: P1-B — when provided, the actual DDGS call is
+    deduped through SharedFetchCache.get_or_search(), request-scoped
+    (see that method's docstring). None (default) preserves the exact
+    prior behavior (always searches) for any other/direct caller.
     """
+    if fetch_cache is not None:
+        return fetch_cache.get_or_search(
+            query,
+            lambda q: _search_with_ddgs(q, max_results=max_results, fetch_cache=None),
+        )
+
     if not HAS_DDGS:
         return [], []
-    
+
     urls = []
     rejected = []
     # Один домен может содержать несколько независимых
@@ -713,7 +834,7 @@ def scrape(
     for query in web_query.queries[:3]:
         if not query or len(query) < 3:
             continue
-        urls, rejected = _search_with_ddgs(query, max_results=max_results)
+        urls, rejected = _search_with_ddgs(query, max_results=max_results, fetch_cache=fetch_cache)
         all_urls.extend(urls)
         all_rejected.extend(rejected)
 
