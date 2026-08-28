@@ -41,6 +41,7 @@ from agent.claim_relation import (
     is_relevant,
     extract_claim_from_source,
 )
+from agent.claim_identity import extract_subject_anchors as _extract_subject_anchors
 
 
 # ------------------------------------------------------------
@@ -458,80 +459,6 @@ def formulate_claim_evidence_queries_batch(
         )
 
     return results
-
-
-def _extract_subject_anchors(claim_text: str) -> List[str]:
-    """
-    Извлечь явные subject anchors из claim.
-
-    Это НЕ полноценный entity resolver.
-
-    Задача очень узкая:
-    не позволять semantic embedding подменять конкретный объект
-    тематически близким объектом.
-
-    Пример:
-        claim  -> "На Юпитере разумная жизнь не обнаружена"
-        anchor -> "юпитер"
-
-    Иностранные варианты для нескольких частых астрономических
-    объектов добавляются как lexical aliases, а не как источник истины.
-    """
-    text = (claim_text or "").strip()
-
-    if not text:
-        return []
-
-    anchors = []
-
-    # Именованные слова с заглавной буквы внутри claim.
-    #
-    # Первое слово предложения специально не принимаем автоматически:
-    # оно может быть заглавным только из-за начала предложения.
-    words = re.findall(
-        r"[A-Za-zА-Яа-яЁё0-9-]+",
-        text,
-    )
-
-    for i, word in enumerate(words):
-        if i == 0:
-            continue
-
-        if re.match(r"^[А-ЯЁA-Z][A-Za-zА-Яа-яЁё0-9-]+$", word):
-            anchors.append(word.lower())
-
-    # Минимальный alias layer.
-    aliases = {
-        "юпитере": ["юпитер", "jupiter"],
-        "юпитер": ["юпитер", "jupiter"],
-        "европе": ["европа", "europa"],
-        "европа": ["европа", "europa"],
-        "сатурне": ["сатурн", "saturn"],
-        "сатурн": ["сатурн", "saturn"],
-        "венере": ["венера", "venus"],
-        "венера": ["венера", "venus"],
-        "марсе": ["марс", "mars"],
-        "марс": ["марс", "mars"],
-    }
-
-    expanded = []
-
-    for anchor in anchors:
-        expanded.append(anchor)
-
-        for alias in aliases.get(anchor, []):
-            expanded.append(alias)
-
-    # Дополнительно ловим известные формы прямо в claim,
-    # даже если regex заглавной буквы их не выделил.
-    claim_lower = text.lower()
-
-    for form, form_aliases in aliases.items():
-        if form in claim_lower:
-            expanded.extend(form_aliases)
-
-    # stable dedup
-    return list(dict.fromkeys(expanded))
 
 
 def _subject_anchor_matches(

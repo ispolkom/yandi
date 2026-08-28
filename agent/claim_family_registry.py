@@ -61,7 +61,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agent.claim_semantic_identity_prototype import classify_claim_pair
+from agent.claim_semantic_identity_prototype import classify_claim_pair, EMBEDDING_PREFILTER_THRESHOLD
+from agent.claim_identity import canonicalize_claim_text
+from agent.belief_manager import BeliefManager
 
 BASE = Path(__file__).parent.parent
 DEFAULT_REGISTRY_PATH = BASE / "registry" / "claim_families.json"
@@ -94,6 +96,31 @@ class ClaimFamilyRegistry:
         except Exception:
             pass
 
+    def _link_member(self, family, claim_id, claim_text, log, verbose) -> str:
+        """Shared tail of both the exact-fast-path and the main decision
+        loop below — append-only member linking, unchanged from before
+        (P9 §7's old-vs-new equivalence requirement: this is the exact
+        same code the old single loop used to run inline)."""
+        already_member = any(
+            m.get("claim_id") == claim_id for m in family.get("members", [])
+        )
+        if not already_member:
+            family.setdefault("members", []).append({
+                "claim_id": claim_id,
+                "claim_text": claim_text,
+                "linked_at": time.time(),
+            })
+            family["updated_at"] = time.time()
+            self._save()
+
+        if verbose and log:
+            log(
+                f"[Claim Family] linked claim={claim_id} -> "
+                f"family={family['family_id']} "
+                f"(members={len(family.get('members', []))})"
+            )
+        return family["family_id"]
+
     def find_or_link_claim(
         self,
         claim_text: str,
@@ -101,48 +128,104 @@ class ClaimFamilyRegistry:
         domain: str,
         log=None,
         verbose: bool = False,
+        stats: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """
         Returns the family_id this claim occurrence was linked into (an
         existing family if a match was found, a brand-new one
         otherwise), or None if claim_text/claim_id is empty (no
         fabricated family for a degenerate claim).
+
+        P9 (Этап 4D-2): decision POLICY is unchanged from the original
+        per-candidate loop (same domain scoping, same threshold, same
+        LLM judge, same hardening_guard, same "first candidate in
+        registry order that clears all three wins") — only the
+        EMBEDDING step is batched: one /api/embed call for [claim_text]
+        + every candidate's canonical_text, instead of one call per
+        candidate (was O(candidates) HTTP round-trips per claim; is
+        O(1)). See classify_claim_pair()'s precomputed_similarity
+        param, which this reuses rather than duplicating the judge/
+        hardening logic.
+
+        stats: optional dict this mutates in place with running totals
+        (claims/exact_hits/embed_batches/embedded_texts/
+        prefilter_candidates/llm_judges/linked/created) for the
+        [FamilyIdentity] observability line — purely additive, None
+        (default) disables collection with zero extra overhead for any
+        other caller.
         """
         claim_text = (claim_text or "").strip()
         if not claim_text or not claim_id:
             return None
 
+        if stats is not None:
+            stats["claims"] = stats.get("claims", 0) + 1
+
         domain = domain or "unknown"
         candidates = [f for f in self.families if f.get("domain") == domain]
 
-        for family in candidates:
-            canonical = family.get("canonical_text", "")
+        # ---- Exact fast path FIRST, across ALL candidates (P9 §2) ----
+        # Pure text normalization, no network at all — must run before
+        # any embedding attempt, same as the old per-candidate loop did
+        # implicitly (classify_claim_pair_detailed's own exact-check was
+        # always the first thing it did, per pair).
+        norm_claim = canonicalize_claim_text(claim_text)
+        if norm_claim:
+            for family in candidates:
+                canonical = family.get("canonical_text", "")
+                if canonical and canonicalize_claim_text(canonical) == norm_claim:
+                    if stats is not None:
+                        stats["exact_hits"] = stats.get("exact_hits", 0) + 1
+                        stats["linked"] = stats.get("linked", 0) + 1
+                    return self._link_member(family, claim_id, claim_text, log, verbose)
+
+        # ---- Batched embedding prefilter (P9 §3) ----
+        # ONE /api/embed call for the new claim + every candidate's
+        # canonical_text (skipping candidates with no canonical_text,
+        # same as the old loop's own "if not canonical: continue").
+        canonical_texts = [f.get("canonical_text", "") for f in candidates]
+        nonempty_idx = [i for i, c in enumerate(canonical_texts) if c]
+
+        similarities: Dict[int, float] = {}
+        if nonempty_idx:
+            texts_to_embed = [claim_text] + [canonical_texts[i] for i in nonempty_idx]
+            vectors = BeliefManager._embed_batch(texts_to_embed)
+
+            if stats is not None:
+                stats["embed_batches"] = stats.get("embed_batches", 0) + 1
+                stats["embedded_texts"] = stats.get("embedded_texts", 0) + len(texts_to_embed)
+                stats["prefilter_candidates"] = stats.get("prefilter_candidates", 0) + len(nonempty_idx)
+
+            if vectors is not None:
+                import numpy as np
+                claim_vec = vectors[0]
+                for offset, idx in enumerate(nonempty_idx):
+                    similarities[idx] = float(np.dot(claim_vec, vectors[offset + 1]))
+            # vectors is None (embedding endpoint failure): similarities
+            # stays empty -> classify_claim_pair() below gets
+            # precomputed_similarity=None for every candidate and falls
+            # through to its OWN per-pair embedding attempt, which will
+            # also fail the same way — identical fail-safe behavior to
+            # before (P9 §9), not a new fallback.
+
+        # ---- Decision loop in the SAME OLD registry order (P9 §4) ----
+        # First candidate that clears threshold + LLM judge + hardening
+        # wins — exactly the old per-pair classify_claim_pair() loop,
+        # just fed a precomputed similarity instead of recomputing one.
+        for i, family in enumerate(candidates):
+            canonical = canonical_texts[i]
             if not canonical:
                 continue
 
-            outcome = classify_claim_pair(canonical, claim_text)
-            if outcome in ("exact", "equivalent"):
-                # Idempotency: the same claim_id linked twice (e.g. a
-                # retry) must not duplicate itself in the members list.
-                already_member = any(
-                    m.get("claim_id") == claim_id for m in family.get("members", [])
-                )
-                if not already_member:
-                    family.setdefault("members", []).append({
-                        "claim_id": claim_id,
-                        "claim_text": claim_text,
-                        "linked_at": time.time(),
-                    })
-                    family["updated_at"] = time.time()
-                    self._save()
+            precomputed = similarities.get(i)
+            if stats is not None and precomputed is not None and precomputed >= EMBEDDING_PREFILTER_THRESHOLD:
+                stats["llm_judges"] = stats.get("llm_judges", 0) + 1
 
-                if verbose and log:
-                    log(
-                        f"[Claim Family] linked claim={claim_id} -> "
-                        f"family={family['family_id']} "
-                        f"(members={len(family.get('members', []))})"
-                    )
-                return family["family_id"]
+            outcome = classify_claim_pair(canonical, claim_text, precomputed_similarity=precomputed)
+            if outcome in ("exact", "equivalent"):
+                if stats is not None:
+                    stats["linked"] = stats.get("linked", 0) + 1
+                return self._link_member(family, claim_id, claim_text, log, verbose)
 
         # No match in this domain — create a new family.
         new_family = {
@@ -155,6 +238,9 @@ class ClaimFamilyRegistry:
         }
         self.families.append(new_family)
         self._save()
+
+        if stats is not None:
+            stats["created"] = stats.get("created", 0) + 1
 
         if verbose and log:
             log(f"[Claim Family] new family={new_family['family_id']} claim={claim_id}")

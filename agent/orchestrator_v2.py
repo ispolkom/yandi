@@ -58,6 +58,7 @@ from agent.orchestrator.claims.status import (
 from agent.orchestrator.claims.validation import apply_structural_claim_validation
 from agent.orchestrator.claims.lifecycle import (
     setup_claim_and_evidence_lifecycle,
+    assign_claim_family_identity,
     update_beliefs_link_answer_and_personality_cycle,
 )
 from agent.orchestrator.claims.async_pipeline import run_async_claim_pipeline
@@ -485,6 +486,19 @@ def process(
         # Phase 8: return value captured for the claim-graph shadow's
         # diagnostic comparison log only — no other reader.
         _claim_status_counts = classify_claim_epistemic_status(claims_data, log, verbose, evidence_data)
+
+        # P7 (Этап 4C, Finding A): claim family identity assignment MUST
+        # run before finalize_claim_trace_and_grounding() below — that
+        # function persists claims via trace.add_claim_raw() (and, since
+        # P5, indexes them into claim_verification_index), so
+        # claim["semantic_family_id"] has to already exist by then or it
+        # never reaches the persisted trace at all (confirmed live: this
+        # was previously called from update_beliefs_link_answer_and_
+        # personality_cycle(), AFTER finalize — semantic_family_id was
+        # structurally null on every non-cache-hit run this session).
+        assign_claim_family_identity(
+            claims_data, epistemic_result, is_subjective_answer, cost, log, verbose,
+        )
 
         # Final claim trace + epistemic grounding — extracted to
         # agent/orchestrator/claims/status.py (structural extraction;
