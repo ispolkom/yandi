@@ -290,6 +290,35 @@ def get_or_create_resource(
         return cur.lastrowid
 
 
+def find_observation_id_for_replay(conn, resource_id: int, origin_run_id: Optional[str]) -> Optional[int]:
+    """Resolves which SQL-side source_observation row a local_memory
+    replay pointed at (mandate §15's origin_observation_id FK), using
+    the JSON-side origin_trace_id the replay already carries
+    (agent.verification_memory's reconstructed evidence dicts —
+    origin_trace_id IS the original run's SQL run_id, same string).
+
+    Returns None whenever the origin run never wrote a SQL observation
+    for this resource — it predates SQL shadow-writing, the DB was
+    unreachable at the time, or (rare) a resource+run pairing that
+    genuinely never happened — same NULL result as before this
+    function existed, never fabricated. When more than one observation
+    of the same resource happened within the same origin run (e.g. a
+    recheck), the earliest one is treated as the replay's origin —
+    ambiguity here is a genuine V1 scope limit (mandate §14: not solving
+    NLP-grade provenance disambiguation inside a persistence migration),
+    not a correctness claim about which exact observation was replayed."""
+    if not origin_run_id:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT observation_id FROM source_observation "
+            "WHERE resource_id=%s AND run_id=%s ORDER BY observation_id ASC LIMIT 1",
+            (resource_id, origin_run_id),
+        )
+        row = cur.fetchone()
+        return row["observation_id"] if row else None
+
+
 def record_source_observation(
     conn, resource_id: int, run_id: str, observation_route: str,
     origin_observation_id: Optional[int] = None, observed_at=None,

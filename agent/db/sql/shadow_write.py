@@ -171,13 +171,12 @@ def shadow_record_claims_and_evidence(
     resources have no canonical identity source yet (V1 scope, same as
     agent.verification_memory.compute_stable_root()).
 
-    KNOWN LIMITATION (documented, not silently papered over):
-    origin_observation_id is NOT populated here — reconstructing which
-    SQL-side observation a local_memory replay pointed at would need a
-    resource+run+time lookup this pass didn't build. The JSON-side
-    provenance chain (origin_route/origin_trace_id/...) is unaffected;
-    only the SQL replay-chain FK stays NULL for now. See
-    agent/db/sql/MIGRATION_STATUS.md.
+    origin_observation_id (the SQL-side replay-chain FK): resolved via
+    repo.find_observation_id_for_replay(), using the JSON-side origin_
+    trace_id a local_memory replay already carries (== the original
+    run's SQL run_id). Resolves to None whenever the origin run has no
+    matching SQL observation (predates SQL shadow-writing, DB was down
+    then, etc.) — never fabricated, same as before this was wired.
 
     family_id linkage (claim_family/family_member) is deliberately NOT
     written from this bulk path either — claims_data doesn't carry
@@ -219,9 +218,13 @@ def shadow_record_claims_and_evidence(
                 resource_id = repo.get_or_create_resource(
                     conn, "internet", canonical_uri=canonical_uri, observed_at=ev.get("observed_at"),
                 )
+                origin_observation_id = (
+                    repo.find_observation_id_for_replay(conn, resource_id, ev.get("origin_trace_id"))
+                    if route == "local_memory" else None
+                )
                 observation_id = repo.record_source_observation(
                     conn, resource_id, run_id, route,
-                    origin_observation_id=None,  # see docstring: known limitation
+                    origin_observation_id=origin_observation_id,
                     observed_at=ev.get("observed_at"),
                     source_class=ev.get("source_class"),
                     quality_score=ev.get("quality_score"),
