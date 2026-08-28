@@ -186,8 +186,28 @@ def apply_claim_resolution_and_second_retrieval(
 
                 _t0_pass2_mapping_nli = time.time()
 
+                # P1-A (YANDI_AGENT_RETRIEVAL_PERFORMANCE_AUDIT.md §3,
+                # §19 item 1): PASS2 mapping/NLI must only touch the
+                # claims that actually triggered this retrieval pass
+                # (retrieval_claims) — claims already resolved at PASS1
+                # (effective direct+eligible supports/contradicts
+                # evidence) had no reason to be re-mapped or re-scored.
+                # Re-running NLI on an already-resolved claim is pure
+                # waste (nothing new was fetched for it) AND a proven
+                # correctness hazard: live_run.log showed cl_afff1e70,
+                # resolved PASS1 with relation=supports, silently
+                # flip to relation=uncertain against the SAME evidence
+                # on this redundant re-run — an already-resolved
+                # claim's relation must never change without a new
+                # reason (new evidence actually retrieved for it).
+                # Scoping to retrieval_claims here (not claims_data)
+                # is the actual fix — resolved claims are simply never
+                # passed into either function again, so their
+                # derived_from_evidence_ids / evidence_relations /
+                # verification_status / source_cluster references from
+                # PASS1 are left completely untouched.
                 mapped_claims = map_claims_to_evidence(
-                    claims_data,
+                    retrieval_claims,
                     evidence_data,
                 )
 
@@ -197,7 +217,7 @@ def apply_claim_resolution_and_second_retrieval(
                     if getattr(mc, "claim_id", None)
                 }
 
-                for claim in claims_data:
+                for claim in retrieval_claims:
                     claim_id = claim.get("claim_id")
                     mapped = mapped_by_id.get(claim_id)
 
@@ -214,11 +234,13 @@ def apply_claim_resolution_and_second_retrieval(
                 # -----------------------------------------------
                 #
                 # После второго retrieval Mapper уже обновил
-                # derived_from_evidence_ids.
+                # derived_from_evidence_ids — только для
+                # retrieval_claims (см. комментарий выше).
                 #
-                # Повторяем NLI через тот же batch helper.
+                # Повторяем NLI через тот же batch helper, тоже
+                # только для retrieval_claims.
                 claim_relation_count_pass2 = run_claim_evidence_batch(
-                    claims_data,
+                    retrieval_claims,
                     evidence_data,
                     "PASS2",
                     log,

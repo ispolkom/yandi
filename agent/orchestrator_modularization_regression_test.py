@@ -658,7 +658,16 @@ try:
     check("retrieval: fetch_cache threaded through unchanged", captured_retrieve_calls[0]["fetch_cache"] == "FAKE_CACHE")
     check("retrieval: cost[claim_retrieval_ms] recorded", "claim_retrieval_ms" in cost_r)
     check("retrieval: evidence_data merged/grew by the retrieved evidence", len(out_evidence) == 2, str(out_evidence))
-    check("retrieval: mapper PASS2 triggered (added_count>0), called over ALL claims_data (not just retrieval_claims)", map_calls == [3], str(map_calls))
+    # P1-A (YANDI_AGENT_RETRIEVAL_PERFORMANCE_AUDIT.md §3): this used to
+    # assert the OLD, buggy behavior (mapper called over all 3 claims,
+    # including the already-resolved one) as "behavior unchanged" from
+    # the structural extraction. That behavior was the actual bug -
+    # PASS2 re-mapping/re-scoring claims that never needed it, proven
+    # live to silently flip an already-resolved claim's relation
+    # (supports -> uncertain) on the pointless re-run. The fix scopes
+    # PASS2 mapping/NLI to retrieval_claims only ("need1"), so this now
+    # asserts the corrected, intended contract.
+    check("retrieval: mapper PASS2 scoped to retrieval_claims only (not resolved/rejected claims)", map_calls == [1], str(map_calls))
     check("retrieval: PASS2 batch NLI triggered with label PASS2", batch_calls == ["PASS2"])
     check("retrieval: cost[claim_pass2_mapping_nli_ms] recorded", "claim_pass2_mapping_nli_ms" in cost_r)
     check("retrieval: derived_from_evidence_ids written for the retrieved claim", claims_r[2]["derived_from_evidence_ids"] == ["new_ev1"])
