@@ -269,6 +269,27 @@ install_systemd_unit() {
 #    non-empty datadir rather than risking data loss)
 # ============================================================
 initialize_datadir() {
+    # Stop any currently-running instance FIRST, unconditionally.
+    #
+    # Live-confirmed bug (repeated debugging attempts): `rm -rf`'ing the
+    # datadir out from under an ALREADY-RUNNING yandi-db.service
+    # (started by an EARLIER invocation of this same script) leaves
+    # that old process still serving its own orphaned-but-open file
+    # handles, while a brand new `mysqld --initialize` writes fresh
+    # files that nobody is serving. start_service()'s `systemctl enable
+    # --now` is a NO-OP when the unit is already active, so the stale
+    # process never gets replaced — Phase B then reads the LATEST temp
+    # password (correctly, from the fresh --initialize) but connects to
+    # the socket of the OLD, still-running process, which has different
+    # credentials/state -> "Access denied" with a real-looking password.
+    # Stopping here guarantees start_service() always performs a
+    # genuine fresh start against whatever ends up on disk, regardless
+    # of how many times a human clears the datadir between invocations.
+    if systemctl is-active --quiet yandi-db 2>/dev/null; then
+        log "yandi-db.service is currently active — stopping it before inspecting/touching the datadir"
+        systemctl stop yandi-db
+    fi
+
     if [ -n "$(ls -A "$DATADIR" 2>/dev/null)" ]; then
         # Non-empty is only safe to skip when it actually LOOKS LIKE a
         # real, previously-initialized MySQL datadir (mandate: "non-empty

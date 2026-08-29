@@ -205,6 +205,28 @@ check(
     "disk-consuming mysqld --initialize call, not only once early in the script",
     script_text.count("disk_gate") >= 2,
 )
+
+# Live-confirmed bug (repeated debugging attempts): rm -rf'ing the
+# datadir while yandi-db.service was still running from an earlier
+# invocation left that stale process serving the socket while a fresh
+# --initialize wrote files nobody loaded — start_service()'s `systemctl
+# enable --now` is a no-op on an already-active unit, so the daemon
+# never picked up the new datadir, and Phase B authenticated against
+# the wrong (stale) running instance.
+_init_fn_body = script_text.split("initialize_datadir() {", 1)[1].split("\n}\n", 1)[0]
+check(
+    "initialize_datadir() stops yandi-db.service FIRST (before inspecting/"
+    "touching the datadir), so start_service() always performs a genuine "
+    "fresh start against whatever ends up on disk — never leaves a stale "
+    "process serving an old datadir after a fresh re-initialize",
+    "systemctl is-active --quiet yandi-db" in _init_fn_body
+    and "systemctl stop yandi-db" in _init_fn_body,
+    f"initialize_datadir body missing the stop-first guard",
+)
+check(
+    "the service-stop guard runs BEFORE the non-empty-datadir check, not after",
+    _init_fn_body.index("systemctl stop yandi-db") < _init_fn_body.index('ls -A "$DATADIR"'),
+)
 check(
     "install script's OS-identity/filesystem/config steps are idempotent (id check, "
     "install -d, existence check before writing config) — safe to re-run",
