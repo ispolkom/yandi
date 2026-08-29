@@ -1,6 +1,28 @@
 # SQL persistence migration — status (Этап 5)
 
-Read this before touching anything in `agent/db/sql/`.
+Read this before touching anything in `agent/db/sql/`. **Read
+`SQL_DEPLOYMENT_DEFERRED.md` FIRST** if you're about to touch
+`agent/db/sql/security_*.py`, `bootstrap.py`, `deploy/`, or start
+thinking about 5F — it's the 30-second version of "what's designed,
+what needs owner-sudo, what not to touch," so this file doesn't need
+to repeat it in full below.
+
+## Canonical status
+
+| Stage | What | Status |
+|---|---|---|
+| 5E | SQL shadow wiring | DONE |
+| 5E-S | SQL Bastion (offline design + regression) | DONE |
+| 5E-S2 | Dedicated DB design/audit | DONE |
+| 5E-S2-LIVE | Privileged deployment | BLOCKED / DEFERRED |
+| 5F | JSON↔SQL equivalence | NOT STARTED |
+| RESET | Clearing old runtime history | FORBIDDEN |
+
+**The SQL Bastion work is deliberately shelved here** — the project
+owner's own words: "SQL-бастион теперь можно спокойно положить на
+полку до момента, когда реально понадобится canonical cutover." The
+next SQL-related task is not "finish the installer" — see
+`SQL_DEPLOYMENT_DEFERRED.md` §3 for the explicit do-not-touch list.
 
 ## Current phase: 5E-S2 (DEDICATED DATABASE APPLIANCE) — design/audit only, NOT deployed
 
