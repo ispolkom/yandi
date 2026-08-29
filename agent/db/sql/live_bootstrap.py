@@ -198,13 +198,29 @@ def _probe_temp_password_auth(socket_path: str, temp_password: str) -> str:
     it impossible to tell a wrong-password bug from a normal, expected
     sandbox restriction.
 
+    Live-confirmed bug (eleventh Phase B attempt): TEMP_SOURCE_FP,
+    MARKER_FP, and PYTHON_FP all matched EXACTLY (three separate live
+    runs), proving the captured password reaches this function
+    byte-for-byte correct, yet auth still failed with 1045. Root cause:
+    an owner-run manual `mysql -u root ...` with NO password supplied
+    at all (no -p, no MYSQL_PWD) still reported "Access denied (using
+    password: YES)" — proof root@localhost's authentication was
+    picking up a password from an AMBIENT config file (a global
+    /etc/my.cnf or the invoking (root) user's own ~/.my.cnf), which
+    every mysql CLI invocation reads by default unless told not to.
+    --no-defaults (must be the FIRST argument, same positional
+    requirement as mysqld's own --defaults-file) disables ALL config-
+    file reading, leaving ONLY the explicit --socket/--user CLI flags
+    and the MYSQL_PWD environment variable in effect — eliminating
+    this entire class of "correct value, wrong result" interference.
+
     Returns one of the three module-level TEMP_PASSWORD_AUTH_* constants.
     """
     if not _MYSQL_CLIENT_BIN:
         return TEMP_PASSWORD_AUTH_UNEXPECTED
 
     result = subprocess.run(
-        [_MYSQL_CLIENT_BIN, f"--socket={socket_path}", "--user=root",
+        [_MYSQL_CLIENT_BIN, "--no-defaults", f"--socket={socket_path}", "--user=root",
          "--connect-expired-password", "-Nse", "SELECT 1;"],
         env={**os.environ, "MYSQL_PWD": temp_password},
         capture_output=True, text=True, timeout=10,
@@ -294,7 +310,7 @@ def _retire_temporary_root_password(socket_path: str, temp_password: str):
     # real, SEPARATE ALTER USER conversion.
 
     result = subprocess.run(
-        [_MYSQL_CLIENT_BIN, f"--socket={socket_path}", "--user=root",
+        [_MYSQL_CLIENT_BIN, "--no-defaults", f"--socket={socket_path}", "--user=root",
          "--connect-expired-password", "-e", _ALTER_ROOT_TO_AUTH_SOCKET_SQL],
         env={**os.environ, "MYSQL_PWD": temp_password},
         capture_output=True, text=True, timeout=10,
@@ -319,11 +335,18 @@ def _root_reachable_via_auth_socket(socket_path: str) -> bool:
     succeed (true here: install-yandi.sh always invokes this under
     sudo). Uses the mysql CLI, same as _retire_temporary_root_password(),
     so this module's root-auth surface stays in one place rather than
-    also involving pymysql for this one check."""
+    also involving pymysql for this one check.
+
+    --no-defaults (see _probe_temp_password_auth()'s docstring for the
+    live-confirmed bug this closes): without it, an ambient /root/
+    .my.cnf or global config could supply an unwanted password here
+    too, potentially masking a genuinely-working auth_socket path
+    behind a stale/wrong stored credential instead of the intended
+    passwordless peer-credential check."""
     if not _MYSQL_CLIENT_BIN:
         return False
     result = subprocess.run(
-        [_MYSQL_CLIENT_BIN, f"--socket={socket_path}", "--user=root", "-e", "SELECT 1;"],
+        [_MYSQL_CLIENT_BIN, "--no-defaults", f"--socket={socket_path}", "--user=root", "-e", "SELECT 1;"],
         capture_output=True, text=True, timeout=10,
     )
     return result.returncode == 0

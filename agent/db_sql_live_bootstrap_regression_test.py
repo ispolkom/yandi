@@ -535,6 +535,35 @@ check(
 )
 
 
+# ============================================================
+# F. Eleventh Phase B attempt: --no-defaults on every mysql CLI
+# invocation, positioned FIRST (same positional requirement as
+# mysqld's own --defaults-file). Live-confirmed bug: TEMP_SOURCE_FP/
+# MARKER_FP/PYTHON_FP matched EXACTLY across three separate live runs
+# yet auth still failed with 1045 — root cause was an AMBIENT config
+# file (root's own ~/.my.cnf or a global my.cnf) supplying an unwanted
+# password that mysql CLI reads by default. --no-defaults disables all
+# config-file reading, leaving only explicit CLI flags/env vars.
+# ============================================================
+
+_probe_src = inspect.getsource(lb_mod._probe_temp_password_auth)
+_retire_src = inspect.getsource(lb_mod._retire_temporary_root_password)
+_reachable_src = inspect.getsource(lb_mod._root_reachable_via_auth_socket)
+
+for _label, _src in (
+    ("_probe_temp_password_auth() (the SELECT 1 probe)", _probe_src),
+    ("_retire_temporary_root_password() (the ALTER USER call)", _retire_src),
+    ("_root_reachable_via_auth_socket() (the Case B probe)", _reachable_src),
+):
+    check(
+        f"F: {_label} passes --no-defaults to the mysql CLI, as the FIRST "
+        f"argument after the binary path (same positional requirement as "
+        f"mysqld's own --defaults-file bug found earlier this mandate)",
+        "_MYSQL_CLIENT_BIN, \"--no-defaults\"," in _src,
+        f"source snippet did not contain the expected argv ordering",
+    )
+
+
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")
 if FAIL:
