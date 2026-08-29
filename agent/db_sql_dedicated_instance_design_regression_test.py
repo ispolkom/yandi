@@ -26,10 +26,11 @@ Covers:
       DB-level bootstrap hand-off is a documented STUB that refuses to
       proceed (raises via `die`) rather than silently attempting
       something undecided.
-    - Neither artifact has been applied: no yandi-db OS user exists,
-      no /var/lib/yandi paths exist, no yandi-db systemd unit is
-      installed — confirms this pass stayed non-privileged/design-only
-      end to end.
+    - Host provisioning state is printed for orientation (informational
+      only, not pass/fail) — after the owner's first real Phase A run
+      (YANDI DATABASE BOOTSTRAP V1) this host legitimately has yandi-db/
+      /var/lib/yandi/the systemd unit, so asserting their absence is no
+      longer a meaningful regression signal.
     - storage_policy.py's core invariant (no history deletion) still
       holds after this pass's additional prose referencing it
       elsewhere (defensive re-check, cheap to run).
@@ -39,6 +40,7 @@ Run: /home/iam/venv/bin/python3 -m agent.db_sql_dedicated_instance_design_regres
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -243,21 +245,50 @@ check(
     "temporary password" in script_text or "temporary root password" in script_text,
 )
 
-
-# ============================================================
-# Nothing was actually applied — confirms this pass stayed
-# non-privileged/design-only end to end.
-# ============================================================
-
-check("NO yandi-db OS user was created by this pass", subprocess.run(["id", "yandi-db"], capture_output=True).returncode != 0)
-check("NO /var/lib/yandi directory exists (nothing was provisioned)", not os.path.exists("/var/lib/yandi"))
-check("NO /etc/yandi directory exists", not os.path.exists("/etc/yandi"))
-check("NO /run/yandi directory exists", not os.path.exists("/run/yandi"))
-check(
-    "NO yandi-db systemd unit is installed (the unit file in this repo was never "
-    "copied to /etc/systemd/system/)",
-    not os.path.exists("/etc/systemd/system/yandi-db.service"),
+# Live-confirmed bug (first real owner run): --defaults-file was NOT the
+# first argument to mysqld --initialize, so mysqld silently ignored
+# $CONFIG_FILE entirely and fell back to system defaults — proven live by
+# mysqld trying to open /var/log/mysql/error.log (permission denied) and
+# warning about utf8mb3 instead of the configured utf8mb4. mysqld's own
+# option parser only honors --defaults-file in argv[1].
+_code_only_text = "\n".join(
+    line for line in script_text.splitlines() if not line.strip().startswith("#")
 )
+_init_call_match = re.search(
+    r"mysqld\s+((?:--\S+\s+)*)--initialize\b", _code_only_text,
+)
+check(
+    "mysqld --initialize is invoked with --defaults-file as the FIRST "
+    "argument (mysqld only honors --defaults-file in argv[1] — placed "
+    "anywhere else, the whole config file is silently ignored)",
+    _init_call_match is not None
+    and _init_call_match.group(1).strip().startswith("--defaults-file="),
+    f"match={_init_call_match.group(0) if _init_call_match else None!r}",
+)
+
+
+# ============================================================
+# Host-provisioning check — INFORMATIONAL ONLY, not pass/fail.
+# ============================================================
+#
+# Originally this section asserted NOTHING was provisioned, proving the
+# 5E-S2 design pass stayed non-privileged end to end. That invariant
+# only holds up until the owner's first real `sudo ./deploy/install-
+# yandi.sh --database-only` run (YANDI DATABASE BOOTSTRAP V1 Phase A) —
+# after that, yandi-db/​/var/lib/yandi/​the systemd unit are SUPPOSED to
+# exist on this host, and asserting their absence would be a permanent,
+# meaningless failure rather than a real regression signal. This is now
+# a status print for orientation only; live isolation/identity/schema
+# proofs live in the DATABASE BOOTSTRAP V1 Phase 2 live-verification
+# report, not here (this file stays a static-artifact check).
+_provisioned = {
+    "yandi-db OS user": subprocess.run(["id", "yandi-db"], capture_output=True).returncode == 0,
+    "/var/lib/yandi": os.path.exists("/var/lib/yandi"),
+    "/etc/yandi": os.path.exists("/etc/yandi"),
+    "/run/yandi": os.path.exists("/run/yandi"),
+    "yandi-db.service unit": os.path.exists("/etc/systemd/system/yandi-db.service"),
+}
+print(f"INFO host provisioning state (not a pass/fail signal): {_provisioned}")
 
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")
