@@ -255,9 +255,25 @@ install_systemd_unit() {
 # ============================================================
 initialize_datadir() {
     if [ -n "$(ls -A "$DATADIR" 2>/dev/null)" ]; then
-        log "datadir $DATADIR is not empty — assuming already initialized, skipping --initialize"
-        return
+        # Non-empty is only safe to skip when it actually LOOKS LIKE a
+        # real, previously-initialized MySQL datadir (mandate: "non-empty
+        # UNKNOWN datadir => STOP", not "non-empty => assume fine").
+        # ibdata1 + mysql/ are the two things every mysqld --initialize
+        # always creates — their absence means this is some other,
+        # unidentified content this script has no business guessing about.
+        if [ -f "${DATADIR}/ibdata1" ] && [ -d "${DATADIR}/mysql" ]; then
+            log "datadir $DATADIR is non-empty and looks like an already-initialized MySQL datadir — skipping --initialize"
+            return
+        fi
+        die "datadir $DATADIR is non-empty but does NOT look like a valid MySQL datadir (missing ibdata1 and/or mysql/) — refusing to guess whether it is safe to initialize over. Investigate manually and clear or relocate it before re-running (mandate: ambiguous state -> STOP, never auto-resolve)."
     fi
+
+    # Re-check storage state with a CURRENT reading immediately before the
+    # actual disk-consuming operation — the early disk_gate call above
+    # (step 2) is a fast fail-fast check, several idempotent/cheap steps
+    # ago; this is the authoritative gate right before mysqld writes data.
+    disk_gate
+
     mysqld --initialize --user="$YANDI_DB_USER" --datadir="$DATADIR" \
         --defaults-file="$CONFIG_FILE" 2>&1 | tee -a "$ERROR_LOG"
     log "datadir initialized — a one-time temporary root password was written to $ERROR_LOG (grep for 'temporary password')"
@@ -314,6 +330,18 @@ run_python_bootstrap() {
 }
 
 main() {
+    # Required, not cosmetic: makes explicit AT THE CALL SITE — not just
+    # implicit in this script's own steps — that this installer only
+    # ever provisions the dedicated YANDI database appliance
+    # (/var/lib/yandi, yandi-db OS user/service) and never touches the
+    # shared FastPanel mysql.service. No other mode exists yet (there is
+    # only one thing this script does), so this doesn't change any step
+    # below — it just refuses to run silently without the owner typing
+    # the explicit, self-documenting flag.
+    if [ "${1:-}" != "--database-only" ]; then
+        die "usage: sudo $0 --database-only (flag required — this installer only ever provisions the dedicated YANDI database appliance, never the shared FastPanel mysql.service)"
+    fi
+
     log "=== YANDI dedicated database appliance installer (DESIGN — review before running) ==="
     precheck
     disk_gate
