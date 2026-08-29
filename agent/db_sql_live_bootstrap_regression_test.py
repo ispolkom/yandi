@@ -170,27 +170,44 @@ class _FakeConn:
 
 
 class _FakeCompletedProcess:
-    def __init__(self, returncode=0, stderr=""):
+    def __init__(self, returncode=0, stderr="", stdout=""):
         self.returncode = returncode
         self.stderr = stderr
-        self.stdout = ""
+        self.stdout = stdout
 
 
-def _fake_mysql_cli_run(calls_log, root_converted_flag, probe_ok=True, alter_ok=True):
-    """Stand-in for subprocess.run(), covering ALL THREE mysql CLI call
-    sites in live_bootstrap.py: _probe_temp_password_auth()'s SELECT 1
-    (Case A, run BEFORE the real conversion), _retire_temporary_root_
-    password()'s ALTER USER (Case A, run only if the probe passed), and
-    _root_reachable_via_auth_socket()'s SELECT 1 (Case B/C) — the
-    latter two share the same "SELECT 1"-shaped argv as the Case A
-    probe, so one probe_ok flag controls all SELECT-1-shaped calls
-    generically. alter_ok independently controls the ALTER USER call,
-    letting tests simulate "auth succeeded but the ALTER USER itself
-    failed" (AUTH_SOCKET_CONVERSION_FAILED) distinctly from "auth
-    itself failed" (TEMP_PASSWORD_AUTH_FAILED)."""
+def _fake_mysql_cli_run(
+    calls_log, root_converted_flag, probe_ok=True, alter_ok=True,
+    plugin_initially_active=False, plugin_install_ok=True,
+    plugin_active_after_install=True, exit_sandbox_ok=True,
+    verification_ok=True,
+):
+    """Stand-in for subprocess.run(), covering EVERY mysql CLI call
+    site in live_bootstrap.py's full auth_socket bootstrap sequence
+    (twelfth Phase B attempt fix):
+        1. _probe_temp_password_auth()'s SELECT 1 (Case A) / same
+           statement shape reused by _root_reachable_via_auth_socket()
+           (Case B/C, and the final post-conversion verification) —
+           one probe_ok/verification_ok pair controls these.
+        2. the THROWAWAY `ALTER USER ... IDENTIFIED BY '...'` that
+           exits password-expiration sandbox mode (exit_sandbox_ok).
+        3. the `SELECT PLUGIN_STATUS FROM INFORMATION_SCHEMA.PLUGINS`
+           check (stateful: starts at plugin_initially_active, flips
+           to True after a successful INSTALL PLUGIN if
+           plugin_active_after_install).
+        4. `INSTALL PLUGIN auth_socket SONAME 'auth_socket.so'`
+           (plugin_install_ok).
+        5. the REAL `ALTER USER ... IDENTIFIED WITH auth_socket`
+           (alter_ok) — distinct from statement 2, which uses
+           IDENTIFIED BY (a password), not IDENTIFIED WITH (a plugin).
+    """
+    state = {"plugin_active": plugin_initially_active}
+
     def _run(args, env=None, **kwargs):
         calls_log.append({"args": args, "env": env})
-        if any("ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket" in a for a in args):
+        joined = " ".join(args)
+
+        if "IDENTIFIED WITH auth_socket" in joined:
             if alter_ok:
                 root_converted_flag[0] = True
                 return _FakeCompletedProcess(returncode=0)
@@ -198,11 +215,36 @@ def _fake_mysql_cli_run(calls_log, root_converted_flag, probe_ok=True, alter_ok=
                 returncode=1,
                 stderr="ERROR 1524 (HY000): Plugin 'auth_socket' is not loaded",
             )
-        if any("SELECT 1" in a for a in args):
+
+        if "IDENTIFIED BY" in joined:
+            # the throwaway password, exits sandbox mode
+            if exit_sandbox_ok:
+                return _FakeCompletedProcess(returncode=0)
             return _FakeCompletedProcess(
-                returncode=0 if probe_ok else 1,
-                stderr="" if probe_ok else "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)",
+                returncode=1,
+                stderr="ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)",
             )
+
+        if "PLUGIN_STATUS FROM INFORMATION_SCHEMA.PLUGINS" in joined:
+            return _FakeCompletedProcess(returncode=0, stdout="ACTIVE" if state["plugin_active"] else "")
+
+        if "INSTALL PLUGIN auth_socket" in joined:
+            if not plugin_install_ok:
+                return _FakeCompletedProcess(
+                    returncode=1,
+                    stderr="ERROR 1126 (HY000): Can't open shared library 'auth_socket.so'",
+                )
+            if plugin_active_after_install:
+                state["plugin_active"] = True
+            return _FakeCompletedProcess(returncode=0)
+
+        if "SELECT 1" in joined:
+            ok = probe_ok if not root_converted_flag[0] else verification_ok
+            return _FakeCompletedProcess(
+                returncode=0 if ok else 1,
+                stderr="" if ok else "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)",
+            )
+
         return _FakeCompletedProcess(returncode=0)
     return _run
 
@@ -246,22 +288,40 @@ with tempfile.TemporaryDirectory() as tmpdir:
         not os.path.exists(marker_path),
     )
 
-    _alter_calls = [c for c in _mysql_cli_calls if any("ALTER USER" in a for a in c["args"])]
-    check("C1: exactly one mysql CLI ALTER USER invocation happened", len(_alter_calls) == 1)
+    _throwaway_calls = [c for c in _mysql_cli_calls if any("IDENTIFIED BY" in a for a in c["args"])]
+    _alter_calls = [c for c in _mysql_cli_calls if any("IDENTIFIED WITH auth_socket" in a for a in c["args"])]
+    _install_calls = [c for c in _mysql_cli_calls if any("INSTALL PLUGIN auth_socket" in a for a in c["args"])]
+    check("C1: exactly one throwaway sandbox-exit ALTER USER (IDENTIFIED BY) happened", len(_throwaway_calls) == 1)
+    check("C1: exactly one auth_socket plugin INSTALL happened (was not already active)", len(_install_calls) == 1)
+    check("C1: exactly one REAL ALTER USER ... IDENTIFIED WITH auth_socket invocation happened", len(_alter_calls) == 1)
     _cli_call = _alter_calls[0] if _alter_calls else {"args": [], "env": {}}
     check(
-        "C1: the mysql CLI call targets the right socket and carries the "
-        "ALTER USER auth_socket statement",
+        "C1: the REAL ALTER USER call targets the right socket and carries "
+        "the auth_socket statement",
         any(a == "--socket=/run/yandi/mysql.sock" for a in _cli_call["args"])
         and any("ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket" in a for a in _cli_call["args"]),
         f"args={_cli_call['args']}",
     )
     check(
-        "C1: the temp password reaches the mysql CLI ONLY via MYSQL_PWD env "
-        "(never as a -p<password> CLI argument visible to `ps`)",
-        (_cli_call["env"] or {}).get("MYSQL_PWD") == "initial-temp-pw-123"
-        and not any("initial-temp-pw-123" in a for a in _cli_call["args"]),
-        f"env_has_pwd={'MYSQL_PWD' in (_cli_call['env'] or {})} args={_cli_call['args']}",
+        "C1: the ORIGINAL temp password reaches the mysql CLI ONLY via the "
+        "throwaway-ALTER call's MYSQL_PWD env (never as a CLI argument "
+        "visible to `ps`, and never reused for the REAL auth_socket ALTER, "
+        "which correctly uses the throwaway password instead)",
+        (_throwaway_calls[0]["env"] or {}).get("MYSQL_PWD") == "initial-temp-pw-123"
+        and not any(
+            "initial-temp-pw-123" in a
+            for c in _mysql_cli_calls
+            for a in c["args"]
+        ),
+        f"throwaway_env={_throwaway_calls[0]['env']!r}",
+    )
+    check(
+        "C1: the REAL auth_socket ALTER call's MYSQL_PWD is the THROWAWAY "
+        "password, not the original temp password (proves the sandbox-exit "
+        "step's password is actually being used downstream, not discarded)",
+        (_cli_call["env"] or {}).get("MYSQL_PWD") not in (None, "initial-temp-pw-123")
+        and (_cli_call["env"] or {}).get("MYSQL_PWD") == (_install_calls[0]["env"] or {}).get("MYSQL_PWD"),
+        f"real_alter_env_pwd_set={'MYSQL_PWD' in (_cli_call['env'] or {})}",
     )
     check("C1: run() records the instance identity in the database", conn1.instance_row == result1["instance_uuid"])
     check("C1: run_bootstrap()'s runtime_auth_mode is 'auth_socket' (not password)", result1["bootstrap"]["runtime_auth_mode"] == "auth_socket")
@@ -422,9 +482,10 @@ with tempfile.TemporaryDirectory() as tmpdir:
         f"raised={raised_c5} err={_c5_err if raised_c5 else None!r}",
     )
     check(
-        "C5: the error message proves auth succeeded (references "
-        "MYSQL_AUTH=... above it) rather than re-blaming the credential",
-        raised_c5 and "authentication itself succeeded" in _c5_err,
+        "C5: the error message references the plugin status reached "
+        "(proving auth + plugin steps both succeeded) rather than "
+        "re-blaming the credential",
+        raised_c5 and "the plugin is" in _c5_err and "AUTH_SOCKET_PLUGIN" in _c5_err,
     )
 
     # The real secret value used in this test scenario must NEVER
@@ -434,6 +495,135 @@ with tempfile.TemporaryDirectory() as tmpdir:
         "password value used in these test scenarios",
         "some-temp-pw-for-c4" not in _c4_err and "some-temp-pw-for-c5" not in _c5_err,
     )
+
+
+# ============================================================
+# C6-C10: twelfth Phase B attempt — auth_socket plugin lifecycle.
+# Live-confirmed bug: ERROR 1524 (HY000) "Plugin 'auth_socket' is not
+# loaded" surfaced only AFTER auth succeeded and the ALTER USER
+# statement was accepted by the sandbox-mode gate — a completely
+# different failure class than a credential mismatch, requiring its
+# own explicit states (mandate: no general "bootstrap failed" catch-all).
+# ============================================================
+
+def _run_with_plugin_scenario(**plugin_kwargs):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        marker_path = os.path.join(tmpdir, "fresh_init_temp_password")
+        with open(marker_path, "w", encoding="utf-8") as f:
+            f.write("plugin-scenario-temp-pw")
+        instance_id_file = os.path.join(tmpdir, "instance.id")
+        secrets_dir = os.path.join(tmpdir, "keys")
+
+        conn = _FakeConn()
+        ctx, _ = _install_fake_pymysql(conn)
+        calls = []
+        converted = [False]
+        with ctx, \
+             patch.object(lb_mod, "_MYSQL_CLIENT_BIN", "/usr/bin/mysql"), \
+             patch.object(lb_mod.subprocess, "run", _fake_mysql_cli_run(calls, converted, **plugin_kwargs)):
+            raised = False
+            err = None
+            try:
+                run(
+                    socket_path="/run/yandi/mysql/mysql.sock", fresh_init_marker=marker_path,
+                    instance_id_file=instance_id_file, secrets_dir=secrets_dir,
+                    agent_os_user="iam", created_by_host="test-host",
+                )
+            except LiveBootstrapError as e:
+                raised = True
+                err = str(e)
+        return raised, err, calls, converted[0]
+
+# C6: plugin already ACTIVE -> INSTALL PLUGIN is skipped entirely.
+_raised, _err, _calls, _converted = _run_with_plugin_scenario(plugin_initially_active=True)
+_install_calls_c6 = [c for c in _calls if any("INSTALL PLUGIN auth_socket" in a for a in c["args"])]
+check(
+    "C6: plugin already ACTIVE -> INSTALL PLUGIN auth_socket is NEVER "
+    "attempted, conversion still succeeds",
+    not _raised and _converted and len(_install_calls_c6) == 0,
+    f"raised={_raised} err={_err} install_calls={len(_install_calls_c6)}",
+)
+
+# C7: auth_socket.so missing (INSTALL PLUGIN reports a missing shared
+# library) -> AUTH_SOCKET_PLUGIN_NOT_FOUND, fail closed.
+_raised, _err, _calls, _converted = _run_with_plugin_scenario(plugin_install_ok=False)
+check(
+    "C7: auth_socket.so missing/unreadable -> AUTH_SOCKET_PLUGIN_NOT_FOUND, "
+    "fail closed, real ALTER USER never attempted",
+    _raised and "AUTH_SOCKET_PLUGIN_NOT_FOUND" in _err and not _converted,
+    f"raised={_raised} err={_err}",
+)
+
+# C8: INSTALL PLUGIN fails for a reason OTHER than a missing .so ->
+# AUTH_SOCKET_PLUGIN_INSTALL_FAILED.
+def _fake_mysql_cli_run_generic_install_failure(calls_log, root_converted_flag):
+    def _run(args, env=None, **kwargs):
+        calls_log.append({"args": args, "env": env})
+        joined = " ".join(args)
+        if "IDENTIFIED BY" in joined:
+            return _FakeCompletedProcess(returncode=0)
+        if "PLUGIN_STATUS FROM INFORMATION_SCHEMA.PLUGINS" in joined:
+            return _FakeCompletedProcess(returncode=0, stdout="")
+        if "INSTALL PLUGIN auth_socket" in joined:
+            return _FakeCompletedProcess(returncode=1, stderr="ERROR 1045 (28000): some other server-side failure")
+        if "SELECT 1" in joined:
+            return _FakeCompletedProcess(returncode=0)
+        return _FakeCompletedProcess(returncode=0)
+    return _run
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    marker_path = os.path.join(tmpdir, "fresh_init_temp_password")
+    with open(marker_path, "w", encoding="utf-8") as f:
+        f.write("plugin-scenario-temp-pw-2")
+    instance_id_file = os.path.join(tmpdir, "instance.id")
+    secrets_dir = os.path.join(tmpdir, "keys")
+    conn = _FakeConn()
+    ctx, _ = _install_fake_pymysql(conn)
+    with ctx, \
+         patch.object(lb_mod, "_MYSQL_CLIENT_BIN", "/usr/bin/mysql"), \
+         patch.object(lb_mod.subprocess, "run", _fake_mysql_cli_run_generic_install_failure([], [False])):
+        _raised8 = False
+        _err8 = None
+        try:
+            run(
+                socket_path="/run/yandi/mysql/mysql.sock", fresh_init_marker=marker_path,
+                instance_id_file=instance_id_file, secrets_dir=secrets_dir,
+                agent_os_user="iam", created_by_host="test-host",
+            )
+        except LiveBootstrapError as e:
+            _raised8 = True
+            _err8 = str(e)
+check(
+    "C8: INSTALL PLUGIN fails for a non-missing-library reason -> "
+    "AUTH_SOCKET_PLUGIN_INSTALL_FAILED",
+    _raised8 and "AUTH_SOCKET_PLUGIN_INSTALL_FAILED" in _err8,
+    f"raised={_raised8} err={_err8}",
+)
+
+# C9: INSTALL PLUGIN reports success but plugin never actually becomes
+# ACTIVE -> AUTH_SOCKET_PLUGIN_NOT_ACTIVE, ambiguous state, fail closed.
+_raised, _err, _calls, _converted = _run_with_plugin_scenario(plugin_active_after_install=False)
+check(
+    "C9: INSTALL PLUGIN succeeds but a follow-up check finds it still "
+    "not ACTIVE -> AUTH_SOCKET_PLUGIN_NOT_ACTIVE, fail closed",
+    _raised and "AUTH_SOCKET_PLUGIN_NOT_ACTIVE" in _err and not _converted,
+    f"raised={_raised} err={_err}",
+)
+
+# C10: the REAL ALTER USER succeeds but the POST-conversion passwordless
+# verification connection fails -> AUTH_SOCKET_VERIFICATION_FAILED
+# (mandate: never trust the ALTER USER's own success alone).
+_raised, _err, _calls, _converted = _run_with_plugin_scenario(verification_ok=False)
+check(
+    "C10: ALTER USER succeeds but the post-conversion passwordless "
+    "verification connection fails -> AUTH_SOCKET_VERIFICATION_FAILED "
+    "(the ALTER USER's own reported success is never trusted alone)",
+    _raised and "AUTH_SOCKET_VERIFICATION_FAILED" in _err,
+    f"raised={_raised} err={_err} converted={_converted}",
+)
+
+# C1 happy path already proves: plugin-not-active -> INSTALL -> ACTIVE ->
+# real ALTER USER -> verification succeeds -> AUTH_SOCKET_READY.
 
 
 # ============================================================
