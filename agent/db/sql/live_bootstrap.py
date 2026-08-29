@@ -87,13 +87,24 @@ def extract_temporary_root_password(error_log_path: str) -> Optional[str]:
     function never writes it anywhere, never logs it, and the error log
     file itself is left completely untouched (mandate §32: this
     function only READS a secret that's already unavoidably on disk in
-    Percona's own log; it does not make that exposure worse)."""
+    Percona's own log; it does not make that exposure worse).
+
+    Live-confirmed bug (fourth Phase B attempt, after several earlier
+    failed attempts in the same debugging session): install-yandi.sh's
+    initialize_datadir() pipes mysqld's output through `tee -a
+    "$ERROR_LOG"` — APPEND, never truncate/rotate — so after more than
+    one real `mysqld --initialize` run (e.g. a failed attempt followed
+    by `rm -rf` + retry), this log accumulates MULTIPLE "temporary
+    password is generated for root@localhost: ..." lines, one per past
+    initialize. The FIRST such line belongs to a datadir that may no
+    longer even exist; only the LAST one is valid for the CURRENT
+    datadir/root account. Returns the LAST match, not the first."""
     if not os.path.exists(error_log_path):
         return None
     with open(error_log_path, "r", encoding="utf-8", errors="replace") as f:
         text = f.read()
-    match = _TEMP_PASSWORD_RE.search(text)
-    return match.group(1) if match else None
+    matches = list(_TEMP_PASSWORD_RE.finditer(text))
+    return matches[-1].group(1) if matches else None
 
 
 def save_protected_secret(path: str, value: str) -> None:
