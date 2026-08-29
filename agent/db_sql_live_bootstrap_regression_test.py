@@ -170,7 +170,20 @@ def _install_fake_pymysql(fake_conn: _FakeConn):
     fake_pymysql = MagicMock()
     fake_pymysql.cursors.DictCursor = object
     fake_pymysql.connect.return_value = fake_conn
-    return patch.dict("sys.modules", {"pymysql": fake_pymysql, "pymysql.cursors": fake_pymysql.cursors})
+    # Real pymysql.constants.CLIENT is pure integer constants (no
+    # side effects, no dependency on a live connection) — reused
+    # as-is rather than faked, so `from pymysql.constants import
+    # CLIENT` inside _retire_temporary_root_password() resolves to
+    # the SAME bit values production code checks against, not a
+    # divergent stand-in.
+    import pymysql.constants as real_constants
+    fake_pymysql.constants = real_constants
+    ctx = patch.dict("sys.modules", {
+        "pymysql": fake_pymysql,
+        "pymysql.cursors": fake_pymysql.cursors,
+        "pymysql.constants": real_constants,
+    })
+    return ctx, fake_pymysql
 
 
 with tempfile.TemporaryDirectory() as tmpdir:
@@ -184,7 +197,8 @@ with tempfile.TemporaryDirectory() as tmpdir:
     secrets_dir = os.path.join(tmpdir, "keys")
 
     conn1 = _FakeConn()
-    with _install_fake_pymysql(conn1):
+    _ctx1, _fake_pymysql1 = _install_fake_pymysql(conn1)
+    with _ctx1:
         result1 = run(
             socket_path="/run/yandi/mysql.sock", error_log_path=error_log,
             instance_id_file=instance_id_file, secrets_dir=secrets_dir,
@@ -192,6 +206,23 @@ with tempfile.TemporaryDirectory() as tmpdir:
         )
 
     check("C: run() converts root to auth_socket when a temp password was found", conn1.root_converted)
+
+    # Live-confirmed bug (first Phase B run against a real server):
+    # pymysql's default capability bitmask does NOT include
+    # HANDLE_EXPIRED_PASSWORDS, so the server outright refused the
+    # connection (error 1862) for the mandatory post-`--initialize`
+    # sandbox-mode root account. Must be passed explicitly on the FIRST
+    # connect (temp-password) call — not needed on the second (auth_socket)
+    # call, since by then root's password is no longer expired.
+    from pymysql.constants import CLIENT as _CLIENT
+    _first_connect_kwargs = _fake_pymysql1.connect.call_args_list[0].kwargs
+    check(
+        "C: the temp-password connect() call passes "
+        "client_flag=CLIENT.HANDLE_EXPIRED_PASSWORDS (without it, a real "
+        "server refuses the connection outright with error 1862)",
+        _first_connect_kwargs.get("client_flag", 0) & _CLIENT.HANDLE_EXPIRED_PASSWORDS != 0,
+        f"client_flag={_first_connect_kwargs.get('client_flag')!r}",
+    )
     check("C: run() records the instance identity in the database", conn1.instance_row == result1["instance_uuid"])
     check("C: run_bootstrap()'s runtime_auth_mode is 'auth_socket' (not password)", result1["bootstrap"]["runtime_auth_mode"] == "auth_socket")
     check("C: run() reports selfcheck_ok True in the clean happy path", result1["selfcheck_ok"] is True)
@@ -213,7 +244,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         f.write("[Note] no temp password line this time — root is already on auth_socket\n")
 
     conn2 = _FakeConn()
-    with _install_fake_pymysql(conn2):
+    with _install_fake_pymysql(conn2)[0]:
         result2 = run(
             socket_path="/run/yandi/mysql.sock", error_log_path=error_log,
             instance_id_file=instance_id_file, secrets_dir=secrets_dir,
@@ -268,7 +299,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
     conn3 = _FakeConn()
     buf = io.StringIO()
-    with _install_fake_pymysql(conn3):
+    with _install_fake_pymysql(conn3)[0]:
         with redirect_stdout(buf):
             rc = main([
                 "--socket", "/run/yandi/mysql.sock", "--error-log", error_log,
