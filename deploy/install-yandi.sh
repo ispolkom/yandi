@@ -334,6 +334,134 @@ reinitialize_empty_instance_guard() {
 }
 
 # ============================================================
+# PROOF OF OWNERSHIP — verify_running_instance_ownership()
+#
+# Live-confirmed bug: a single-signal check ("cmdline contains
+# $DATADIR literally") is too strict. deploy/yandi-db.service's own
+# ExecStart invokes mysqld as `mysqld --defaults-file=$CONFIG_FILE` —
+# the datadir lives INSIDE that config file, never as a literal argv
+# token, so a process started exactly as designed was being rejected
+# as "not ours." Fail-closed still holds: cmdline may be missing the
+# literal datadir ONLY IF it names our exact --defaults-file instead,
+# and EVERY other independent signal below must still agree — any
+# single contradiction refuses (die), never a weaker OR-of-any-one-
+# signal check.
+#
+# Pure verification logic only — no systemd/process discovery of its
+# own, so it can be exercised directly against any pid + fabricated
+# expectations (this is what makes it unit-testable without root or a
+# real systemd unit). The caller gathers every fact first.
+#
+# Params (all required, in order):
+#   1  pid                       the MainPID to verify
+#   2  expected_uid              numeric uid $YANDI_DB_USER resolves to
+#   3  expected_exe              realpath of the expected mysqld binary
+#   4  expected_datadir          $DATADIR
+#   5  expected_socket           $SOCKET_PATH
+#   6  expected_pidfile          $PID_FILE
+#   7  expected_config           $CONFIG_FILE
+#   8  expected_instance_id_file $INSTANCE_ID_FILE
+#   9  systemd_user              systemctl show yandi-db -p User --value
+#  10  systemd_fragment          systemctl show yandi-db -p FragmentPath --value
+#  11  expected_fragment         $SYSTEMD_UNIT_DST
+# ============================================================
+verify_running_instance_ownership() {
+    local pid="$1" expected_uid="$2" expected_exe="$3" expected_datadir="$4"
+    local expected_socket="$5" expected_pidfile="$6" expected_config="$7"
+    local expected_instance_id_file="$8" systemd_user="$9" systemd_fragment="${10}"
+    local expected_fragment="${11}"
+
+    [ -n "$pid" ] && [ "$pid" != "0" ] || die "OWNERSHIP PROOF FAILED: no MainPID reported for yandi-db.service."
+
+    # 1. systemd's own view of the unit: User= and FragmentPath must be
+    #    exactly the dedicated ones — never inferred, never assumed.
+    [ -n "$expected_uid" ] || die "OWNERSHIP PROOF FAILED: could not resolve \$YANDI_DB_USER to a uid — cannot verify anything against an unknown expectation."
+    [ "$systemd_user" = "$YANDI_DB_USER" ] || die "OWNERSHIP PROOF FAILED: yandi-db.service's own User= is '$systemd_user', expected '$YANDI_DB_USER'."
+    [ "$(realpath -m "$systemd_fragment" 2>/dev/null)" = "$(realpath -m "$expected_fragment" 2>/dev/null)" ] \
+        || die "OWNERSHIP PROOF FAILED: yandi-db.service's FragmentPath ('$systemd_fragment') is not the expected unit file ($expected_fragment)."
+
+    # 2. Process UID must be exactly $YANDI_DB_USER's — not root, not
+    #    the shared instance's mysql user, not anyone else.
+    [ -r "/proc/$pid/status" ] || die "OWNERSHIP PROOF FAILED: /proc/$pid/status unreadable — cannot verify process uid."
+    local proc_uid
+    proc_uid="$(awk '/^Uid:/{print $2}' "/proc/$pid/status")"
+    [ "$proc_uid" = "$expected_uid" ] || die "OWNERSHIP PROOF FAILED: pid $pid runs as uid $proc_uid, expected $YANDI_DB_USER's uid ($expected_uid)."
+
+    # 3. Executable must be the real mysqld binary — symlinks resolved
+    #    on BOTH sides so a path-traversal/alias trick can't fool this.
+    [ -r "/proc/$pid/exe" ] || die "OWNERSHIP PROOF FAILED: /proc/$pid/exe unreadable."
+    local proc_exe
+    proc_exe="$(realpath "/proc/$pid/exe" 2>/dev/null || echo "")"
+    [ -n "$proc_exe" ] && [ -n "$expected_exe" ] && [ "$proc_exe" = "$expected_exe" ] \
+        || die "OWNERSHIP PROOF FAILED: pid $pid's executable ('$proc_exe') is not the expected mysqld binary ('$expected_exe')."
+
+    # 4. Config file must name OUR exact dedicated datadir/socket/
+    #    pid-file, plus the isolation settings this whole design
+    #    depends on — this is what lets cmdline be missing the literal
+    #    datadir (case 5 below) without weakening the proof at all.
+    [ -f "$expected_config" ] || die "OWNERSHIP PROOF FAILED: $expected_config does not exist — cannot verify the dedicated instance's own config."
+    local cfg_datadir cfg_socket cfg_pidfile
+    cfg_datadir="$(awk -F'=' '/^[[:space:]]*datadir[[:space:]]*=/{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2}' "$expected_config" | tail -1)"
+    cfg_socket="$(awk -F'=' '/^[[:space:]]*socket[[:space:]]*=/{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2}' "$expected_config" | tail -1)"
+    cfg_pidfile="$(awk -F'=' '/^[[:space:]]*pid-file[[:space:]]*=/{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2}' "$expected_config" | tail -1)"
+    [ "$(realpath -m "$cfg_datadir" 2>/dev/null)" = "$(realpath -m "$expected_datadir" 2>/dev/null)" ] \
+        || die "OWNERSHIP PROOF FAILED: $expected_config's datadir ('$cfg_datadir') does not match the expected dedicated datadir ($expected_datadir)."
+    [ "$(realpath -m "$cfg_socket" 2>/dev/null)" = "$(realpath -m "$expected_socket" 2>/dev/null)" ] \
+        || die "OWNERSHIP PROOF FAILED: $expected_config's socket ('$cfg_socket') does not match the expected dedicated socket ($expected_socket)."
+    [ "$(realpath -m "$cfg_pidfile" 2>/dev/null)" = "$(realpath -m "$expected_pidfile" 2>/dev/null)" ] \
+        || die "OWNERSHIP PROOF FAILED: $expected_config's pid-file ('$cfg_pidfile') does not match the expected dedicated pid file ($expected_pidfile)."
+    grep -qE '^[[:space:]]*skip-networking[[:space:]]*$' "$expected_config" \
+        || die "OWNERSHIP PROOF FAILED: $expected_config is missing skip-networking."
+    grep -qE '^[[:space:]]*mysqlx[[:space:]]*=[[:space:]]*OFF[[:space:]]*$' "$expected_config" \
+        || die "OWNERSHIP PROOF FAILED: $expected_config is missing mysqlx = OFF."
+
+    # 5. cmdline: either the datadir appears directly, OR the exact
+    #    dedicated --defaults-file is present (check 4 above already
+    #    proves THAT file names our own paths — one missing argv token
+    #    is not itself a failure when the alternative path is this
+    #    fully deterministic).
+    [ -r "/proc/$pid/cmdline" ] || die "OWNERSHIP PROOF FAILED: /proc/$pid/cmdline unreadable."
+    local cmdline
+    cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline")"
+    if ! printf '%s' "$cmdline" | grep -qF -- "$expected_datadir"; then
+        printf '%s' "$cmdline" | grep -qF -- "--defaults-file=$expected_config" \
+            || die "OWNERSHIP PROOF FAILED: pid $pid's cmdline contains neither the dedicated datadir nor --defaults-file=$expected_config."
+    fi
+
+    # 6. PID file must name the SAME pid systemd reports as MainPID.
+    [ -f "$expected_pidfile" ] || die "OWNERSHIP PROOF FAILED: pid file $expected_pidfile does not exist."
+    local pidfile_pid
+    pidfile_pid="$(tr -d '[:space:]' < "$expected_pidfile")"
+    [ "$pidfile_pid" = "$pid" ] || die "OWNERSHIP PROOF FAILED: pid file $expected_pidfile contains '$pidfile_pid', which does not match systemd's MainPID ($pid)."
+
+    # 7. Socket must exist at the exact dedicated path.
+    [ -S "$expected_socket" ] || die "OWNERSHIP PROOF FAILED: $expected_socket is not a socket."
+
+    # 8. Instance identity marker must exist — this process may only be
+    #    treated as ours if a YANDI bootstrap attempt already claimed it.
+    [ -f "$expected_instance_id_file" ] || die "OWNERSHIP PROOF FAILED: instance identity marker $expected_instance_id_file does not exist."
+
+    # 9 (best-effort, contradiction-only): open file descriptors must
+    #    not show anything open under the SHARED instance's own datadir
+    #    — not required for a positive proof, but a genuine
+    #    contradiction here fails closed regardless of every other
+    #    signal above passing.
+    if [ -r "/proc/$pid/fd" ]; then
+        local fd fd_link
+        for fd in "/proc/$pid/fd"/*; do
+            [ -e "$fd" ] || continue
+            fd_link="$(readlink -f "$fd" 2>/dev/null || true)"
+            case "$fd_link" in
+                /var/lib/mysql/*|/var/lib/mysql)
+                    die "OWNERSHIP PROOF FAILED: pid $pid has an open file descriptor under the SHARED instance's datadir ($fd_link) — contradicts dedicated-instance ownership." ;;
+            esac
+        done
+    fi
+
+    log "OWNERSHIP PROVEN for pid $pid: systemd User=$systemd_user, uid=$proc_uid, exe=$proc_exe, config datadir/socket/pid-file/isolation settings all match, pidfile agrees with MainPID."
+}
+
+# ============================================================
 # 8. INITIALIZE DATADIR (idempotent — refuses to re-initialize a
 #    non-empty datadir rather than risking data loss, UNLESS
 #    --reinitialize-empty-instance was passed AND the guard above
@@ -358,15 +486,19 @@ initialize_datadir() {
     # of how many times a human clears the datadir between invocations.
     if systemctl is-active --quiet yandi-db 2>/dev/null; then
         # Verify the process we are about to stop is unambiguously OURS
-        # before touching it — its command line must reference our own
-        # dedicated datadir. Cheap, real proof, not an assumption.
-        local main_pid
+        # before touching it — multi-signal proof (see
+        # verify_running_instance_ownership()'s own docstring for why a
+        # single "cmdline contains $DATADIR" check was too strict).
+        local main_pid systemd_user systemd_fragment
         main_pid="$(systemctl show yandi-db -p MainPID --value 2>/dev/null || echo 0)"
-        if [ "$main_pid" != "0" ] && [ -r "/proc/$main_pid/cmdline" ]; then
-            if ! tr '\0' ' ' < "/proc/$main_pid/cmdline" | grep -qF -- "$DATADIR"; then
-                die "yandi-db.service's running process (pid $main_pid) does not reference our own datadir ($DATADIR) in its command line — refusing to stop/touch a process that isn't unambiguously ours."
-            fi
-        fi
+        systemd_user="$(systemctl show yandi-db -p User --value 2>/dev/null || echo "")"
+        systemd_fragment="$(systemctl show yandi-db -p FragmentPath --value 2>/dev/null || echo "")"
+        verify_running_instance_ownership \
+            "$main_pid" \
+            "$(id -u "$YANDI_DB_USER" 2>/dev/null || echo "")" \
+            "$(realpath "$(command -v mysqld 2>/dev/null)" 2>/dev/null || echo "")" \
+            "$DATADIR" "$SOCKET_PATH" "$PID_FILE" "$CONFIG_FILE" "$INSTANCE_ID_FILE" \
+            "$systemd_user" "$systemd_fragment" "$SYSTEMD_UNIT_DST"
         log "yandi-db.service is currently active — stopping it before inspecting/touching the datadir"
         systemctl stop yandi-db
     fi

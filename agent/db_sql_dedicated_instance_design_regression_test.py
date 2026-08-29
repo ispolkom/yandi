@@ -386,10 +386,13 @@ check(
     and "rm -rf \"$INSTANCE_ID_FILE\"" not in script_text,
 )
 check(
-    "before stopping yandi-db.service, the running process's own cmdline "
-    "is verified to reference OUR datadir — refuses to stop/touch a "
+    "before stopping yandi-db.service, multi-signal ownership is proven "
+    "via verify_running_instance_ownership() (superseded the old single-"
+    "signal 'cmdline contains $DATADIR' check — see "
+    "db_sql_ownership_proof_regression_test.py for the full dynamic "
+    "coverage of that function's own logic) — refuses to stop/touch a "
     "process that isn't unambiguously ours",
-    "MainPID" in script_text and "/proc/$main_pid/cmdline" in script_text,
+    "MainPID" in script_text and "verify_running_instance_ownership" in script_text,
 )
 
 check(
