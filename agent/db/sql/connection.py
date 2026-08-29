@@ -7,12 +7,29 @@ config, секреты не коммитить." No default password, no default
 if those two are unset, the layer reports itself as NOT CONFIGURED
 rather than guessing or trying an empty-password connection.
 
-    YANDI_SQL_HOST      default "127.0.0.1"
-    YANDI_SQL_PORT      default "3306"
+    YANDI_SQL_HOST      default "127.0.0.1" (ignored if YANDI_SQL_SOCKET is set)
+    YANDI_SQL_PORT      default "3306" (ignored if YANDI_SQL_SOCKET is set)
     YANDI_SQL_USER      required, no default
-    YANDI_SQL_PASSWORD  required, no default
+    YANDI_SQL_PASSWORD  required unless YANDI_SQL_AUTH_MODE=auth_socket
     YANDI_SQL_DATABASE  default "yandi_epistemic"
     YANDI_SQL_CONNECT_TIMEOUT  default "3" (seconds)
+    YANDI_SQL_SOCKET    optional Unix socket path (DATABASE BOOTSTRAP V1,
+                        mandate §10) — e.g. /run/yandi/mysql.sock for
+                        YANDI's own dedicated instance. When set, this is
+                        the ONLY transport used: host/port are never
+                        consulted and there is NEVER a fallback to TCP if
+                        the socket connection fails (mandate §26: "Это
+                        абсолютный запрет" — a dedicated-socket failure
+                        must surface as SqlUnavailable, never silently
+                        retry against localhost:3306 or any other host).
+    YANDI_SQL_AUTH_MODE default "password"; "auth_socket" sends no
+                        password at all, relying on the server's
+                        auth_socket plugin to authenticate by kernel-
+                        verified peer UID (DEDICATED_INSTANCE_DESIGN.md
+                        §H, Option 1) — only meaningful together with
+                        YANDI_SQL_SOCKET; requesting it without a socket
+                        path configured is a configuration error, not a
+                        silent downgrade to password auth.
 
 No connection pool in v1 — the mandate explicitly discourages reaching
 for heavy infrastructure without justification (§28: "НЕ тащи
@@ -40,8 +57,21 @@ class SqlUnavailable(Exception):
     """
 
 
+def _auth_mode() -> str:
+    return os.environ.get("YANDI_SQL_AUTH_MODE", "password")
+
+
 def is_configured() -> bool:
-    return bool(os.environ.get("YANDI_SQL_USER")) and bool(os.environ.get("YANDI_SQL_PASSWORD"))
+    user_set = bool(os.environ.get("YANDI_SQL_USER"))
+    if not user_set:
+        return False
+    if _auth_mode() == "auth_socket":
+        # auth_socket needs no password, but IS meaningless without a
+        # socket to connect over — never treat it as "configured" against
+        # a bare host/port with no password (that would just be an
+        # accidental anonymous-login attempt, not a deliberate choice).
+        return bool(os.environ.get("YANDI_SQL_SOCKET"))
+    return bool(os.environ.get("YANDI_SQL_PASSWORD"))
 
 
 def _config() -> dict:
@@ -52,6 +82,8 @@ def _config() -> dict:
         "password": os.environ.get("YANDI_SQL_PASSWORD", ""),
         "database": os.environ.get("YANDI_SQL_DATABASE", "yandi_epistemic"),
         "connect_timeout": int(os.environ.get("YANDI_SQL_CONNECT_TIMEOUT", "3")),
+        "socket": os.environ.get("YANDI_SQL_SOCKET", ""),
+        "auth_mode": _auth_mode(),
     }
 
 
@@ -65,9 +97,21 @@ def get_connection(autocommit: bool = False):
     connection genuinely fails, so every caller has exactly ONE
     exception type to handle.
     """
+    if _auth_mode() not in ("password", "auth_socket"):
+        raise SqlUnavailable(
+            f"YANDI_SQL_AUTH_MODE={_auth_mode()!r} is not recognized — expected "
+            f"'password' or 'auth_socket'. Refusing to guess."
+        )
+    if _auth_mode() == "auth_socket" and not os.environ.get("YANDI_SQL_SOCKET"):
+        raise SqlUnavailable(
+            "YANDI_SQL_AUTH_MODE=auth_socket requires YANDI_SQL_SOCKET to also be "
+            "set — auth_socket authenticates by Unix peer credentials, which only "
+            "exist over a Unix socket connection, never over TCP."
+        )
     if not is_configured():
         raise SqlUnavailable(
-            "YANDI_SQL_USER/YANDI_SQL_PASSWORD not set in the environment — "
+            "YANDI_SQL_USER/YANDI_SQL_PASSWORD (or YANDI_SQL_SOCKET with "
+            "YANDI_SQL_AUTH_MODE=auth_socket) not set in the environment — "
             "SQL layer is not configured, not a connection failure."
         )
 
@@ -79,18 +123,28 @@ def get_connection(autocommit: bool = False):
 
     cfg = _config()
     conn: Optional["pymysql.connections.Connection"] = None
+    connect_kwargs = dict(
+        user=cfg["user"],
+        password="" if cfg["auth_mode"] == "auth_socket" else cfg["password"],
+        database=cfg["database"],
+        charset="utf8mb4",
+        connect_timeout=cfg["connect_timeout"],
+        autocommit=autocommit,
+        cursorclass=pymysql.cursors.DictCursor,
+    )
+    if cfg["socket"]:
+        # Unix socket mode (mandate §10/§26): host/port are NEVER also
+        # passed here — pymysql would otherwise accept both and there
+        # would be a live ambiguity about which transport actually won.
+        # No fallback to host/port exists anywhere in this function: a
+        # failed socket connect below raises SqlUnavailable directly.
+        connect_kwargs["unix_socket"] = cfg["socket"]
+    else:
+        connect_kwargs["host"] = cfg["host"]
+        connect_kwargs["port"] = cfg["port"]
+
     try:
-        conn = pymysql.connect(
-            host=cfg["host"],
-            port=cfg["port"],
-            user=cfg["user"],
-            password=cfg["password"],
-            database=cfg["database"],
-            charset="utf8mb4",
-            connect_timeout=cfg["connect_timeout"],
-            autocommit=autocommit,
-            cursorclass=pymysql.cursors.DictCursor,
-        )
+        conn = pymysql.connect(**connect_kwargs)
     except Exception as e:
         raise SqlUnavailable(f"SQL connection failed: {e}") from e
 

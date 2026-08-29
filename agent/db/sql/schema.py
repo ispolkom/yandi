@@ -666,6 +666,38 @@ CREATE TABLE IF NOT EXISTS run_error (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
+# ── INSTANCE_IDENTITY ────────────────────────────────────────────────────
+# DATABASE BOOTSTRAP V1, mandate §4. Classified "A" (canonical immutable
+# identity, TABLE_CLASSIFICATION's own definition: "one row per identity,
+# INSERT ... NEVER UPDATE") — not "reserved E," because this table fits
+# class A's definition exactly, and doing so gets it security_triggers.
+# py's existing BEFORE UPDATE/DELETE rejection for free, rather than
+# inventing a fourth (E) code path with a single caller.
+#
+# A single-row ownership marker: the stable answer to "is THIS the
+# YANDI-managed database instance?" that nothing else in this schema can
+# prove alone. A database being named `yandi_epistemic` is NOT proof of
+# ownership (mandate §27) — hostname, port, socket path, and database
+# name are all attacker/operator-controllable labels; this row plus the
+# filesystem marker written alongside it by deploy/install-yandi.sh
+# (outside SQL, read without a connection) are cross-checked by
+# instance_identity.py's verify_instance_identity() before any
+# destructive/privileged operation.
+#
+# Enforced as a true singleton: `id` can only ever be the literal value 1
+# (CHECK, not just a default) so a second row is structurally impossible,
+# never merely discouraged by application code.
+INSTANCE_IDENTITY = """
+CREATE TABLE IF NOT EXISTS instance_identity (
+    id               TINYINT NOT NULL PRIMARY KEY DEFAULT 1,
+    instance_uuid    CHAR(36) NOT NULL,
+    created_at       DATETIME NOT NULL,
+    created_by_host  VARCHAR(255) NOT NULL,
+    label            VARCHAR(255) NULL,
+    CONSTRAINT chk_instance_identity_singleton CHECK (id = 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
 # Ordered: each CREATE TABLE only references tables already created
 # above it (FK ordering matters in MySQL without deferred constraints).
 ALL_TABLES_IN_ORDER = [
@@ -689,6 +721,7 @@ ALL_TABLES_IN_ORDER = [
     ("ai_observation", AI_OBSERVATION),
     ("ai_reported_source", AI_REPORTED_SOURCE),
     ("run_error", RUN_ERROR),
+    ("instance_identity", INSTANCE_IDENTITY),
 ]
 
 # Deferred ALTER (needs answer_version to already exist).
@@ -742,4 +775,5 @@ TABLE_CLASSIFICATION = {
     "belief": "C",
     "semantic_edge": "C",
     "verification_run": "D",
+    "instance_identity": "A",
 }

@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Tuple
 from agent.db.sql.schema import ALL_TABLES_IN_ORDER, SCHEMA_VERSION
 from agent.db.sql.security_grants import FORBIDDEN_FOR_READONLY, FORBIDDEN_FOR_RUNTIME
 from agent.db.sql.security_triggers import immutability_triggers
+from agent.db.sql.instance_identity import verify_instance_identity, MATCH, NO_DB_IDENTITY
 
 
 def check_schema_version(conn, expected_version: int = SCHEMA_VERSION) -> Tuple[bool, str]:
@@ -101,7 +102,22 @@ def check_current_grants_against_allowlist(conn, forbidden: Tuple[str, ...]) -> 
     return (len(violations) == 0, violations)
 
 
-def run_selfcheck(conn, *, role: str = "runtime") -> Dict[str, Any]:
+def check_instance_identity(conn, expected_instance_uuid: str) -> Tuple[bool, str]:
+    """DATABASE BOOTSTRAP V1, mandate §27/§28: the selfcheck's own
+    ownership gate — thin wrapper over instance_identity.verify_
+    instance_identity() so run_selfcheck() reports identity alongside
+    schema/tables/triggers/grants rather than as a separate, easy-to-
+    forget call site. `expected_instance_uuid` is deliberately a
+    required argument with no default sourced from inside this module —
+    the caller (whoever holds the filesystem marker, e.g. deploy/
+    install-yandi.sh's live_bootstrap.py) is the only one who can say
+    what identity SHOULD be here; this function never guesses it from
+    the connection alone."""
+    ok, reason = verify_instance_identity(conn, expected_instance_uuid)
+    return ok, reason
+
+
+def run_selfcheck(conn, *, role: str = "runtime", expected_instance_uuid: str = None) -> Dict[str, Any]:
     """`role`: 'runtime' or 'readonly' — selects which forbidden-
     privilege list to check the CURRENTLY CONNECTED account's grants
     against. Returns a summary dict; raises nothing itself (a caller
@@ -118,10 +134,26 @@ def run_selfcheck(conn, *, role: str = "runtime") -> Dict[str, Any]:
     triggers_ok, missing_triggers = check_required_triggers(conn)
     grants_ok, grant_violations = check_current_grants_against_allowlist(conn, forbidden)
 
+    # Identity is checked ONLY when the caller supplies an expected uuid
+    # (mandate §28: "don't treat a deliberately-deferred check's absence
+    # as everything broken" — the same posture already applied to TDE).
+    # Existing callers that don't pass expected_instance_uuid keep their
+    # exact original "ok" semantics (schema+tables+triggers+grants only)
+    # — identity_ok/identity_detail are reported as NOT_REQUESTED rather
+    # than silently failing the whole selfcheck for a check nobody asked
+    # for. Once a caller DOES pass expected_instance_uuid (mandate §27's
+    # gate before a destructive/privileged operation), a mismatch DOES
+    # flip "ok" to False, same as any other failing check.
+    if expected_instance_uuid is None:
+        identity_ok, identity_detail = True, "NOT_REQUESTED"
+    else:
+        identity_ok, identity_detail = check_instance_identity(conn, expected_instance_uuid)
+
     return {
-        "ok": version_ok and tables_ok and triggers_ok and grants_ok,
+        "ok": version_ok and tables_ok and triggers_ok and grants_ok and identity_ok,
         "schema_version_ok": version_ok, "schema_version_detail": version_detail,
         "tables_ok": tables_ok, "missing_tables": missing_tables,
         "triggers_ok": triggers_ok, "missing_triggers": missing_triggers,
         "grants_ok": grants_ok, "grant_violations": grant_violations,
+        "identity_ok": identity_ok, "identity_detail": identity_detail,
     }

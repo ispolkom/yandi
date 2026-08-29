@@ -47,8 +47,17 @@ APPARMOR_LOCAL_DIR="/etc/apparmor.d/local"
 APPARMOR_LOCAL_FILE="${APPARMOR_LOCAL_DIR}/usr.sbin.mysqld"
 APPARMOR_SHARED_PROFILE="/etc/apparmor.d/usr.sbin.mysqld"
 KEK_PATH="${YANDI_DB_HOME}/keys/kek.bin"
+SECRETS_DIR="${YANDI_DB_HOME}/keys"
+INSTANCE_ID_FILE="${CONFIG_DIR}/instance.id"
 YANDI_REPO="/home/iam/yandi"
 YANDI_VENV_PYTHON="/home/iam/venv/bin/python3"
+# The real OS user the AGENT process runs as today (confirmed during
+# the 5E-S2 audit — DEDICATED_INSTANCE_DESIGN.md §H) — YANDI_RUNTIME is
+# created with auth_socket mapped to THIS name, not a YANDI-internal
+# label. If the agent's OS identity ever changes (e.g. a future
+# dedicated `yandi-agent` system account), update this ONE line as
+# part of that same change.
+AGENT_OS_USER="iam"
 
 log() { echo "[install-yandi] $*"; }
 die() { echo "[install-yandi] FATAL: $*" >&2; exit 1; }
@@ -166,6 +175,26 @@ EOF
 }
 
 # ============================================================
+# 5b. INSTANCE IDENTITY MARKER (mandate §4/§8) — written BEFORE
+#     mysqld --initialize, so the ownership marker predates the datadir
+#     it will end up describing. Idempotent: reuses agent.db.sql.
+#     instance_identity.ensure_instance_id_file(), which returns the
+#     EXISTING id unchanged if the file is already there (never
+#     regenerates over a prior identity).
+# ============================================================
+create_instance_identity_marker() {
+    "$YANDI_VENV_PYTHON" - "$INSTANCE_ID_FILE" <<'PYEOF'
+import sys
+sys.path.insert(0, "/home/iam/yandi")
+from agent.db.sql.instance_identity import ensure_instance_id_file
+instance_id = ensure_instance_id_file(sys.argv[1])
+print(f"instance identity: {instance_id}")
+PYEOF
+    chown root:root "$INSTANCE_ID_FILE"
+    chmod 0644 "$INSTANCE_ID_FILE"
+}
+
+# ============================================================
 # 6. APPARMOR — additive only, never touches the shared profile's
 #    existing rules, only adds an include point + a local file.
 # ============================================================
@@ -270,21 +299,18 @@ verify_no_tcp() {
 # OS-level work"). It does not reimplement any DB-level logic here.
 # ============================================================
 run_python_bootstrap() {
-    log "handing off to agent.db.sql.bootstrap / migrate / keys / security_selfcheck for DB-level work"
-    log "(NOT executed by this design pass — see DEDICATED_INSTANCE_DESIGN.md §L for exactly"
-    log "what remains unverified until a real run happens)"
-    # Example of the intended invocation shape (left as documentation,
-    # not wired to real one-time-password extraction / connection
-    # parameters, which depends on decisions this design pass does not
-    # make unilaterally — see §H's auth_socket-vs-random-secret choice):
-    #
-    #   YANDI_SQL_HOST="" YANDI_SQL_SOCKET="$SOCKET_PATH" \
-    #   YANDI_SQL_USER=... YANDI_SQL_PASSWORD=... \
-    #       "$YANDI_VENV_PYTHON" -m agent.db.sql.migrate
-    #       "$YANDI_VENV_PYTHON" -c "from agent.db.sql.bootstrap import run_bootstrap; ..."
-    #       "$YANDI_VENV_PYTHON" -c "from agent.db.sql.keys import generate_kek, save_kek; save_kek('$KEK_PATH', generate_kek())"
-    #       "$YANDI_VENV_PYTHON" -c "from agent.db.sql.security_selfcheck import run_selfcheck; ..."
-    die "run_python_bootstrap() is a documented STUB — this design pass does not decide the exact auth wiring (§H) or execute anything against a live server. Fill in before first real use."
+    log "handing off to agent.db.sql.live_bootstrap for DB-level work (instance identity, "
+    log "root temp-password retirement, schema/roles/triggers, selfcheck)"
+    "$YANDI_VENV_PYTHON" -m agent.db.sql.live_bootstrap \
+        --socket "$SOCKET_PATH" \
+        --error-log "$ERROR_LOG" \
+        --instance-id-file "$INSTANCE_ID_FILE" \
+        --secrets-dir "$SECRETS_DIR" \
+        --agent-os-user "$AGENT_OS_USER"
+    log "DB-level bootstrap complete — see agent/db/sql/DEDICATED_INSTANCE_DESIGN.md §L and"
+    log "SQL_DEPLOYMENT_DEFERRED.md for what still needs LIVE verification after this point"
+    log "(TDE/keyring activation, full isolation proof, restart-persistence, production"
+    log "shadow-write smoke test) — this script's job ends at 'the instance and schema exist'."
 }
 
 main() {
@@ -293,6 +319,7 @@ main() {
     disk_gate
     create_os_identity
     create_filesystem
+    create_instance_identity_marker
     install_config
     apparmor_setup
     install_systemd_unit

@@ -656,6 +656,63 @@ def _selinux_section() -> Dict[str, Any]:
     return {"status": PRESENT, "mode": out}
 
 
+# DATABASE BOOTSTRAP V1, mandate §23. Fixed, well-known paths matching
+# deploy/install-yandi.sh / deploy/yandi-db.service exactly — these are
+# the SAME literal paths that script creates, not independently guessed.
+_YANDI_DB_SOCKET_PATH = "/run/yandi/mysql.sock"
+_YANDI_DB_INSTANCE_ID_PATH = "/etc/yandi/mysql/instance.id"
+
+
+def _yandi_db_instance_section() -> Dict[str, Any]:
+    """DATABASE BOOTSTRAP V1, mandate §23: 'System Awareness must NOT
+    confuse the two servers — must explicitly keep mysql.service
+    (shared) and yandi-db.service as distinct facts.' This is a
+    WHOLLY SEPARATE section from software.sql_engines.mysql (which
+    answers 'is some mysql-family client/server binary present on this
+    host' — a fact the SHARED FastPanel instance has satisfied since
+    before this dedicated instance ever existed, and will keep
+    satisfying regardless of this section's values).
+
+    Three independent, cheap, no-SQL-connection facts — filesystem/
+    systemctl only, exactly this module's existing boundary (no import
+    of agent.db.sql.* anywhere in this file):
+        service_running        — `systemctl is-active yandi-db`
+                                  (a DIFFERENT unit name than the
+                                  shared instance's 'mysql').
+        socket_present          — does the dedicated Unix socket exist
+                                  as an actual socket file.
+        identity_file_present   — does the mandate §4 ownership-marker
+                                  file exist (VALUE never read/reported
+                                  here — presence only; instance_
+                                  identity.py owns interpreting it).
+    None of these three implies the others: mandate §0 — 'RUNNING !=
+    SAFE_TO_USE', a running service with no socket yet (mid-startup) or
+    a socket with no identity file (a pre-mandate-§4 partial state) are
+    both honestly representable, never collapsed into one status."""
+    socket_present = ABSENT
+    try:
+        socket_present = PRESENT if Path(_YANDI_DB_SOCKET_PATH).is_socket() else ABSENT
+    except OSError:
+        socket_present = UNKNOWN
+
+    identity_file_present = PRESENT if Path(_YANDI_DB_INSTANCE_ID_PATH).exists() else ABSENT
+
+    service_running = UNKNOWN
+    systemctl = shutil.which("systemctl")
+    if systemctl:
+        svc_state = _run([systemctl, "is-active", "yandi-db"], timeout=2.0)
+        if svc_state == "active":
+            service_running = PRESENT
+        elif svc_state in ("inactive", "failed", "unknown", "activating", "deactivating", ""):
+            service_running = ABSENT
+
+    return {
+        "service_running": service_running,
+        "socket_present": socket_present,
+        "identity_file_present": identity_file_present,
+    }
+
+
 def _services_section() -> Dict[str, Any]:
     from agent.tools.tool_system import services as tool_system_services  # reuse verbatim
 
@@ -698,6 +755,7 @@ def build_snapshot(probe_source: str = "agent_local_probe") -> Dict[str, Any]:
         "storage": _safe(_storage_section),
         "software": _safe(_software_section),
         "services": _safe(_services_section),
+        "yandi_db_instance": _safe(_yandi_db_instance_section),
     }
 
 
@@ -767,6 +825,7 @@ def _material_view(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     storage = snapshot.get("storage", [])
     software = snapshot.get("software", {})
     services = snapshot.get("services", {})
+    yandi_db = snapshot.get("yandi_db_instance", {})
 
     material_storage = []
     for entry in storage:
@@ -810,6 +869,11 @@ def _material_view(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "apparmor": {"status": services.get("apparmor", {}).get("status")},
             "selinux": {"status": services.get("selinux", {}).get("status")},
             "docker": _component_view(services.get("docker", {})),
+        },
+        "yandi_db_instance": {
+            "service_running": yandi_db.get("service_running"),
+            "socket_present": yandi_db.get("socket_present"),
+            "identity_file_present": yandi_db.get("identity_file_present"),
         },
     }
 
@@ -962,5 +1026,13 @@ def compare(old_snapshot: Dict[str, Any], new_snapshot: Dict[str, Any]) -> Dict[
             services_diff[name] = d
     if services_diff:
         result["services"] = services_diff
+
+    yandi_db_diff = {}
+    for field in ("service_running", "socket_present", "identity_file_present"):
+        d = _diff_scalar(old_mat["yandi_db_instance"].get(field), new_mat["yandi_db_instance"].get(field))
+        if d:
+            yandi_db_diff[field] = d
+    if yandi_db_diff:
+        result["yandi_db_instance"] = yandi_db_diff
 
     return result
