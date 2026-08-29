@@ -89,6 +89,29 @@ with tempfile.TemporaryDirectory() as tmpdir:
         extract_temporary_root_password(os.path.join(tmpdir, "nope.log")) is None,
     )
 
+    # Live-confirmed bug (fourth Phase B attempt): install-yandi.sh's
+    # `tee -a "$ERROR_LOG"` APPENDS across every mysqld --initialize run
+    # in a debugging session (failed attempt -> rm -rf -> retry, several
+    # times over), so this log can accumulate MULTIPLE temp-password
+    # lines. The first belongs to a datadir that may no longer exist —
+    # only the LAST one is valid for the CURRENT root account.
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write(
+            "2026-08-29T00:00:00.000000Z 6 [Note] [MY-010454] [Server] A temporary "
+            "password is generated for root@localhost: stale-from-wiped-datadir\n"
+            "2026-08-29T00:05:00.000000Z 0 [System] [MY-013236] [Server] The designated "
+            "data directory /var/lib/yandi/mysql/data/ is unusable. Aborting\n"
+            "2026-08-29T00:10:00.000000Z 6 [Note] [MY-010454] [Server] A temporary "
+            "password is generated for root@localhost: CURRENT-VALID-ONE\n"
+        )
+    check(
+        "A: with MULTIPLE temp-password lines accumulated across repeated "
+        "--initialize attempts (append-only log), extract_temporary_root_"
+        "password() returns the LAST one (valid for the current datadir), "
+        "not the first (stale, from a datadir that was since wiped)",
+        extract_temporary_root_password(log_path) == "CURRENT-VALID-ONE",
+    )
+
 
 # ============================================================
 # B. Protected secret file.
