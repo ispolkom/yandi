@@ -274,8 +274,23 @@ initialize_datadir() {
     # ago; this is the authoritative gate right before mysqld writes data.
     disk_gate
 
-    mysqld --initialize --user="$YANDI_DB_USER" --datadir="$DATADIR" \
-        --defaults-file="$CONFIG_FILE" 2>&1 | tee -a "$ERROR_LOG"
+    # --defaults-file MUST be the FIRST argument to mysqld — this is a
+    # real, live-confirmed bug fix, not a style preference: mysqld's own
+    # option parser only recognizes --defaults-file in argv[1]. Placed
+    # after --initialize/--user/--datadir (as this line originally was),
+    # it is silently ignored and mysqld falls back to its compiled-in/
+    # system default config search path instead of $CONFIG_FILE — this
+    # is exactly what happened on the first live run: log-error pointed
+    # at the DEFAULT /var/log/mysql/error.log (permission denied for the
+    # yandi-db user, since that path belongs to the shared instance's
+    # own logging setup) instead of $ERROR_LOG, and character-set-server
+    # silently reverted to utf8mb3 instead of $CONFIG_FILE's utf8mb4 —
+    # both proven by that run's own mysqld warnings/errors. --datadir
+    # and --user were unaffected only because they were ALSO passed as
+    # explicit CLI flags (which apply regardless of defaults-file
+    # loading) — the dedicated datadir itself was never at risk.
+    mysqld --defaults-file="$CONFIG_FILE" --initialize \
+        --user="$YANDI_DB_USER" --datadir="$DATADIR" 2>&1 | tee -a "$ERROR_LOG"
     log "datadir initialized — a one-time temporary root password was written to $ERROR_LOG (grep for 'temporary password')"
     log "this script will use it once, immediately, in initial_db_bootstrap() below, then retire it"
 }
