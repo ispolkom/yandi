@@ -14,11 +14,17 @@ stateful fake connection (calling run_bootstrap() twice must not
 attempt to create duplicate users/triggers) — never against a real
 server.
 
-Flow (mandate §11): ensure_database() -> ensure_role() x3 ->
-apply_schema() (delegates to the EXISTING agent.db.sql.migrate module,
-not duplicated) -> apply_immutability_triggers() -> (verify_grants()/
-run_security_smoke_test() — see SECURITY_ARCHITECTURE.md §21 for why
-those are the NEXT continuation, not built this pass).
+Flow (mandate §11): ensure_database() -> apply_schema() (delegates to
+the EXISTING agent.db.sql.migrate module's own table definitions, not
+duplicated) -> ensure_role() x3 -> apply_immutability_triggers() ->
+(verify_grants()/run_security_smoke_test() — see
+SECURITY_ARCHITECTURE.md §21 for why those are the NEXT continuation,
+not built this pass). apply_schema() runs BEFORE any ensure_role()
+call: YANDI_RUNTIME's grants include per-table `GRANT UPDATE ON
+db.<table>` statements (class C/D tables only), and a table-level GRANT
+requires the table to already exist — live-confirmed the hard way
+(ERROR 1146 on `belief` against a virgin database) before this
+ordering was fixed. See run_bootstrap()'s own inline comment.
 
 Key generation (keys.py::generate_kek()) is DELIBERATELY NOT called
 anywhere in this file — mandate §37: generating a key creates a backup
@@ -204,6 +210,17 @@ def run_bootstrap(
             "refusing to create it with an empty password by omission."
         )
     ensure_database(conn)
+    # apply_schema() MUST run before any ensure_role() call: YANDI_RUNTIME's
+    # grants include per-table `GRANT UPDATE ON db.<table>` statements for
+    # every class-C/D table (yandi_runtime_grant_statements() below) — a
+    # table-level GRANT requires the target table to already exist in
+    # MySQL, unlike a `db.*` wildcard grant. Creating roles/grants first
+    # fails with "Table '<db>.<table>' doesn't exist" (live-confirmed:
+    # ERROR 1146 on `belief`, the first class-C table in
+    # ALL_TABLES_IN_ORDER) the very first time this runs against an empty
+    # database. Triggers/instance_identity already came after apply_schema()
+    # and are unaffected by this reordering.
+    apply_schema(conn)
     if runtime_auth_socket_os_user:
         ensure_role(conn, [yandi_runtime_auth_socket_statement("yandi_runtime", runtime_auth_socket_os_user)]
                     + yandi_runtime_grant_statements("yandi_runtime", "localhost"))
@@ -211,7 +228,6 @@ def run_bootstrap(
         ensure_role(conn, yandi_runtime_statements("yandi_runtime", runtime_host, runtime_password))
     ensure_role(conn, yandi_readonly_statements("yandi_readonly", readonly_host, readonly_password))
     ensure_role(conn, yandi_migrator_statements("yandi_migrator", migrator_host, migrator_password))
-    apply_schema(conn)
     triggers_created = apply_immutability_triggers(conn)
     if instance_uuid:
         record_instance_identity(conn, instance_uuid, created_by_host=instance_created_by_host)
