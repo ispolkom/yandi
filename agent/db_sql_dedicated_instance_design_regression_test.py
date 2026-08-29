@@ -163,6 +163,21 @@ check(
 )
 check("install script requires root explicitly (checks id -u)", 'id -u' in script_text)
 check(
+    "install script requires the explicit --database-only flag (YANDI DATABASE "
+    "BOOTSTRAP V1 mandate: the invocation itself must make it unambiguous this "
+    "installer only ever provisions the dedicated YANDI DB, never the shared "
+    "FastPanel mysql.service)",
+    '"${1:-}" != "--database-only"' in script_text,
+)
+
+_no_flag = subprocess.run(["bash", str(INSTALL_SCRIPT)], capture_output=True, text=True)
+check(
+    "invoking without --database-only refuses immediately (before even the root "
+    "check) rather than proceeding",
+    _no_flag.returncode != 0 and "--database-only" in (_no_flag.stdout + _no_flag.stderr),
+    f"rc={_no_flag.returncode} out={_no_flag.stdout!r} err={_no_flag.stderr!r}",
+)
+check(
     "install script's disk gate calls the REAL agent.db.sql.storage_policy."
     "classify_storage_state(), not a duplicated/hand-rolled threshold check",
     "from agent.db.sql.storage_policy import classify_storage_state" in script_text,
@@ -174,7 +189,19 @@ check(
 check(
     "install script's datadir initialization refuses to re-initialize a NON-EMPTY "
     "datadir (crash-recovery safety, mandate §23 — never risk clobbering existing data)",
-    "is not empty" in script_text and "assuming already initialized" in script_text,
+    "is non-empty" in script_text and "already-initialized MySQL datadir" in script_text,
+)
+check(
+    "install script's datadir initialization STOPs (does not guess/proceed) when the "
+    "datadir is non-empty but does NOT look like a real MySQL datadir (DATABASE "
+    "BOOTSTRAP V1 mandate: 'non-empty UNKNOWN datadir => STOP', not 'assume fine')",
+    "does NOT look like a valid MySQL datadir" in script_text
+    and "refusing to guess whether it is safe to initialize over" in script_text,
+)
+check(
+    "install script re-checks CURRENT storage state immediately before the actual "
+    "disk-consuming mysqld --initialize call, not only once early in the script",
+    script_text.count("disk_gate") >= 2,
 )
 check(
     "install script's OS-identity/filesystem/config steps are idempotent (id check, "
