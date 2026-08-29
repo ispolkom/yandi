@@ -287,6 +287,95 @@ def main() -> int:
     print()
 
     # ============================================================
+    # PRODUCTION BUG: cross-claim/cross-query subject contamination
+    # ============================================================
+    #
+    # Live production run: claim cl_98e3d6c9 "Солнце имеет экстремальное
+    # давление, особенно в недрах." got anchors=['ес', 'евросоюз', ...]
+    # from the Subject Gate, rejecting real Wikipedia Solar core / NSO
+    # Solar Interior evidence. Root cause was NOT state leaking between
+    # claims/requests — it was _SUBJECT_ANCHOR_ALIASES' "ес"/"нато" keys
+    # missing a right word-boundary, so they matched as a bare PREFIX of
+    # ordinary Russian words ("Если", "Естественно", and critically
+    # "Есть" — as in the entirely unremarkable query phrasing "Есть ли
+    # у Солнца экстремальное давление в его недрах?"). Fixed in
+    # agent/claim_identity.py by adding "ес"/"нато" to
+    # _WHOLE_WORD_ONLY_KEYS. No claim-specific/"Sun" special case and no
+    # EU blacklist were added — the fix is general and still lets real
+    # EU/NATO mentions match (checked below).
+    print("=" * 72)
+    print("PRODUCTION BUG: cross-claim/cross-query subject contamination (EU false anchor)")
+    print("=" * 72)
+
+    from agent.claim_evidence_retriever import _subject_anchor_matches
+
+    _sun_claim_text = "Солнце имеет экстремальное давление, особенно в недрах."
+    # Reconstructed to match the real production log exactly: the
+    # printed anchors were ONLY the EU alias expansion (no 'солнце'/
+    # 'солнца' alongside it), so the sun reference itself must have been
+    # sentence-initial (excluded by the first-word-skip rule) rather
+    # than a mid-sentence capitalized word — this phrasing reproduces
+    # that shape.
+    _sun_query_context = "Солнце: есть ли у него экстремальное давление в его недрах?"
+
+    check(
+        "11. solar-pressure claim text alone yields no anchors (falls "
+        "back to query_context, as production did)",
+        _extract_subject_anchors(_sun_claim_text) == [],
+        f"anchors={_extract_subject_anchors(_sun_claim_text)}",
+    )
+    _sun_anchors_from_query = _extract_subject_anchors(_sun_query_context)
+    check(
+        "11b. query_context no longer produces a bogus EU anchor just "
+        "because it contains the word 'есть'",
+        _sun_anchors_from_query == [],
+        f"anchors={_sun_anchors_from_query}",
+    )
+
+    # The exact evidence the production bug rejected: Wikipedia Solar
+    # core / NSO Solar Interior — title/url carry "solar core"/"solar
+    # interior", no EU wording anywhere. With no anchor left at all
+    # (matching production's own printed anchor list, which had nothing
+    # but the EU alias expansion), the gate must impose no constraint
+    # (_subject_anchor_matches returns True on an empty anchor list).
+    for _title, _url, _passage in [
+        ("Solar core - Wikipedia", "https://en.wikipedia.org/wiki/Solar_core",
+         "The solar core is the region of extreme pressure and temperature within the Sun."),
+        ("Solar Interior | National Solar Observatory", "https://nso.edu/for-public/solar-interior/",
+         "Pressure inside the Sun's interior reaches extreme values near the core."),
+    ]:
+        _matched, _fields = _subject_anchor_matches(
+            _sun_query_context, _passage, title=_title, url=_url,
+        )
+        check(
+            f"11d. {_title!r} is no longer REJECTed by the Subject Gate "
+            "for lacking EU wording",
+            _matched is True,
+            f"matched={_matched} fields={_fields} anchors={_sun_anchors_from_query}",
+        )
+
+    # Isolation: two claims processed in the same batch/run must not
+    # share a query_context dict/reference — each claim's own dict
+    # entry must be independently assignable without mutating a sibling
+    # claim (guards the "чужой claim" contamination hypothesis structurally,
+    # even though this particular bug's actual cause was the regex above).
+    _claim_a = {"claim_id": "cl_a", "claim_text": "Солнце имеет экстремальное давление."}
+    _claim_b = {"claim_id": "cl_b", "claim_text": "ЕС ввёл новые санкции против импорта стали."}
+    _batch_query = "Есть ли у Солнца экстремальное давление в его недрах?"
+    for _c in (_claim_a, _claim_b):
+        if not _c.get("query_context"):
+            _c["query_context"] = _batch_query
+    _claim_a["query_context"] = "мутация только claim_a, не должна задеть claim_b"
+    check(
+        "11e. mutating one claim's query_context after assignment does "
+        "not affect a sibling claim's own dict (no shared reference)",
+        _claim_b["query_context"] == _batch_query,
+        f"claim_b query_context={_claim_b['query_context']!r}",
+    )
+
+    print()
+
+    # ============================================================
     # P3: REGISTRY EVIDENCE — ДИАГНОСТИКА (НЕ ФИКС)
     # ============================================================
     print("=" * 72)

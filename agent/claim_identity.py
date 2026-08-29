@@ -109,7 +109,28 @@ _SUBJECT_ANCHOR_ALIASES = {
 # европейский, ...) keep prefix-only matching, which is what lets them
 # correctly catch genitive/instrumental/etc. inflections elsewhere in
 # a claim (юпитера, юпитером, ...).
-_WHOLE_WORD_ONLY_KEYS = {"юпитере", "европе", "сатурне", "венере", "марсе"}
+#
+# "ес"/"нато" belong in this same set for a DIFFERENT but related
+# reason: they aren't Russian noun stems that take case-ending suffixes
+# at all — "ЕС"/"НАТО" are invariant acronyms, always written the same
+# regardless of grammatical case. Left-anchored-only prefix matching
+# was never actually needed for them (there is no "ес+suffix" or
+# "нато+suffix" inflected form to catch), it only left a 2-4 letter
+# left-anchored substring live to accidentally match the START of
+# ordinary, extremely common Russian words: "ес" matches "Если"/
+# "Естественно"/"Есть" (a query as plain as "Есть ли у Солнца
+# экстремальное давление в его недрах?" already false-positives),
+# "нато" matches "Натощак"/"Наточить". A production solar-pressure
+# claim was misclassified as EU-subject purely because its query began
+# with "Есть" — real evidence (Wikipedia Solar core, NSO Solar
+# Interior) was then REJECTed by the Subject Gate for failing to
+# mention the EU. Root cause was the missing right boundary on these
+# two invariant-acronym keys, not anything specific to "Sun" claims —
+# no per-claim/per-subject special case added here.
+_WHOLE_WORD_ONLY_KEYS = {
+    "юпитере", "европе", "сатурне", "венере", "марсе",
+    "ес", "нато",
+}
 
 
 def canonicalize_claim_text(claim_text: str) -> str:
