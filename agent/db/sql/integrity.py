@@ -22,6 +22,48 @@ engineering (§26): ONE chain per entity_type (not one global chain —
 avoids serializing every canonical write through a single lock; "YANDI
 сейчас не high-frequency trading system"), no Merkle-tree framework,
 HMAC-SHA256 (not a hand-rolled construction).
+
+CRASH-ORDERING FINDING (Этап 5E-S2 §5 audit — documented, NOT fixed
+here, per that task's own explicit instruction: "если найдёшь — не
+исправляй вслепую без regression"):
+
+    make_checkpoint() and append_event() both operate on a plain
+    in-memory `events`/`chain` list the CALLER assembled — neither
+    function itself reads from, or is coupled to, any real database
+    transaction. This means NEITHER function can enforce, on its own,
+    the ordering mandate §5 requires:
+
+        DB transaction
+            v COMMIT SUCCESS
+        integrity chain committed consistently
+            v
+        external checkpoint durable write (fsync/atomic replace)
+            v
+        DONE
+
+    If a FUTURE caller (wiring this into repositories.py, not done in
+    this pass) called make_checkpoint() with an event list that
+    included a row not yet durably committed to the DB — e.g. built
+    from in-memory state before the transaction's COMMIT returns, or
+    from a read that ran inside an uncommitted transaction under a
+    weaker isolation level — the checkpoint could claim a DB state
+    that a crash immediately after could roll back, silently
+    defeating the very rollback-detection this module exists to
+    provide (a false "DB matches checkpoint" the next time check_for_
+    rollback() runs, when in fact the DB is now BEHIND what was
+    checkpointed).
+
+    THIS IS A CALLER-SIDE CONTRACT, not something append_event()/
+    make_checkpoint() can enforce from inside this module — they have
+    no way to know whether the `events`/`fields` they were handed
+    reflect committed data. Binding this contract enforceably (e.g. a
+    checkpoint function that itself queries the DB inside the same
+    transaction that just committed, rather than accepting a bare
+    Python list) is scoped as part of the FUTURE wiring work
+    (SECURITY_ARCHITECTURE.md §21), specifically so the ordering
+    guarantee and its regression test can be written against a REAL
+    transaction boundary, not simulated. Recorded here so that future
+    wiring work starts from this finding instead of rediscovering it.
 """
 from __future__ import annotations
 

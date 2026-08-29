@@ -1,0 +1,173 @@
+# deploy/yandi-db.service — Этап 5E-S2 §D/§F/§G design artifact.
+#
+# NOT INSTALLED. Not copied to /etc/systemd/system/. Not enabled. Not
+# started. This file is a DESIGN ARTIFACT, reviewed but never applied
+# in this pass (no root access exists in this session to apply it, and
+# applying it is explicitly deferred to a future, owner-authorized
+# `sudo ./install-yandi` run — see agent/db/sql/DEDICATED_INSTANCE_
+# DESIGN.md §K).
+#
+# Deliberately NOT an instantiation of the packaged mysql@.service
+# template (`systemctl start mysql@yandi`) — that template hard-codes
+# User=mysql/Group=mysql, which would run this dedicated instance
+# under the SAME OS identity as the shared FastPanel database,
+# defeating the entire point of "dedicated". This is instead a
+# standalone unit with its own User=/Group=.
+#
+# Every sandboxing directive below is commented with WHY / WHAT IT
+# BLOCKS / MYSQL COMPATIBILITY RISK, per Этап 5E-S2 §6's explicit
+# instruction not to copy a hardening checklist blindly. Several are
+# marked "REQUIRES LIVE VERIFICATION" — this file does not claim they
+# are proven to work with mysqld; that can only be checked once this
+# unit is actually started against the dedicated instance.
+
+[Unit]
+Description=YANDI dedicated Percona instance (isolated from shared FastPanel MySQL)
+After=local-fs.target
+Requires=local-fs.target
+# Deliberately NOT "After=network.target" / "Wants=network-online.target"
+# — this instance has no network listener at all (skip-networking in
+# my.cnf, RestrictAddressFamilies=AF_UNIX below); it has no reason to
+# wait on network bring-up, and doing so would only slow this unit's
+# start for no benefit.
+
+[Service]
+Type=notify
+User=yandi-db
+Group=yandi-db
+# WHY: the entire point of this unit — filesystem-ownership isolation
+# from the shared instance's `mysql` OS user (uid 109). WHAT IT BLOCKS:
+# nothing mysqld itself needs; systemd sets the UID/GID BEFORE exec,
+# so mysqld never has to setuid()/setgid() itself at runtime (relevant
+# to NoNewPrivileges below). MYSQL COMPATIBILITY RISK: low — this is
+# exactly how the shared instance's own mysql.service already runs
+# mysqld (as a non-root User=), just under a different account.
+
+PermissionsStartOnly=true
+ExecStartPre=/usr/share/mysql/mysql-systemd-start pre @yandi
+# Reuses the SAME packaged sanity-check script the shared instance's
+# unit uses (with a distinct --defaults-group-suffix, matching the
+# packaged mysql@.service template's own convention) — not a forked
+# copy of Percona's own startup logic.
+
+EnvironmentFile=-/etc/yandi/mysql/environment
+ExecStart=/usr/sbin/mysqld --defaults-file=/etc/yandi/mysql/my.cnf
+# WHY a dedicated --defaults-file rather than --defaults-group-suffix
+# alone: full isolation of every config value (datadir/socket/pid/log/
+# keyring paths, skip-networking) in one file under /etc/yandi/, never
+# mixed into the shared /etc/mysql/ tree at all.
+
+TimeoutSec=600
+Restart=on-failure
+RestartPreventExitStatus=1
+RestartForceExitStatus=16
+# Matches the packaged unit's own restart semantics (exit code 16 is
+# mysqld's own "RESTART" signal for the SQL RESTART statement) — not
+# reinvented.
+
+RuntimeDirectory=yandi
+RuntimeDirectoryMode=0750
+# WHY: /run/yandi/ (socket + pidfile) created fresh each boot, owned
+# yandi-db:yandi-db, mode 0750 — traversable only by yandi-db and its
+# group, never world-readable (WHAT IT BLOCKS: any other OS user/
+# process listing or entering the directory to find the socket path).
+# MYSQL COMPATIBILITY RISK: none — RuntimeDirectory is a systemd-
+# managed tmpfs-backed directory mysqld just writes into, identical in
+# kind to the shared instance's own RuntimeDirectory=mysqld.
+
+# ── Filesystem sandboxing ────────────────────────────────────────────
+ProtectSystem=strict
+# WHY: makes the ENTIRE filesystem read-only to this process except
+# /proc, /sys (limited), and whatever is explicitly listed in
+# ReadWritePaths= below — the strongest available blast-radius
+# reduction if mysqld itself is ever compromised (T26 in SECURITY_
+# THREAT_MODEL.md — this doesn't prevent RCE, it bounds what an RCE'd
+# mysqld can then WRITE to). WHAT IT BLOCKS: writing to /usr, /etc
+# (except the datadir/config paths explicitly allowed below), /boot,
+# every other service's data. MYSQL COMPATIBILITY RISK: mysqld must
+# have EVERY path it writes to during normal operation listed in
+# ReadWritePaths — missing one will make mysqld fail to start or fail
+# a specific operation (e.g. a missing tmpdir entry breaks disk-based
+# sorts). REQUIRES LIVE VERIFICATION: the exact set of paths mysqld
+# touches (datadir, keyring dir, log dir, socket/pid runtime dir, and
+# tmpdir if set to a custom path) must be confirmed complete by
+# actually starting the service and checking for permission-denied
+# errors in the error log — this list is a design-time best effort,
+# not a live-proven-complete one.
+ReadWritePaths=/var/lib/yandi/mysql/data /var/lib/yandi/mysql-keyring /var/log/yandi /var/lib/yandi/tmp
+
+ProtectHome=true
+# WHY: mysqld has no legitimate reason to read or write any user's
+# home directory. WHAT IT BLOCKS: /home/**, /root/**, /run/user/**.
+# MYSQL COMPATIBILITY RISK: none expected — nothing in a standard
+# Percona server's normal operation touches home directories.
+
+PrivateTmp=true
+# WHY: isolates this process's view of /tmp from the host's shared
+# /tmp (defense against another process on the shared host reading/
+# planting files in a world-writable /tmp that mysqld might otherwise
+# touch). WHAT IT BLOCKS: sharing /tmp content with any other process.
+# MYSQL COMPATIBILITY RISK: low — mysqld still sees a working, private
+# /tmp; DESIGN NOTE: this instance's `tmpdir` config variable should
+# still point at the DEDICATED /var/lib/yandi/tmp path (already in
+# ReadWritePaths above) rather than relying on the private /tmp, so
+# temp-table/sort-file disk usage is covered by this same instance's
+# own storage_policy.py disk-space monitoring, not hidden inside an
+# ephemeral private tmpfs.
+
+NoNewPrivileges=true
+# WHY: once started, this process (and anything it might exec) can
+# never gain additional privileges via a setuid/setgid binary or file
+# capability — closes a whole class of privilege-escalation path if
+# mysqld is ever compromised. WHAT IT BLOCKS: any setuid()/setgid()
+# syscall that would INCREASE privilege (dropping privilege further is
+# still allowed). MYSQL COMPATIBILITY RISK: low, IF (as designed here)
+# systemd's own User=/Group= directives perform the privilege drop
+# BEFORE exec'ing mysqld — mysqld never needs to call setuid()/setgid()
+# itself in that case (unlike, e.g., running mysqld as root and letting
+# it drop to `mysql` internally via its own --user= flag, which this
+# design does NOT do). REQUIRES LIVE VERIFICATION: confirm mysqld
+# actually starts cleanly under this combination — the existing
+# AppArmor profile (complain mode, see DEDICATED_INSTANCE_DESIGN.md §G)
+# grants mysqld capability sys_resource/dac_override/setuid/setgid/
+# sys_nice; NoNewPrivileges doesn't revoke currently-held capabilities,
+# but interacts with capability semantics in ways that should be
+# checked live, not assumed.
+
+RestrictAddressFamilies=AF_UNIX
+# WHY: OS-level enforcement of "no network access whatsoever" — a
+# SECOND wall behind my.cnf's skip-networking config directive (mandate
+# §3: config alone can be misconfigured/reverted; this makes it
+# structurally impossible for this process to even OPEN an AF_INET/
+# AF_INET6 socket, regardless of what my.cnf says). WHAT IT BLOCKS: any
+# TCP/UDP socket creation attempt, IPv4 or IPv6. MYSQL COMPATIBILITY
+# RISK: Percona Server ships a telemetry agent
+# (percona-telemetry-agent, referenced in the existing AppArmor
+# profile's "/usr/local/percona/telemetry/ps/" rule) that may attempt
+# outbound network calls — blocking AF_INET here would cause those
+# calls to fail. REQUIRES LIVE VERIFICATION: confirm mysqld's own
+# startup and normal operation do not treat a failed telemetry call as
+# fatal (expected: it should not, telemetry is best-effort by design in
+# Percona products, but this is not independently confirmed here).
+# Blocking a phone-home telemetry channel entirely is arguably a
+# feature for YANDI's own privacy posture (mandate's general
+# discipline around not expanding what's collected), not treated as
+# a downside in this design.
+
+# ── Not included, and why ────────────────────────────────────────────
+# ProtectKernelTunables=true / ProtectKernelModules=true / ProtectControlGroups=true
+#   — reasonable defense-in-depth candidates NOT added this pass simply
+#   because they were not part of Этап 5E-S2's explicit request and
+#   adding untested hardening beyond what was asked risks silently
+#   breaking mysqld startup in a way this non-privileged pass cannot
+#   detect. Left as a documented candidate for the FIRST live install
+#   attempt to evaluate one at a time, not bundled in blind.
+# SystemCallFilter=
+#   — a syscall allow-list would meaningfully harden this unit further,
+#   but constructing a correct one requires observing mysqld's actual
+#   syscall usage (e.g. via strace during a live run) — impossible to
+#   do responsibly without the instance existing. Documented as a
+#   follow-up for the live install phase, not guessed at here.
+
+[Install]
+WantedBy=multi-user.target
