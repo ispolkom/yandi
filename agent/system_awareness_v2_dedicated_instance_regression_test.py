@@ -136,10 +136,13 @@ service_unit = open("deploy/yandi-db.service", encoding="utf-8").read()
 
 check(
     "E: SOCKET_PATH in system_awareness.py matches deploy/install-yandi.sh's own "
-    "RUNTIME_DIR/mysql.sock composition (both /run/yandi/mysql.sock)",
-    sa._YANDI_DB_SOCKET_PATH == "/run/yandi/mysql.sock"
-    and 'RUNTIME_DIR="/run/yandi"' in install_sh
-    and 'SOCKET_PATH="${RUNTIME_DIR}/mysql.sock"' in install_sh,
+    "RUNTIME_MYSQL_DIR/mysql.sock composition (both /run/yandi/mysql/mysql.sock — "
+    "live-confirmed bug: this module's own independent copy of the path went "
+    "stale when install-yandi.sh split RUNTIME_DIR into RUNTIME_MYSQL_DIR/"
+    "RUNTIME_BOOTSTRAP_DIR for a runtime-directory-lifecycle fix)",
+    sa._YANDI_DB_SOCKET_PATH == "/run/yandi/mysql/mysql.sock"
+    and 'RUNTIME_MYSQL_DIR="${RUNTIME_DIR}/mysql"' in install_sh
+    and 'SOCKET_PATH="${RUNTIME_MYSQL_DIR}/mysql.sock"' in install_sh,
 )
 check(
     "E: the systemctl unit name checked ('yandi-db') matches deploy/yandi-db.service's "

@@ -369,10 +369,16 @@ def run(
 
     temp_password = load_and_consume_fresh_init_marker(fresh_init_marker)
     if temp_password is not None:
-        # Non-secret diagnostic only — see _fingerprint()'s own
-        # docstring. Compare against install-yandi.sh's own
-        # TEMP_SOURCE_FP/MARKER_FP log lines to localize a divergence.
-        print(f"[live_bootstrap] PYTHON_LEN={len(temp_password)} PYTHON_FP={_fingerprint(temp_password)}")
+        # Non-secret diagnostic only (length + one-way fingerprint,
+        # never the value) — see _fingerprint()'s own docstring.
+        # Compare against install-yandi.sh's own TEMP_SOURCE_FP/
+        # MARKER_FP log lines to localize a divergence. Gated behind
+        # the SAME explicit opt-in as the bash side (mandate: these
+        # diagnostics were for this one investigation, not a
+        # permanent production-default print) — off unless the owner
+        # explicitly asks for them again.
+        if os.environ.get("YANDI_INSTALL_DEBUG_SECRETS") == "1":
+            print(f"[live_bootstrap] PYTHON_LEN={len(temp_password)} PYTHON_FP={_fingerprint(temp_password)}")
         _retire_temporary_root_password(socket_path, temp_password)
     elif not _root_reachable_via_auth_socket(socket_path):
         raise LiveBootstrapError(

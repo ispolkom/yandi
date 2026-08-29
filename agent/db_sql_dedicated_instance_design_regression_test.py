@@ -241,8 +241,10 @@ check(
 # never re-derived from the shared log.
 check(
     "install script defines a dedicated FRESH_INIT_MARKER path (under "
-    "/run, tmpfs) — separate from the ever-growing $ERROR_LOG",
-    'FRESH_INIT_MARKER="${RUNTIME_DIR}/' in script_text,
+    "/run, tmpfs, in the root-only RUNTIME_BOOTSTRAP_DIR — not the "
+    "systemd-managed RUNTIME_MYSQL_DIR) — separate from the ever-"
+    "growing $ERROR_LOG",
+    'FRESH_INIT_MARKER="${RUNTIME_BOOTSTRAP_DIR}/' in script_text,
 )
 check(
     "initialize_datadir() captures mysqld --initialize's OWN output into a "
@@ -343,7 +345,7 @@ check(
 )
 check(
     "guard check 3: unexpected socket path is refused",
-    '[ "$SOCKET_PATH" = "/run/yandi/mysql.sock" ] || die' in _guard_body,
+    '[ "$SOCKET_PATH" = "/run/yandi/mysql/mysql.sock" ] || die' in _guard_body,
 )
 check(
     "guard check 4: presence of EITHER readonly or migrator secret file "

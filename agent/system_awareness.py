@@ -659,7 +659,16 @@ def _selinux_section() -> Dict[str, Any]:
 # DATABASE BOOTSTRAP V1, mandate §23. Fixed, well-known paths matching
 # deploy/install-yandi.sh / deploy/yandi-db.service exactly — these are
 # the SAME literal paths that script creates, not independently guessed.
-_YANDI_DB_SOCKET_PATH = "/run/yandi/mysql.sock"
+#
+# Live-confirmed bug (ninth Phase B attempt): the socket moved from
+# /run/yandi/mysql.sock to /run/yandi/mysql/mysql.sock when install-
+# yandi.sh split its single RUNTIME_DIR into RUNTIME_MYSQL_DIR
+# (systemd-managed, torn down on service stop) and RUNTIME_BOOTSTRAP_DIR
+# (root-only, survives service stop/start) — this module's own
+# independent copy of the path was not updated at the same time, which
+# would have made System Awareness always report socket_present=ABSENT
+# for a genuinely healthy dedicated instance.
+_YANDI_DB_SOCKET_PATH = "/run/yandi/mysql/mysql.sock"
 _YANDI_DB_INSTANCE_ID_PATH = "/etc/yandi/mysql/instance.id"
 
 
