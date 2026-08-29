@@ -127,12 +127,23 @@ def _retire_temporary_root_password(socket_path: str, temp_password: str):
     run happens)."""
     import pymysql
     import pymysql.cursors
+    from pymysql.constants import CLIENT
 
     try:
         conn = pymysql.connect(
             unix_socket=socket_path, user="root", password=temp_password,
             charset="utf8mb4", connect_timeout=5, autocommit=True,
             cursorclass=pymysql.cursors.DictCursor,
+            # Live-confirmed bug (first Phase B run): pymysql's default
+            # capability bitmask does NOT include HANDLE_EXPIRED_
+            # PASSWORDS, so the server outright refuses the connection
+            # (error 1862) for the mandatory post-`--initialize`
+            # "sandbox mode" account instead of letting us in far enough
+            # to run the one ALTER USER statement sandbox mode permits.
+            # client_flag is OR'd with pymysql's own default CAPABILITIES
+            # (see pymysql.connections.Connection.__init__), not a
+            # replacement — this only ADDS the one missing bit.
+            client_flag=CLIENT.HANDLE_EXPIRED_PASSWORDS,
         )
     except Exception as e:
         raise LiveBootstrapError(f"could not connect with the temporary root password: {e}") from e
