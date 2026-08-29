@@ -266,6 +266,31 @@ check(
     f"match={_init_call_match.group(0) if _init_call_match else None!r}",
 )
 
+# Live-confirmed bug (second owner run, after the --defaults-file fix):
+# the script's own `mysqld ... | tee -a "$ERROR_LOG"` runs under sudo
+# (root); if $ERROR_LOG didn't already exist, tee created it root-owned,
+# so mysqld (dropped to $YANDI_DB_USER before opening its log-error
+# target) then failed with Permission denied against its OWN log file.
+check(
+    "create_filesystem() explicitly touches/chowns/chmods $ERROR_LOG to "
+    "$YANDI_DB_USER before mysqld ever runs, so a root-owned file left by "
+    "tee -a (or an earlier failed attempt) can't block mysqld's own "
+    "privilege-dropped log-error open",
+    'touch "$ERROR_LOG"' in script_text
+    and 'chown "$YANDI_DB_USER:$YANDI_DB_USER" "$ERROR_LOG"' in script_text,
+)
+_install_lines_touch_error_log = any(
+    "$ERROR_LOG" in line
+    for line in script_text.splitlines()
+    if line.strip().startswith("install ")
+)
+check(
+    "the $ERROR_LOG ownership fix uses touch (never truncates existing "
+    "content), not install/cp (which would wipe real historical log "
+    "content on every idempotent re-run)",
+    not _install_lines_touch_error_log,
+)
+
 
 # ============================================================
 # Host-provisioning check — INFORMATIONAL ONLY, not pass/fail.
