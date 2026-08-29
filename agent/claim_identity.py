@@ -236,3 +236,114 @@ def extract_subject_anchors(claim_text: str) -> List[str]:
 
     # stable dedup
     return list(dict.fromkeys(expanded))
+
+
+# ============================================================
+# BILINGUAL CONTENT ANCHORS (Subject Gate architecture change)
+# ============================================================
+#
+# extract_subject_anchors() above answers "does this claim name a
+# specific proper-noun subject?" — narrow by design (astronomical
+# bodies + EU/NATO/Eurozone), and deliberately NOT extended with more
+# hand-maintained object->translation pairs (that path doesn't scale
+# and was explicitly rejected: no "солнце -> sun" entry was added here
+# even after the EU/NATO false-anchor bug, see agent/claim_evidence_
+# retriever.py's bilingual_claim_anchor_tiers() docstring for why).
+#
+# extract_content_anchors() below is a DIFFERENT, complementary
+# extraction: ordinary content words ("жизнь"/"температура"/
+# "поверхность"), not just proper nouns. It is intentionally NOT a
+# translation table either — it only tokenizes ONE text and drops
+# stopwords/retrieval-filler vocabulary. Cross-language coverage comes
+# from calling it twice (original text + a local-LLM English
+# translation, done by the caller) and unioning the results — two
+# independent single-language extractions, not one bilingual lookup.
+#
+# The filler list is not an arbitrary guess: it is exactly the
+# vocabulary this system's OWN query-formulation prompts inject
+# (agent/orch_web_query.py's system prompt and agent/claim_evidence_
+# retriever.py's formulate_claim_evidence_queries() prompt — "evidence,
+# observations, data, research, mission, spacecraft, study,
+# measurements", "confirmed evidence", "contradictory evidence",
+# "discovery", "detection", ...). Those words describe the SEARCH ACT,
+# not the claim's subject matter, and would otherwise make almost any
+# claim spuriously "match" almost any generic science article.
+_RETRIEVAL_FILLER_WORDS = {
+    "evidence", "observations", "observation", "data", "research",
+    "mission", "spacecraft", "study", "studies", "measurements",
+    "measurement", "confirmed", "confirmation", "contradictory",
+    "discovery", "detection", "detected", "biosignature", "primary",
+    "institutional", "direct", "counter", "source", "sources",
+    "доказательство", "доказательства", "наблюдение", "наблюдения",
+    "данные", "исследование", "исследования", "миссия", "измерения",
+    "измерение", "подтверждено", "подтверждение", "противоречащие",
+    "противоречие", "обнаружено", "обнаружение", "источник",
+    "источники",
+}
+
+# Minimal function-word lists — just enough to drop grammatical glue
+# words (pronouns, prepositions, conjunctions, question particles,
+# copula), not a full stopword corpus. Anything not on these lists and
+# not in _RETRIEVAL_FILLER_WORDS is treated as a content word.
+_RU_STOPWORDS = {
+    "и", "в", "во", "не", "на", "я", "с", "со", "а", "как", "то",
+    "все", "она", "он", "оно", "они", "так", "его", "но", "да",
+    "ты", "к", "у", "же", "вы", "за", "бы", "по", "только", "ее",
+    "её", "мне", "было", "вот", "от", "меня", "еще", "ещё", "нет",
+    "о", "об", "из", "ему", "теперь", "когда", "даже", "ну", "вдруг",
+    "ли", "если", "уже", "или", "ни", "быть", "был", "была", "были",
+    "есть", "для", "что", "чем", "кто", "этот", "эта", "это", "эти",
+    "тот", "та", "те", "какой", "какая", "какое", "какие", "его",
+    "особенно", "около",
+}
+
+_EN_STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been",
+    "being", "of", "to", "in", "on", "at", "for", "with", "about",
+    "there", "this", "that", "these", "those", "it", "its", "and",
+    "or", "not", "no", "does", "do", "did", "has", "have", "had",
+    "what", "which", "who", "whom", "how", "why", "than",
+}
+
+_CONTENT_TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё-]+")
+
+
+def extract_content_anchors(text: str) -> List[str]:
+    """
+    Broader-than-proper-nouns anchor extraction for one text.
+
+    Unlike extract_subject_anchors() (proper-noun + hand-maintained
+    alias table — kept unchanged, still the source of the EU/NATO
+    whole-word fix), this treats any non-stopword, non-filler token as
+    a candidate anchor, so "жизнь"/"температура"/"поверхность" count
+    just as much as "Солнце" does. No RU/EN word is paired with a
+    translation here — see the module-level comment above this
+    function for the two-call, union-not-lookup design.
+
+    Known limitation (unchanged from extract_subject_anchors(), not
+    solved here — no stemmer/lemmatizer dependency exists in this
+    repo): matching downstream is exact-token/substring, so a Russian
+    anchor in one grammatical case ("температура") will not match a
+    passage using a different case ("температуры"). This mainly
+    affects Russian-language evidence passages; English evidence (the
+    majority of scientific sources this system retrieves) is far less
+    inflected and is largely unaffected.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    tokens = _CONTENT_TOKEN_RE.findall(text.lower())
+
+    anchors = []
+    for tok in tokens:
+        if len(tok) < 3:
+            continue
+        if tok in _RU_STOPWORDS or tok in _EN_STOPWORDS:
+            continue
+        if tok in _RETRIEVAL_FILLER_WORDS:
+            continue
+        anchors.append(tok)
+
+    # stable dedup
+    return list(dict.fromkeys(anchors))

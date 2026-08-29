@@ -42,6 +42,9 @@ from agent.claim_relation import (
     extract_claim_from_source,
 )
 from agent.claim_identity import extract_subject_anchors as _extract_subject_anchors
+from agent.claim_identity import extract_content_anchors as _extract_content_anchors
+
+_CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 
 
 # ------------------------------------------------------------
@@ -461,12 +464,121 @@ def formulate_claim_evidence_queries_batch(
     return results
 
 
+def _anchor_hit(anchor: str, haystack: str) -> bool:
+    """
+    Word-boundary-aware anchor match — NOT plain substring containment.
+
+    Found while implementing bilingual anchors: a short English named
+    anchor like "sun" is a literal SUBSTRING of ordinary unrelated
+    words — "sunlight", "sunday", "sunset" — so a naive `anchor in
+    haystack` check would let a "solar power" (photovoltaic technology)
+    page wrongly pass the Subject Gate for a Sun claim just because its
+    text mentions "sunlight". `\\b` word-boundary regex (Python's re
+    already treats Cyrillic as word characters under the default
+    Unicode mode) fixes this for both single-word and multi-word
+    anchors (e.g. "европейский союз") without needing per-anchor
+    special-casing.
+    """
+    if not anchor:
+        return False
+
+    return re.search(r"\b" + re.escape(anchor) + r"\b", haystack) is not None
+
+
+def _translate_claim_to_english(text: str) -> str:
+    """
+    Lightweight local-LLM translation used ONLY for bilingual Subject
+    Gate anchor identity — NOT a second search query, NOT a second web
+    fetch (mandate: "не удваивать web fetch budget"). Reuses the same
+    GENERATION_SEMAPHORE-gated _call_ollama() the query formulator
+    already calls, so this doesn't open a new unbounded LLM-concurrency
+    path — one extra call per claim, same gate as everything else here.
+
+    Returns "" (never the untranslated original) on any failure or
+    empty input — callers must treat that as "no EN anchors available
+    for this claim", never silently reuse Cyrillic text as if it were
+    English (that could never literally match English-language
+    evidence and would just be dead weight in the anchor set).
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+
+    if not _CYRILLIC_RE.search(text):
+        # Already Latin-script — no translation LLM call needed.
+        return text
+
+    prompt = (
+        "Translate the following Russian factual statement or question "
+        "into English. Literal translation only — do not answer it, do "
+        "not add commentary, do not judge whether it is true.\n\n"
+        f"TEXT:\n{text}\n\n"
+        'Return ONLY JSON: {"en": "translated text"}'
+    )
+    try:
+        raw = _call_ollama(prompt)
+        data = _extract_json(raw)
+        en = data.get("en", "")
+        return en.strip() if isinstance(en, str) else ""
+    except Exception:
+        return ""
+
+
+def bilingual_claim_anchor_tiers(text: str) -> "tuple[List[str], List[str]]":
+    """
+    Subject Gate anchor set — bilingual (RU + local-LLM EN translation),
+    computed ONCE per claim by the caller (before the evidence loop, not
+    per evidence item — the one translation LLM call this needs is
+    claim-scoped, not per-source, so cost doesn't scale with evidence
+    pool size).
+
+    Returns (named_anchors, content_anchors) as TWO separate tiers, not
+    one flat list:
+
+        named_anchors   proper-noun / alias-based (_extract_subject_
+                         anchors — EU/NATO whole-word fix unchanged),
+                         union of the RU text and its EN translation.
+        content_anchors extract_content_anchors()'s broader content
+                         words ("жизнь"/"температура"/"поверхность"),
+                         same bilingual union, MINUS anything already
+                         in named_anchors.
+
+    Kept as two tiers (not merged) because of an asymmetry the mandate
+    itself requires: when a claim genuinely NAMES a subject (Sun/
+    Солнце, Jupiter/Юпитер, ...), the gate must require THAT anchor
+    specifically. Falling back to plain "any anchor matches" over a
+    flat merged list would let off-topic evidence pass just for sharing
+    incidental vocabulary — a Mars-core article mentioning "pressure"/
+    "temperature" would wrongly satisfy a Sun-pressure claim, and a
+    "solar power" (technology) page would wrongly satisfy it too. Named
+    anchors alone decide the match whenever any exist; content anchors
+    only decide it when the claim has no named subject anchor at all
+    (see _subject_anchor_matches() below).
+
+    No RU/EN word pairs are hardcoded anywhere in this function — see
+    agent/claim_identity.py's module comment above extract_content_
+    anchors() for the two-call/union design this relies on instead.
+    """
+    named = set(_extract_subject_anchors(text))
+    content = set(_extract_content_anchors(text))
+
+    en_text = _translate_claim_to_english(text)
+    if en_text:
+        named.update(_extract_subject_anchors(en_text))
+        content.update(_extract_content_anchors(en_text))
+
+    content -= named
+    return list(named), list(content)
+
+
 def _subject_anchor_matches(
     claim_text: str,
     passage: str,
     *,
     title: str = "",
     url: str = "",
+    named_anchors: "List[str] | None" = None,
+    content_anchors: "List[str] | None" = None,
 ) -> "tuple[bool, List[str]]":
     """
     MULTI-SIGNAL SUBJECT IDENTITY GATE.
@@ -495,10 +607,23 @@ def _subject_anchor_matches(
     Если anchor извлечь не удалось — gate ничего не запрещает
     (как и раньше).
 
+    named_anchors/content_anchors: optional precomputed bilingual tiers
+    from bilingual_claim_anchor_tiers() (see that function's docstring
+    for why they're two tiers, not one flat list). When omitted
+    (None), falls back to the original claim_text-only, RU-only,
+    named-anchor-only behavior — preserves this function's old
+    signature/behavior exactly for any caller that doesn't pass them.
+
     Возвращает (matched: bool, matched_fields: List[str]) — список
     полей, которые реально подтвердили identity (для диагностики).
     """
-    anchors = _extract_subject_anchors(claim_text)
+    named = (
+        named_anchors if named_anchors is not None
+        else _extract_subject_anchors(claim_text)
+    )
+    content = content_anchors if content_anchors is not None else []
+
+    anchors = named if named else content
 
     if not anchors:
         return True, []
@@ -509,13 +634,13 @@ def _subject_anchor_matches(
     url_haystack = (url or "").lower()
     passage_haystack = (passage or "").lower()
 
-    if any(anchor in title_haystack for anchor in anchors):
+    if any(_anchor_hit(anchor, title_haystack) for anchor in anchors):
         matched_fields.append("title")
 
-    if any(anchor in url_haystack for anchor in anchors):
+    if any(_anchor_hit(anchor, url_haystack) for anchor in anchors):
         matched_fields.append("url")
 
-    if any(anchor in passage_haystack for anchor in anchors):
+    if any(_anchor_hit(anchor, passage_haystack) for anchor in anchors):
         matched_fields.append("passage")
 
     return bool(matched_fields), matched_fields
@@ -777,6 +902,17 @@ def retrieve_claim_evidence(
     _parsing_ms = 0.0
     _embedding_ms = 0.0
 
+    # Bilingual Subject Gate anchors — computed ONCE per claim, here
+    # (not inside the loop below, and not earlier where the claim might
+    # have zero snippets to gate) so the one local-LLM translation call
+    # this needs never scales with evidence pool size, and never fires
+    # for a claim retrieval that turns out empty. See
+    # bilingual_claim_anchor_tiers()'s own docstring for why this
+    # replaced the old single-language, proper-noun-only anchor set.
+    _gate_named_anchors, _gate_content_anchors = bilingual_claim_anchor_tiers(
+        subject_anchor_text
+    )
+
     for snippet in web_result.snippets:
         url = getattr(snippet, "url", "") or ""
         title = getattr(snippet, "title", "") or ""
@@ -844,6 +980,8 @@ def retrieve_claim_evidence(
                     passage_for_check,
                     title=title,
                     url=url,
+                    named_anchors=_gate_named_anchors,
+                    content_anchors=_gate_content_anchors,
                 )
             )
 
@@ -851,7 +989,8 @@ def retrieve_claim_evidence(
                 print(
                     f"[Subject Gate] decision=reject "
                     f"claim_id={claim.get('claim_id', 'unknown')} "
-                    f"anchors={_extract_subject_anchors(subject_anchor_text)} "
+                    f"anchors_named={_gate_named_anchors or '-'} "
+                    f"anchors_content={_gate_content_anchors or '-'} "
                     f"url={url[:120]} "
                     f"title={title[:120]!r} "
                     f"passage={passage_for_check[:300]!r} "
