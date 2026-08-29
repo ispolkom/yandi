@@ -5,26 +5,30 @@ logic, offline only.
 
 STATIC/MOCK PROOF ONLY — no live server exists this pass (same posture
 as every other agent/db_sql_*_regression_test.py file). What IS proven:
-    A. extract_temporary_root_password() — the exact regex Percona's
-       real log line uses, plus the "no temp password found" case
-       (already-initialized datadir, second run).
+    A. load_and_consume_fresh_init_marker() — reads and DELETES the
+       one-time marker install-yandi.sh's initialize_datadir() writes
+       directly from its OWN --initialize output; absent marker ->
+       None (never an error); a consumed marker can never be read
+       twice (mandate: reruns must not need the one-time password
+       again). Replaces the old log-scraping approach entirely — see
+       Case A/B/C below for why that was a real, live-confirmed bug.
     B. save_protected_secret()/load_protected_secret() — 0600, refuses
        to overwrite, real filesystem (a tmp dir), same contract as
        keys.py's save_kek()/load_kek() but for plain secrets.
-    C. run()'s full orchestration sequence against a scripted fake
-       connection + mocked pymysql (for the auth_socket reconnect and
-       run_bootstrap()) and a mocked `mysql` CLI subprocess (for the
-       one-time root->auth_socket conversion — see
-       _retire_temporary_root_password()'s own docstring for why that
-       ONE statement uses the CLI client rather than pymysql) —
-       instance identity gets recorded, run_bootstrap() is called with
-       runtime_auth_socket_os_user (not a password), readonly/migrator
-       secrets get written to disk exactly once each, a second run()
-       call reuses the SAME secrets rather than regenerating them
-       (mandate §8: idempotent, never rotate credentials as a side
-       effect of re-running).
+    C. run()'s Case A/B/C auth-state handling (module docstring):
+       C1 (Case A, fresh marker present) -> root conversion attempted
+       via the mocked mysql CLI, marker consumed; C2 (Case B, marker
+       absent, auth_socket already works) -> no conversion attempted,
+       proceeds directly, idempotent across reruns (same instance_uuid,
+       same secrets, never regenerated); C3 (Case C, marker absent AND
+       auth_socket unreachable) -> LiveBootstrapError, run_bootstrap()
+       never even attempted — no guessing, no historical log scan.
     D. no secret value (temp root password, generated readonly/migrator
        passwords) is ever printed by main() — grepped structurally.
+    E. missing `mysql` CLI binary fails loud in both
+       _retire_temporary_root_password() and the Case B auth_socket
+       probe, never silently falls back to pymysql's SET-NAMES-
+       incompatible path.
 
 Run: /home/iam/venv/bin/python3 -m agent.db_sql_live_bootstrap_regression_test
 """
@@ -38,7 +42,7 @@ from contextlib import redirect_stdout
 from unittest.mock import MagicMock, patch
 
 from agent.db.sql.live_bootstrap import (
-    extract_temporary_root_password, save_protected_secret, load_protected_secret,
+    load_and_consume_fresh_init_marker, save_protected_secret, load_protected_secret,
     run, main, LiveBootstrapError,
 )
 import agent.db.sql.live_bootstrap as lb_mod
@@ -58,58 +62,32 @@ def check(name: str, condition: bool, detail: str = ""):
 
 
 # ============================================================
-# A. Temp password extraction.
+# A. Fresh-init marker: load-and-consume semantics.
 # ============================================================
 
 with tempfile.TemporaryDirectory() as tmpdir:
-    log_path = os.path.join(tmpdir, "mysql-error.log")
+    marker_path = os.path.join(tmpdir, "fresh_init_temp_password")
 
-    with open(log_path, "w", encoding="utf-8") as f:
-        f.write(
-            "2026-08-29T00:00:00.000000Z 0 [System] [MY-010116] [Server] starting\n"
-            "2026-08-29T00:00:01.000000Z 6 [Note] [MY-010454] [Server] A temporary "
-            "password is generated for root@localhost: sUp3r$ecr3t!Tmp\n"
-        )
     check(
-        "A: extract_temporary_root_password() finds the real Percona log line shape",
-        extract_temporary_root_password(log_path) == "sUp3r$ecr3t!Tmp",
+        "A: load_and_consume_fresh_init_marker() returns None when the marker "
+        "is absent (this invocation did not just run --initialize)",
+        load_and_consume_fresh_init_marker(marker_path) is None,
     )
 
-    with open(log_path, "w", encoding="utf-8") as f:
-        f.write("2026-08-29T00:00:00.000000Z 0 [System] [MY-010116] [Server] starting, no temp password line\n")
+    with open(marker_path, "w", encoding="utf-8") as f:
+        f.write("sUp3r$ecr3t!Tmp")
     check(
-        "A: extract_temporary_root_password() returns None when no such line exists "
-        "(e.g. a second run against an already-initialized datadir)",
-        extract_temporary_root_password(log_path) is None,
+        "A: load_and_consume_fresh_init_marker() returns the exact captured value",
+        load_and_consume_fresh_init_marker(marker_path) == "sUp3r$ecr3t!Tmp",
     )
-
     check(
-        "A: extract_temporary_root_password() returns None for a nonexistent log file "
-        "(never raises just because the log doesn't exist yet)",
-        extract_temporary_root_password(os.path.join(tmpdir, "nope.log")) is None,
+        "A: the marker file is DELETED immediately after a successful read — "
+        "it can never be reused across runs",
+        not os.path.exists(marker_path),
     )
-
-    # Live-confirmed bug (fourth Phase B attempt): install-yandi.sh's
-    # `tee -a "$ERROR_LOG"` APPENDS across every mysqld --initialize run
-    # in a debugging session (failed attempt -> rm -rf -> retry, several
-    # times over), so this log can accumulate MULTIPLE temp-password
-    # lines. The first belongs to a datadir that may no longer exist —
-    # only the LAST one is valid for the CURRENT root account.
-    with open(log_path, "w", encoding="utf-8") as f:
-        f.write(
-            "2026-08-29T00:00:00.000000Z 6 [Note] [MY-010454] [Server] A temporary "
-            "password is generated for root@localhost: stale-from-wiped-datadir\n"
-            "2026-08-29T00:05:00.000000Z 0 [System] [MY-013236] [Server] The designated "
-            "data directory /var/lib/yandi/mysql/data/ is unusable. Aborting\n"
-            "2026-08-29T00:10:00.000000Z 6 [Note] [MY-010454] [Server] A temporary "
-            "password is generated for root@localhost: CURRENT-VALID-ONE\n"
-        )
     check(
-        "A: with MULTIPLE temp-password lines accumulated across repeated "
-        "--initialize attempts (append-only log), extract_temporary_root_"
-        "password() returns the LAST one (valid for the current datadir), "
-        "not the first (stale, from a datadir that was since wiped)",
-        extract_temporary_root_password(log_path) == "CURRENT-VALID-ONE",
+        "A: reading the (now-consumed) marker again returns None, not the old value",
+        load_and_consume_fresh_init_marker(marker_path) is None,
     )
 
 
@@ -133,7 +111,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 
 # ============================================================
-# C. run() orchestration against a scripted fake connection.
+# C. run() orchestration — Case A/B/C auth-state handling.
 # ============================================================
 
 class _FakeCursor:
@@ -179,7 +157,6 @@ class _FakeCursor:
 class _FakeConn:
     def __init__(self):
         self.executed = []
-        self.root_converted = False
         self.instance_row = None
 
     def cursor(self):
@@ -199,20 +176,23 @@ class _FakeCompletedProcess:
         self.stdout = ""
 
 
-def _fake_mysql_cli_run(calls_log, root_converted_flag):
-    """Stand-in for subprocess.run() used by _retire_temporary_root_
-    password() (mysql CLI client, not pymysql — see that function's own
-    docstring for why: pymysql's automatic SET NAMES query is rejected
-    by MySQL's post-initialize password-expiration sandbox mode, live-
-    confirmed against a real server; the mysql CLI client doesn't have
-    that problem). Records the call for inspection and flips
-    root_converted_flag[0] when the real ALTER USER statement is
-    present, mirroring what _FakeCursor.execute() used to do for the
-    old pymysql-based path."""
+def _fake_mysql_cli_run(calls_log, root_converted_flag, probe_ok=True):
+    """Stand-in for subprocess.run(), covering BOTH mysql CLI call sites
+    in live_bootstrap.py: _retire_temporary_root_password()'s ALTER USER
+    (Case A) and _root_reachable_via_auth_socket()'s SELECT 1 probe
+    (Case B/C). probe_ok controls whether the SELECT 1 probe succeeds —
+    the ALTER USER call always "succeeds" here (its own dedicated
+    Case A tests check its exact arguments/env, not failure handling)."""
     def _run(args, env=None, **kwargs):
         calls_log.append({"args": args, "env": env})
         if any("ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket" in a for a in args):
             root_converted_flag[0] = True
+            return _FakeCompletedProcess(returncode=0)
+        if any("SELECT 1" in a for a in args):
+            return _FakeCompletedProcess(
+                returncode=0 if probe_ok else 1,
+                stderr="" if probe_ok else "ERROR 1045 (28000): Access denied for user 'root'@'localhost'",
+            )
         return _FakeCompletedProcess(returncode=0)
     return _run
 
@@ -221,29 +201,19 @@ def _install_fake_pymysql(fake_conn: _FakeConn):
     fake_pymysql = MagicMock()
     fake_pymysql.cursors.DictCursor = object
     fake_pymysql.connect.return_value = fake_conn
-    # Real pymysql.constants.CLIENT is pure integer constants (no
-    # side effects, no dependency on a live connection) — reused
-    # as-is rather than faked, so `from pymysql.constants import
-    # CLIENT` inside _retire_temporary_root_password() resolves to
-    # the SAME bit values production code checks against, not a
-    # divergent stand-in.
-    import pymysql.constants as real_constants
-    fake_pymysql.constants = real_constants
     ctx = patch.dict("sys.modules", {
         "pymysql": fake_pymysql,
         "pymysql.cursors": fake_pymysql.cursors,
-        "pymysql.constants": real_constants,
     })
     return ctx, fake_pymysql
 
 
+# --- C1: Case A — fresh-init marker present, mysql CLI conversion. ---
+
 with tempfile.TemporaryDirectory() as tmpdir:
-    error_log = os.path.join(tmpdir, "mysql-error.log")
-    with open(error_log, "w", encoding="utf-8") as f:
-        f.write(
-            "[Note] [MY-010454] [Server] A temporary password is generated for "
-            "root@localhost: initial-temp-pw-123\n"
-        )
+    marker_path = os.path.join(tmpdir, "fresh_init_temp_password")
+    with open(marker_path, "w", encoding="utf-8") as f:
+        f.write("initial-temp-pw-123")
     instance_id_file = os.path.join(tmpdir, "instance.id")
     secrets_dir = os.path.join(tmpdir, "keys")
 
@@ -255,81 +225,110 @@ with tempfile.TemporaryDirectory() as tmpdir:
          patch.object(lb_mod, "_MYSQL_CLIENT_BIN", "/usr/bin/mysql"), \
          patch.object(lb_mod.subprocess, "run", _fake_mysql_cli_run(_mysql_cli_calls, _root_converted)):
         result1 = run(
-            socket_path="/run/yandi/mysql.sock", error_log_path=error_log,
+            socket_path="/run/yandi/mysql.sock", fresh_init_marker=marker_path,
             instance_id_file=instance_id_file, secrets_dir=secrets_dir,
             agent_os_user="iam", created_by_host="test-host",
         )
 
-    check("C: run() converts root to auth_socket when a temp password was found", _root_converted[0])
-    check("C: exactly one mysql CLI invocation happened for the root conversion", len(_mysql_cli_calls) == 1)
-
-    # Live-confirmed bugs (Phase B, second and third owner runs):
-    # (1) pymysql's default capability bitmask does NOT include
-    #     HANDLE_EXPIRED_PASSWORDS, so the server outright refused the
-    #     connection (error 1862) for the mandatory post-`--initialize`
-    #     sandbox-mode root account.
-    # (2) even with that fixed, pymysql's connect() unconditionally
-    #     issues a "SET NAMES" query right after auth, which the same
-    #     sandbox mode rejects too (error 1820) — no public pymysql
-    #     parameter suppresses it, so the mysql CLI client is used
-    #     instead for this one statement (see _retire_temporary_root_
-    #     password()'s docstring). This checks (2)'s fix: the CLI
-    #     invocation, not a pymysql connect call, carries the ALTER USER
-    #     statement, and the password reaches it ONLY via the MYSQL_PWD
-    #     env var, never as a CLI argument (which `ps` could read).
-    _cli_call = _mysql_cli_calls[0] if _mysql_cli_calls else {"args": [], "env": {}}
+    check("C1 (Case A): run() converts root to auth_socket when a fresh-init marker was present", _root_converted[0])
     check(
-        "C: the mysql CLI call targets the right socket and carries the "
+        "C1: the marker is CONSUMED (deleted) by run() — never reusable",
+        not os.path.exists(marker_path),
+    )
+
+    _alter_calls = [c for c in _mysql_cli_calls if any("ALTER USER" in a for a in c["args"])]
+    check("C1: exactly one mysql CLI ALTER USER invocation happened", len(_alter_calls) == 1)
+    _cli_call = _alter_calls[0] if _alter_calls else {"args": [], "env": {}}
+    check(
+        "C1: the mysql CLI call targets the right socket and carries the "
         "ALTER USER auth_socket statement",
         any(a == "--socket=/run/yandi/mysql.sock" for a in _cli_call["args"])
         and any("ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket" in a for a in _cli_call["args"]),
         f"args={_cli_call['args']}",
     )
     check(
-        "C: the temp password reaches the mysql CLI ONLY via MYSQL_PWD env "
+        "C1: the temp password reaches the mysql CLI ONLY via MYSQL_PWD env "
         "(never as a -p<password> CLI argument visible to `ps`)",
         (_cli_call["env"] or {}).get("MYSQL_PWD") == "initial-temp-pw-123"
         and not any("initial-temp-pw-123" in a for a in _cli_call["args"]),
         f"env_has_pwd={'MYSQL_PWD' in (_cli_call['env'] or {})} args={_cli_call['args']}",
     )
-    check("C: run() records the instance identity in the database", conn1.instance_row == result1["instance_uuid"])
-    check("C: run_bootstrap()'s runtime_auth_mode is 'auth_socket' (not password)", result1["bootstrap"]["runtime_auth_mode"] == "auth_socket")
-    check("C: run() reports selfcheck_ok True in the clean happy path", result1["selfcheck_ok"] is True)
+    check("C1: run() records the instance identity in the database", conn1.instance_row == result1["instance_uuid"])
+    check("C1: run_bootstrap()'s runtime_auth_mode is 'auth_socket' (not password)", result1["bootstrap"]["runtime_auth_mode"] == "auth_socket")
+    check("C1: run() reports selfcheck_ok True in the clean happy path", result1["selfcheck_ok"] is True)
 
     readonly_secret = os.path.join(secrets_dir, "yandi_readonly.secret")
     migrator_secret = os.path.join(secrets_dir, "yandi_migrator.secret")
-    check("C: readonly secret file was written", os.path.exists(readonly_secret))
-    check("C: migrator secret file was written", os.path.exists(migrator_secret))
-    check("C: readonly secret file is 0600", oct(os.stat(readonly_secret).st_mode)[-3:] == "600")
+    check("C1: readonly secret file was written", os.path.exists(readonly_secret))
+    check("C1: migrator secret file was written", os.path.exists(migrator_secret))
+    check("C1: readonly secret file is 0600", oct(os.stat(readonly_secret).st_mode)[-3:] == "600")
 
     readonly_pw_1 = load_protected_secret(readonly_secret)
     migrator_pw_1 = load_protected_secret(migrator_secret)
     instance_uuid_1 = result1["instance_uuid"]
 
-    # --- Second run: no temp password left in the log (already retired),
-    # instance id file already exists, secrets already exist. Nothing
-    # should be regenerated.
-    with open(error_log, "w", encoding="utf-8") as f:
-        f.write("[Note] no temp password line this time — root is already on auth_socket\n")
-
+    # --- C2: Case B — SECOND run(), no marker (consumed above), root
+    # ALREADY reachable via auth_socket (an earlier run converted it).
+    # This is the live-confirmed-bug fix itself: a naive "re-scan the
+    # error log" approach could pick up a STALE password here and fail;
+    # the Case B probe must succeed directly with no password at all.
     conn2 = _FakeConn()
-    with _install_fake_pymysql(conn2)[0]:
+    _mysql_cli_calls_2 = []
+    _root_converted_2 = [False]
+    with _install_fake_pymysql(conn2)[0], \
+         patch.object(lb_mod, "_MYSQL_CLIENT_BIN", "/usr/bin/mysql"), \
+         patch.object(lb_mod.subprocess, "run", _fake_mysql_cli_run(_mysql_cli_calls_2, _root_converted_2, probe_ok=True)):
         result2 = run(
-            socket_path="/run/yandi/mysql.sock", error_log_path=error_log,
+            socket_path="/run/yandi/mysql.sock", fresh_init_marker=marker_path,
             instance_id_file=instance_id_file, secrets_dir=secrets_dir,
             agent_os_user="iam", created_by_host="test-host",
         )
 
     check(
-        "C: a SECOND run() with no temp password present does NOT attempt the "
-        "root-conversion ALTER USER again",
-        not conn2.root_converted,
+        "C2 (Case B): a SECOND run() with no marker present does NOT attempt "
+        "the root-conversion ALTER USER again",
+        not _root_converted_2[0],
     )
-    check("C: the SAME instance_uuid is reused across runs (never regenerated)", result2["instance_uuid"] == instance_uuid_1)
     check(
-        "C: readonly/migrator secrets are UNCHANGED after a second run (mandate §8: "
+        "C2: the Case B auth_socket probe (SELECT 1) was actually used to "
+        "verify root, not skipped/assumed",
+        any("SELECT 1" in a for c in _mysql_cli_calls_2 for a in c["args"]),
+    )
+    check("C2: the SAME instance_uuid is reused across runs (never regenerated)", result2["instance_uuid"] == instance_uuid_1)
+    check(
+        "C2: readonly/migrator secrets are UNCHANGED after a second run (mandate §8: "
         "never rotate credentials as a side effect of re-running)",
         load_protected_secret(readonly_secret) == readonly_pw_1 and load_protected_secret(migrator_secret) == migrator_pw_1,
+    )
+
+    # --- C3: Case C — no marker AND auth_socket probe fails too ->
+    # ambiguous auth state, must STOP with a precise error, never guess.
+    conn3_unused = _FakeConn()
+    with _install_fake_pymysql(conn3_unused)[0], \
+         patch.object(lb_mod, "_MYSQL_CLIENT_BIN", "/usr/bin/mysql"), \
+         patch.object(lb_mod.subprocess, "run", _fake_mysql_cli_run([], [False], probe_ok=False)):
+        raised_c3 = False
+        try:
+            run(
+                socket_path="/run/yandi/mysql.sock", fresh_init_marker=marker_path,
+                instance_id_file=instance_id_file, secrets_dir=secrets_dir,
+                agent_os_user="iam", created_by_host="test-host",
+            )
+        except LiveBootstrapError as e:
+            raised_c3 = True
+            _c3_err = str(e)
+
+    check(
+        "C3 (Case C): no marker + unreachable auth_socket raises "
+        "LiveBootstrapError with a precise 'AMBIGUOUS AUTH STATE' diagnostic "
+        "— never guesses, never scans a historical log",
+        raised_c3 and "AMBIGUOUS" in _c3_err,
+        f"raised={raised_c3}",
+    )
+    check(
+        "C3: run_bootstrap() was never even attempted in the ambiguous case "
+        "(no fabricated identity/schema state)",
+        conn3_unused.instance_row is None and conn3_unused.executed == [],
     )
 
 
@@ -357,23 +356,20 @@ check(
 )
 
 with tempfile.TemporaryDirectory() as tmpdir:
-    error_log = os.path.join(tmpdir, "mysql-error.log")
-    with open(error_log, "w", encoding="utf-8") as f:
-        f.write(
-            "[Note] [MY-010454] [Server] A temporary password is generated for "
-            "root@localhost: another-temp-pw-456\n"
-        )
+    marker_path = os.path.join(tmpdir, "fresh_init_temp_password")
+    with open(marker_path, "w", encoding="utf-8") as f:
+        f.write("another-temp-pw-456")
     instance_id_file = os.path.join(tmpdir, "instance.id")
     secrets_dir = os.path.join(tmpdir, "keys")
 
-    conn3 = _FakeConn()
+    conn4 = _FakeConn()
     buf = io.StringIO()
-    with _install_fake_pymysql(conn3)[0], \
+    with _install_fake_pymysql(conn4)[0], \
          patch.object(lb_mod, "_MYSQL_CLIENT_BIN", "/usr/bin/mysql"), \
          patch.object(lb_mod.subprocess, "run", _fake_mysql_cli_run([], [False])):
         with redirect_stdout(buf):
             rc = main([
-                "--socket", "/run/yandi/mysql.sock", "--error-log", error_log,
+                "--socket", "/run/yandi/mysql.sock", "--fresh-init-marker", marker_path,
                 "--instance-id-file", instance_id_file, "--secrets-dir", secrets_dir,
                 "--agent-os-user", "iam",
             ])
@@ -399,10 +395,19 @@ with patch.object(lb_mod, "_MYSQL_CLIENT_BIN", None):
     except LiveBootstrapError as e:
         raised = True
         _err_text = str(e)
+
+    _probe_result_no_binary = lb_mod._root_reachable_via_auth_socket("/run/yandi/mysql.sock")
+
 check(
     "E: missing mysql CLI binary raises LiveBootstrapError with a clear "
-    "message, never silently falls back to pymysql's SET-NAMES-incompatible path",
+    "message (root conversion path), never silently falls back to pymysql's "
+    "SET-NAMES-incompatible path",
     raised and "mysql" in _err_text.lower(),
+)
+check(
+    "E: missing mysql CLI binary also makes the Case B auth_socket probe "
+    "report unreachable (False), rather than raising or assuming success",
+    _probe_result_no_binary is False,
 )
 
 

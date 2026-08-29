@@ -49,6 +49,15 @@ APPARMOR_SHARED_PROFILE="/etc/apparmor.d/usr.sbin.mysqld"
 KEK_PATH="${YANDI_DB_HOME}/keys/kek.bin"
 SECRETS_DIR="${YANDI_DB_HOME}/keys"
 INSTANCE_ID_FILE="${CONFIG_DIR}/instance.id"
+# One-time marker for THIS invocation's own mysqld --initialize temp
+# password — see initialize_datadir()/run_python_bootstrap(). Under
+# /run (tmpfs), so it can never outlive a reboot by accident. Never the
+# shared, ever-growing $ERROR_LOG: live_bootstrap.py must consume ONLY
+# the password THIS run actually generated, never scrape historical
+# log lines from earlier attempts (live-confirmed bug: a stale historical
+# password looks exactly like a valid one and produces a confusing
+# "Access denied" instead of a clear diagnostic).
+FRESH_INIT_MARKER="${RUNTIME_DIR}/fresh_init_temp_password"
 YANDI_REPO="/home/iam/yandi"
 YANDI_VENV_PYTHON="/home/iam/venv/bin/python3"
 # The real OS user the AGENT process runs as today (confirmed during
@@ -325,10 +334,38 @@ initialize_datadir() {
     # and --user were unaffected only because they were ALSO passed as
     # explicit CLI flags (which apply regardless of defaults-file
     # loading) — the dedicated datadir itself was never at risk.
-    mysqld --defaults-file="$CONFIG_FILE" --initialize \
-        --user="$YANDI_DB_USER" --datadir="$DATADIR" 2>&1 | tee -a "$ERROR_LOG"
-    log "datadir initialized — a one-time temporary root password was written to $ERROR_LOG (grep for 'temporary password')"
-    log "this script will use it once, immediately, in initial_db_bootstrap() below, then retire it"
+    # Capture THIS invocation's own --initialize output directly, rather
+    # than relying on live_bootstrap.py to later re-scan $ERROR_LOG for a
+    # "temporary password is generated..." line. $ERROR_LOG accumulates
+    # across every past attempt in a debugging session (append-only, by
+    # design, for a real diagnostic trail) — live-confirmed bug: scanning
+    # it (even taking the LAST match) can find a line belonging to a
+    # datadir that was since wiped and reinitialized without this exact
+    # process ever having run, producing a real-looking but WRONG
+    # password and a confusing "Access denied" instead of a clear
+    # diagnostic. The fix: extract the password from THIS command's OWN
+    # captured output, immediately, while we know for certain it belongs
+    # to the datadir THIS invocation just created.
+    # `|| init_rc=$?` (not a bare command) so `set -e` does not abort
+    # BEFORE the diagnostic output below gets written to $ERROR_LOG —
+    # a real mysqld --initialize failure must still leave a full trail,
+    # exactly like the old `| tee -a` pipe did.
+    local init_output init_rc=0
+    init_output="$(mysqld --defaults-file="$CONFIG_FILE" --initialize \
+        --user="$YANDI_DB_USER" --datadir="$DATADIR" 2>&1)" || init_rc=$?
+    printf '%s\n' "$init_output" >> "$ERROR_LOG"
+    [ "$init_rc" -eq 0 ] || die "mysqld --initialize failed (exit=$init_rc) — see $ERROR_LOG for full output"
+
+    local temp_pw
+    temp_pw="$(printf '%s\n' "$init_output" | grep -oP 'temporary password is generated for root@localhost:\s*\K\S+' || true)"
+    [ -n "$temp_pw" ] || die "mysqld --initialize completed but its OWN output contained no 'temporary password' line — refusing to fall back to scanning $ERROR_LOG's historical content for a credential from a different attempt. Check $ERROR_LOG for what actually happened."
+
+    printf '%s' "$temp_pw" > "$FRESH_INIT_MARKER"
+    chown root:root "$FRESH_INIT_MARKER"
+    chmod 0600 "$FRESH_INIT_MARKER"
+
+    log "datadir initialized — this invocation's own one-time temp password was captured directly (never re-derived from $ERROR_LOG's historical content)"
+    log "this script will use it once, immediately, in run_python_bootstrap() below, then retire it"
 }
 
 # ============================================================
@@ -370,7 +407,7 @@ run_python_bootstrap() {
     log "root temp-password retirement, schema/roles/triggers, selfcheck)"
     "$YANDI_VENV_PYTHON" -m agent.db.sql.live_bootstrap \
         --socket "$SOCKET_PATH" \
-        --error-log "$ERROR_LOG" \
+        --fresh-init-marker "$FRESH_INIT_MARKER" \
         --instance-id-file "$INSTANCE_ID_FILE" \
         --secrets-dir "$SECRETS_DIR" \
         --agent-os-user "$AGENT_OS_USER"

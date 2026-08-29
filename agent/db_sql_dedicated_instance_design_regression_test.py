@@ -227,6 +227,53 @@ check(
     "the service-stop guard runs BEFORE the non-empty-datadir check, not after",
     _init_fn_body.index("systemctl stop yandi-db") < _init_fn_body.index('ls -A "$DATADIR"'),
 )
+
+# Live-confirmed bug (fifth Phase B attempt): install-yandi.sh used to
+# pipe mysqld --initialize's output through `tee -a "$ERROR_LOG"` and
+# have live_bootstrap.py re-scan that ever-growing, append-only log
+# afterward for a "temporary password is generated..." line — even
+# taking the LAST match, this could still pick up a password belonging
+# to a datadir that was since wiped and reinitialized without this
+# exact invocation ever running --initialize, producing a real-looking
+# but WRONG credential. Fixed: capture THIS invocation's own
+# --initialize output directly into a dedicated one-time marker file,
+# never re-derived from the shared log.
+check(
+    "install script defines a dedicated FRESH_INIT_MARKER path (under "
+    "/run, tmpfs) — separate from the ever-growing $ERROR_LOG",
+    'FRESH_INIT_MARKER="${RUNTIME_DIR}/' in script_text,
+)
+check(
+    "initialize_datadir() captures mysqld --initialize's OWN output into a "
+    "local variable (not just `tee -a $ERROR_LOG`) so the temp password can "
+    "be extracted from exactly THIS invocation's output, never a historical line",
+    'init_output="$(mysqld --defaults-file="$CONFIG_FILE" --initialize' in script_text,
+)
+check(
+    "initialize_datadir() still preserves mysqld --initialize's real exit "
+    "status (captured explicitly, not masked by `local`'s own exit code, "
+    "and not lost to `set -e` before the diagnostic output is written to "
+    "$ERROR_LOG)",
+    "|| init_rc=$?" in script_text and '[ "$init_rc" -eq 0 ] ||' in script_text,
+)
+check(
+    "initialize_datadir() dies with a clear message if --initialize's own "
+    "output contains no temp-password line, rather than falling back to "
+    "scanning $ERROR_LOG's historical content",
+    "refusing to fall back to scanning $ERROR_LOG's historical content" in script_text,
+)
+check(
+    "the extracted temp password is written to FRESH_INIT_MARKER as root-only "
+    "(0600), not left group/world-readable",
+    'chown root:root "$FRESH_INIT_MARKER"' in script_text
+    and 'chmod 0600 "$FRESH_INIT_MARKER"' in script_text,
+)
+check(
+    "run_python_bootstrap() passes --fresh-init-marker (the dedicated, "
+    "single-invocation marker) to live_bootstrap.py, NOT --error-log (the "
+    "shared, ever-growing historical log this bug came from)",
+    "--fresh-init-marker" in script_text and "--error-log" not in script_text,
+)
 check(
     "install script's OS-identity/filesystem/config steps are idempotent (id check, "
     "install -d, existence check before writing config) — safe to re-run",
@@ -242,8 +289,8 @@ check(
 check(
     "install script's run_python_bootstrap() function body itself contains no inline "
     "SQL password/credential value — it only passes filesystem paths (--socket, "
-    "--error-log, --instance-id-file, --secrets-dir, --agent-os-user) to live_bootstrap, "
-    "which generates/stores credentials itself (separately tested)",
+    "--fresh-init-marker, --instance-id-file, --secrets-dir, --agent-os-user) to "
+    "live_bootstrap, which generates/stores credentials itself (separately tested)",
     "IDENTIFIED BY" not in script_text and "IDENTIFIED WITH" not in script_text,
 )
 
