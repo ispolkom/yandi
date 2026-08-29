@@ -44,6 +44,30 @@ at that call site. Nothing else in the sequence changed: triggers
 needs the instance_identity table, itself one of ALL_TABLES_IN_ORDER)
 were already positioned after schema creation and stay there.
 
+SECOND LIVE FAILURE, found immediately after the above fix was proven
+correct with the reorder alone (same owner run, `--database-only`, no
+reinit needed — datadir already valid, root already AUTH_SOCKET_READY):
+
+    File "agent/db/sql/bootstrap.py", line ~113 (apply_schema), in
+      cur.execute(ddl)
+    pymysql.err.OperationalError: (1046, 'No database selected')
+
+ROOT CAUSE #2: ensure_database()'s CREATE DATABASE IF NOT EXISTS does
+NOT itself select the database for the current session. schema.py's
+DDL (shared with agent.db.sql.migrate.py) uses bare, unqualified
+identifiers (`CREATE TABLE IF NOT EXISTS belief (...)`, `ALTER TABLE
+verification_run ADD CONSTRAINT ...`), which requires a database
+context. migrate.py's own get_connection() supplies that via a
+`database=` connect-time argument — not available here, since
+live_bootstrap._connect_as_root_auth_socket() must connect BEFORE
+`yandi_epistemic` necessarily exists (virgin-instance bootstrap).
+FIX #2: ensure_database() now issues `USE \`{database_name}\`` right
+after creating it (identifier already validated by _IDENTIFIER_RE,
+same guard the CREATE DATABASE statement itself relies on) — see
+Checks 8-10 below, and OrderCheckingFakeCursor's CREATE/ALTER TABLE
+handling, which now fails closed (1046-shaped) exactly like the real
+server does when no database has been selected yet.
+
 This file's central tool is a STRICTER stateful fake connection than
 agent/db_sql_security_bootstrap_regression_test.py's — that one already
 existed and tracks *idempotency* (has this been created before?) but
@@ -60,7 +84,7 @@ from __future__ import annotations
 
 import re
 
-from agent.db.sql.bootstrap import run_bootstrap
+from agent.db.sql.bootstrap import run_bootstrap, ensure_database
 from agent.db.sql.schema import ALL_TABLES_IN_ORDER, SCHEMA_VERSION, TABLE_CLASSIFICATION
 from agent.db.sql.security_grants import DATABASE_NAME, CLASS_C_TABLES, CLASS_D_TABLES
 from agent.db.sql.security_triggers import immutability_triggers
@@ -105,12 +129,29 @@ class OrderCheckingFakeCursor:
 
         if upper.startswith("CREATE DATABASE"):
             self.conn.database_created = True
+        elif upper.startswith("USE"):
+            self.conn.database_selected = True
         elif upper.startswith("CREATE TABLE"):
             # "CREATE TABLE IF NOT EXISTS `name` (" / "CREATE TABLE IF
-            # NOT EXISTS name (" — schema.py's DDL uses bare identifiers.
+            # NOT EXISTS name (" — schema.py's DDL uses bare identifiers,
+            # which MySQL can only resolve against a SELECTed database
+            # (live-confirmed: (1046, "No database selected") the moment
+            # apply_schema() ran its first bare CREATE TABLE against a
+            # connection that had CREATE DATABASE'd but never USE'd it).
+            if not self.conn.database_selected:
+                raise OrderViolation(
+                    f"(1046, \"No database selected\") — bare CREATE TABLE issued "
+                    f"with no prior USE/database selection: {norm_sql!r}"
+                )
             m = re.search(r"CREATE TABLE IF NOT EXISTS\s+`?(\w+)`?", norm_sql, re.IGNORECASE)
             if m:
                 self.conn.tables.add(m.group(1))
+        elif upper.startswith("ALTER TABLE"):
+            if not self.conn.database_selected:
+                raise OrderViolation(
+                    f"(1046, \"No database selected\") — bare ALTER TABLE issued "
+                    f"with no prior USE/database selection: {norm_sql!r}"
+                )
         elif upper.startswith("GRANT"):
             m = _TABLE_SCOPED_GRANT_RE.search(norm_sql)
             if m:
@@ -159,6 +200,7 @@ class OrderCheckingFakeConnection:
     def __init__(self):
         self.calls = []
         self.database_created = False
+        self.database_selected = False
         self.tables = set()
         self.triggers = set()
         self.instance_identity_rows = []
@@ -335,6 +377,51 @@ check(
     "on a table that was never created DOES raise) — the harness itself is a "
     "valid test, not a fake that always passes",
     raised,
+)
+
+# ============================================================
+# 8-10. THE SECOND LIVE BUG: ensure_database() must SELECT the database
+# it just created, not just create it — otherwise the very next bare
+# CREATE TABLE fails with (1046, "No database selected").
+# ============================================================
+use_conn = OrderCheckingFakeConnection()
+ensure_database(use_conn)
+check(
+    "8. ensure_database() issues a USE (or equivalent database-selection "
+    "statement) — the fake's database_selected flag is set immediately after "
+    "CREATE DATABASE, before any table statement is ever attempted",
+    use_conn.database_selected is True,
+)
+
+use_calls_upper = [c.upper() for c in use_conn.calls]
+_create_db_idx = next((i for i, c in enumerate(use_calls_upper) if c.startswith("CREATE DATABASE")), None)
+_use_idx = next((i for i, c in enumerate(use_calls_upper) if c.startswith("USE")), None)
+check(
+    "9. the USE statement comes AFTER CREATE DATABASE in the actual call "
+    "sequence (not just eventually true, but in the right order)",
+    _create_db_idx is not None and _use_idx is not None and _create_db_idx < _use_idx,
+    f"create_db_idx={_create_db_idx} use_idx={_use_idx}",
+)
+
+# Prove the fake's own enforcement is real (not vacuously true): a bare
+# CREATE TABLE against a connection that was never USE'd DOES raise the
+# live (1046, "No database selected") shape.
+no_use_conn = OrderCheckingFakeConnection()
+no_use_conn.database_created = True  # CREATE DATABASE happened, USE did not
+raised_1046 = False
+try:
+    with no_use_conn.cursor() as cur:
+        cur.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INT)")
+except OrderViolation as e:
+    raised_1046 = True
+    _err_1046 = str(e)
+check(
+    "10. THE SECOND LIVE BUG, reproduced directly: a bare CREATE TABLE issued "
+    "with no prior USE raises the exact (1046, 'No database selected') shape "
+    "— proving the fake's guard is genuine, and that this is what the live "
+    "server actually returned before ensure_database() was fixed",
+    raised_1046 and "1046" in _err_1046 and "No database selected" in _err_1046,
+    f"raised={raised_1046}",
 )
 
 print()

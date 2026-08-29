@@ -58,9 +58,18 @@ _IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
 def ensure_database(conn, database_name: str = DATABASE_NAME) -> None:
-    """CREATE DATABASE IF NOT EXISTS — safe to call any number of
-    times. utf8mb4 matches every table's own DEFAULT CHARSET in
-    schema.py.
+    """CREATE DATABASE IF NOT EXISTS, then USE it — safe to call any
+    number of times. utf8mb4 matches every table's own DEFAULT CHARSET
+    in schema.py.
+
+    The USE is not cosmetic: apply_schema()'s CREATE TABLE statements
+    are bare, unqualified identifiers (schema.py's single source of
+    truth is shared with agent.db.sql.migrate.py, which instead relies
+    on agent.db.sql.connection.get_connection()'s own `database=`
+    argument — not available here, since this module's caller connects
+    BEFORE the database necessarily exists). Without an explicit USE
+    after creating it, the very next bare CREATE TABLE fails with
+    (1046, "No database selected") — live-confirmed.
 
     MySQL identifiers (database/table names) cannot be parameterized
     at all — %s binding only works for VALUES, never identifiers, a
@@ -81,6 +90,19 @@ def ensure_database(conn, database_name: str = DATABASE_NAME) -> None:
             f"CREATE DATABASE IF NOT EXISTS `{database_name}` "
             f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
         )
+        # CREATE DATABASE does not itself select it for this session —
+        # live-confirmed (1046, "No database selected") the moment
+        # apply_schema() tried its first bare, unqualified CREATE TABLE
+        # right after this call. The connection this module receives
+        # (live_bootstrap._connect_as_root_auth_socket()) is opened with
+        # NO `database=` argument on purpose — on a virgin instance
+        # `yandi_epistemic` doesn't exist yet at connect time, so it
+        # can't be selected up front the way agent.db.sql.connection.
+        # get_connection() does for the already-bootstrapped case. `USE`
+        # is safe here: `database_name` was already validated above by
+        # _IDENTIFIER_RE, the same guard the CREATE DATABASE statement
+        # above relies on.
+        cur.execute(f"USE `{database_name}`")
 
 
 def user_exists(conn, username: str, host: str) -> bool:
