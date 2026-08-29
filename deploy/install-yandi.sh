@@ -76,6 +76,15 @@ REINIT_EMPTY_INSTANCE=0
 log() { echo "[install-yandi] $*"; }
 die() { echo "[install-yandi] FATAL: $*" >&2; exit 1; }
 
+# Short, ONE-WAY, non-secret diagnostic fingerprint (first 12 hex
+# chars of SHA-256) — safe to print/log, never reversible. Same format
+# as agent/db/sql/live_bootstrap.py's _fingerprint(), so the two can be
+# compared directly in console output without ever exposing the real
+# secret (mandate: only length + fingerprint, never the value itself).
+_temp_pw_fp() {
+    printf '%s' "$1" | sha256sum | cut -c1-12
+}
+
 # ============================================================
 # 1. PRECHECK
 # ============================================================
@@ -654,6 +663,7 @@ initialize_datadir() {
 
     local temp_pw
     temp_pw="$(_extract_unique_temp_password "$init_output" "$log_delta")"
+    log "TEMP_SOURCE_LEN=${#temp_pw} TEMP_SOURCE_FP=$(_temp_pw_fp "$temp_pw")"
 
     # Atomic write: create with a restrictive umask FROM THE START (no
     # window where the file is briefly world/group-readable), then
@@ -664,7 +674,14 @@ initialize_datadir() {
     chown root:root "$marker_tmp"
     mv -f "$marker_tmp" "$FRESH_INIT_MARKER"
 
-    unset temp_pw init_output log_delta
+    # Read the marker straight back and fingerprint THAT — proves (or
+    # disproves) byte-for-byte round-trip fidelity of the bash-side
+    # write/rename alone, independent of anything Python does later.
+    local marker_readback
+    marker_readback="$(cat "$FRESH_INIT_MARKER")"
+    log "MARKER_LEN=${#marker_readback} MARKER_FP=$(_temp_pw_fp "$marker_readback")"
+
+    unset temp_pw init_output log_delta marker_readback
 
     log "datadir initialized — this invocation's own one-time temp password was captured via transaction-scoped log delta (never re-derived from \$ERROR_LOG's historical content)"
     log "this script will use it once, immediately, in run_python_bootstrap() below, then retire it"

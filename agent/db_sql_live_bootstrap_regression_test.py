@@ -176,22 +176,32 @@ class _FakeCompletedProcess:
         self.stdout = ""
 
 
-def _fake_mysql_cli_run(calls_log, root_converted_flag, probe_ok=True):
-    """Stand-in for subprocess.run(), covering BOTH mysql CLI call sites
-    in live_bootstrap.py: _retire_temporary_root_password()'s ALTER USER
-    (Case A) and _root_reachable_via_auth_socket()'s SELECT 1 probe
-    (Case B/C). probe_ok controls whether the SELECT 1 probe succeeds —
-    the ALTER USER call always "succeeds" here (its own dedicated
-    Case A tests check its exact arguments/env, not failure handling)."""
+def _fake_mysql_cli_run(calls_log, root_converted_flag, probe_ok=True, alter_ok=True):
+    """Stand-in for subprocess.run(), covering ALL THREE mysql CLI call
+    sites in live_bootstrap.py: _probe_temp_password_auth()'s SELECT 1
+    (Case A, run BEFORE the real conversion), _retire_temporary_root_
+    password()'s ALTER USER (Case A, run only if the probe passed), and
+    _root_reachable_via_auth_socket()'s SELECT 1 (Case B/C) — the
+    latter two share the same "SELECT 1"-shaped argv as the Case A
+    probe, so one probe_ok flag controls all SELECT-1-shaped calls
+    generically. alter_ok independently controls the ALTER USER call,
+    letting tests simulate "auth succeeded but the ALTER USER itself
+    failed" (AUTH_SOCKET_CONVERSION_FAILED) distinctly from "auth
+    itself failed" (TEMP_PASSWORD_AUTH_FAILED)."""
     def _run(args, env=None, **kwargs):
         calls_log.append({"args": args, "env": env})
         if any("ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket" in a for a in args):
-            root_converted_flag[0] = True
-            return _FakeCompletedProcess(returncode=0)
+            if alter_ok:
+                root_converted_flag[0] = True
+                return _FakeCompletedProcess(returncode=0)
+            return _FakeCompletedProcess(
+                returncode=1,
+                stderr="ERROR 1524 (HY000): Plugin 'auth_socket' is not loaded",
+            )
         if any("SELECT 1" in a for a in args):
             return _FakeCompletedProcess(
                 returncode=0 if probe_ok else 1,
-                stderr="" if probe_ok else "ERROR 1045 (28000): Access denied for user 'root'@'localhost'",
+                stderr="" if probe_ok else "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)",
             )
         return _FakeCompletedProcess(returncode=0)
     return _run
@@ -333,6 +343,100 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 
 # ============================================================
+# C4/C5: eighth Phase B attempt — isolated auth-probe error
+# classification. Must NEVER collapse "wrong credential" and "ALTER
+# USER itself failed" into one ambiguous message again.
+# ============================================================
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    marker_path = os.path.join(tmpdir, "fresh_init_temp_password")
+    with open(marker_path, "w", encoding="utf-8") as f:
+        f.write("some-temp-pw-for-c4")
+    instance_id_file = os.path.join(tmpdir, "instance.id")
+    secrets_dir = os.path.join(tmpdir, "keys")
+
+    # C4: probe itself fails (auth rejected, 1045) -> TEMP_PASSWORD_AUTH_FAILED,
+    # ALTER USER must NEVER even be attempted.
+    conn4 = _FakeConn()
+    _ctx4, _ = _install_fake_pymysql(conn4)
+    _calls4 = []
+    _converted4 = [False]
+    with _ctx4, \
+         patch.object(lb_mod, "_MYSQL_CLIENT_BIN", "/usr/bin/mysql"), \
+         patch.object(lb_mod.subprocess, "run", _fake_mysql_cli_run(_calls4, _converted4, probe_ok=False)):
+        raised_c4 = False
+        try:
+            run(
+                socket_path="/run/yandi/mysql.sock", fresh_init_marker=marker_path,
+                instance_id_file=instance_id_file, secrets_dir=secrets_dir,
+                agent_os_user="iam", created_by_host="test-host",
+            )
+        except LiveBootstrapError as e:
+            raised_c4 = True
+            _c4_err = str(e)
+
+    check(
+        "C4: auth probe failing (1045) raises with TEMP_PASSWORD_AUTH_FAILED "
+        "specifically, distinguishing a credential-value bug from a SQL/"
+        "plugin bug",
+        raised_c4 and "TEMP_PASSWORD_AUTH_FAILED" in _c4_err,
+        f"raised={raised_c4} err={_c4_err if raised_c4 else None!r}",
+    )
+    check(
+        "C4: the ALTER USER statement is NEVER attempted when the auth "
+        "probe itself already failed",
+        not _converted4[0]
+        and not any("ALTER USER" in a for c in _calls4 for a in c["args"]),
+    )
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    marker_path = os.path.join(tmpdir, "fresh_init_temp_password")
+    with open(marker_path, "w", encoding="utf-8") as f:
+        f.write("some-temp-pw-for-c5")
+    instance_id_file = os.path.join(tmpdir, "instance.id")
+    secrets_dir = os.path.join(tmpdir, "keys")
+
+    # C5: probe succeeds (auth OK, correctly sandbox-restricted) but the
+    # SEPARATE ALTER USER statement itself fails -> AUTH_SOCKET_CONVERSION_FAILED.
+    conn5 = _FakeConn()
+    _ctx5, _ = _install_fake_pymysql(conn5)
+    with _ctx5, \
+         patch.object(lb_mod, "_MYSQL_CLIENT_BIN", "/usr/bin/mysql"), \
+         patch.object(lb_mod.subprocess, "run", _fake_mysql_cli_run([], [False], probe_ok=True, alter_ok=False)):
+        raised_c5 = False
+        try:
+            run(
+                socket_path="/run/yandi/mysql.sock", fresh_init_marker=marker_path,
+                instance_id_file=instance_id_file, secrets_dir=secrets_dir,
+                agent_os_user="iam", created_by_host="test-host",
+            )
+        except LiveBootstrapError as e:
+            raised_c5 = True
+            _c5_err = str(e)
+
+    check(
+        "C5: auth probe succeeding but the ALTER USER statement itself "
+        "failing raises with AUTH_SOCKET_CONVERSION_FAILED specifically — "
+        "a SQL/plugin bug, explicitly distinguished from a credential bug",
+        raised_c5 and "AUTH_SOCKET_CONVERSION_FAILED" in _c5_err,
+        f"raised={raised_c5} err={_c5_err if raised_c5 else None!r}",
+    )
+    check(
+        "C5: the error message proves auth succeeded (references "
+        "MYSQL_AUTH=... above it) rather than re-blaming the credential",
+        raised_c5 and "authentication itself succeeded" in _c5_err,
+    )
+
+    # The real secret value used in this test scenario must NEVER
+    # appear in either exception message.
+    check(
+        "C4/C5: neither error message ever contains the actual temp "
+        "password value used in these test scenarios",
+        "some-temp-pw-for-c4" not in _c4_err and "some-temp-pw-for-c5" not in _c5_err,
+    )
+
+
+# ============================================================
 # D. No secret is ever printed.
 # ============================================================
 
@@ -353,6 +457,26 @@ check(
     "a print() line that would actually DO it matters here)",
     all("password" not in line.lower() and "secret" not in line.lower() for line in _print_lines),
     f"{_print_lines}",
+)
+
+# The eighth-attempt diagnostic print()s (PYTHON_LEN/PYTHON_FP,
+# MYSQL_AUTH) live in run()/_retire_temporary_root_password(), not
+# main() — statically confirm they interpolate only len()/_fingerprint()
+# of the secret variables, never the raw variable itself.
+_diag_print_lines = [
+    line for line in (inspect.getsource(lb_mod.run) + inspect.getsource(lb_mod._retire_temporary_root_password)).splitlines()
+    if line.strip().startswith("print(")
+]
+check(
+    "D2: run()/_retire_temporary_root_password()'s diagnostic print() "
+    "lines exist and interpolate only len(...)/_fingerprint(...) of the "
+    "secret variable, never the raw variable by itself",
+    len(_diag_print_lines) >= 2
+    and all(
+        ("temp_password}" not in line and "temp_password:" not in line)
+        for line in _diag_print_lines
+    ),
+    f"{_diag_print_lines}",
 )
 
 with tempfile.TemporaryDirectory() as tmpdir:
