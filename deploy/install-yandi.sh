@@ -131,6 +131,21 @@ create_filesystem() {
     install -d -o root -g root -m 0755 "$CONFIG_DIR"
     install -d -o "$YANDI_DB_USER" -g "$YANDI_DB_USER" -m 0750 "$LOG_DIR"
     install -d -o "$YANDI_DB_USER" -g "$YANDI_DB_USER" -m 0700 "$(dirname "$KEK_PATH")"
+
+    # Live-confirmed bug (second owner run, after the --defaults-file
+    # fix): this script's own `mysqld ... | tee -a "$ERROR_LOG"` in
+    # initialize_datadir() runs under sudo (root), so if $ERROR_LOG did
+    # not already exist, tee created it root-owned. mysqld itself drops
+    # privileges to $YANDI_DB_USER (--user=) BEFORE opening its
+    # log-error target, so it then fails with Permission denied against
+    # a root-owned file. `touch` (not `install`, which would truncate
+    # any real historical log content on every idempotent re-run) plus
+    # explicit chown/chmod fixes ownership unconditionally, whether the
+    # file is new or was left root-owned by an earlier failed attempt.
+    touch "$ERROR_LOG"
+    chown "$YANDI_DB_USER:$YANDI_DB_USER" "$ERROR_LOG"
+    chmod 0640 "$ERROR_LOG"
+
     log "filesystem layout ready under $YANDI_DB_HOME, $CONFIG_DIR, $RUNTIME_DIR, $LOG_DIR"
 }
 
