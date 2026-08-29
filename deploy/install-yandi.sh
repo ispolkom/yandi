@@ -68,6 +68,11 @@ YANDI_VENV_PYTHON="/home/iam/venv/bin/python3"
 # part of that same change.
 AGENT_OS_USER="iam"
 
+# Set by main()'s argument parsing — default OFF. See
+# reinitialize_empty_instance_guard() for the fail-closed conditions
+# that must ALL hold before this flag has any effect at all.
+REINIT_EMPTY_INSTANCE=0
+
 log() { echo "[install-yandi] $*"; }
 die() { echo "[install-yandi] FATAL: $*" >&2; exit 1; }
 
@@ -274,8 +279,65 @@ install_systemd_unit() {
 }
 
 # ============================================================
+# 7b. RECOVERY GUARD — --reinitialize-empty-instance
+#
+# Only reachable from initialize_datadir() when the datadir already
+# looks like a valid, previously-initialized MySQL datadir AND the
+# owner explicitly passed --reinitialize-empty-instance. Every check
+# below is independent and must ALL pass; any single failure refuses
+# (die) rather than proceeding partially or guessing. This function
+# NEVER deletes anything itself — it only decides whether the caller
+# is allowed to.
+# ============================================================
+reinitialize_empty_instance_guard() {
+    # 1. Target is unambiguously OUR dedicated path, never the shared
+    #    instance's own datadir (defense in depth — DATADIR is a fixed
+    #    constant above, this just refuses to proceed if that constant
+    #    is ever pointed somewhere unexpected in the future).
+    case "$DATADIR" in
+        /var/lib/yandi/mysql/data) ;;
+        *) die "REFUSING --reinitialize-empty-instance: DATADIR ('$DATADIR') is not the expected dedicated path." ;;
+    esac
+    case "$DATADIR" in
+        /var/lib/mysql*) die "REFUSING --reinitialize-empty-instance: DATADIR resolves under the SHARED instance's path — absolute stop." ;;
+    esac
+
+    # 2. The dedicated instance identity marker must already exist — we
+    #    are only ever reinitializing something a YANDI bootstrap
+    #    attempt already claimed, never an unknown/unclaimed directory.
+    [ -f "$INSTANCE_ID_FILE" ] || die "REFUSING --reinitialize-empty-instance: no instance identity marker at $INSTANCE_ID_FILE — this datadir was never claimed by a YANDI bootstrap attempt."
+
+    # 3. Socket path is the dedicated one, never the shared instance's.
+    [ "$SOCKET_PATH" = "/run/yandi/mysql.sock" ] || die "REFUSING --reinitialize-empty-instance: unexpected socket path '$SOCKET_PATH'."
+
+    # 4. Canonical/production activation must NOT have happened yet.
+    #    live_bootstrap.py's run_bootstrap() only ever writes the
+    #    readonly/migrator secret files AFTER schema/roles/grants exist
+    #    — their presence is proof a prior Phase B run already
+    #    completed real persistence bootstrap. This flag must become
+    #    permanently unusable from that point on (mandate §8: never
+    #    leave "delete the database in one command" without a strong
+    #    guard) — no override, no --force, nothing supersedes this.
+    if [ -f "${SECRETS_DIR}/yandi_readonly.secret" ] || [ -f "${SECRETS_DIR}/yandi_migrator.secret" ]; then
+        die "REFUSING --reinitialize-empty-instance: found a readonly/migrator secret in $SECRETS_DIR — this proves a prior Phase B run already completed schema/role bootstrap (canonical activation). This flag may ONLY be used BEFORE that point. Manual, deliberate action is required from here — this installer will not do it automatically."
+    fi
+
+    # 5. Storage state must be a CURRENT reading, not cached/hardcoded.
+    disk_gate
+
+    log "REINIT GUARD PASSED — about to wipe and reinitialize:"
+    log "  datadir:                 $DATADIR"
+    log "  service:                 yandi-db.service"
+    log "  socket:                  $SOCKET_PATH"
+    log "  instance uuid (UNCHANGED, file preserved): $(cat "$INSTANCE_ID_FILE" 2>/dev/null || echo unknown)"
+    log "  shared mysql.service / FastPanel DB: NOT TOUCHED"
+}
+
+# ============================================================
 # 8. INITIALIZE DATADIR (idempotent — refuses to re-initialize a
-#    non-empty datadir rather than risking data loss)
+#    non-empty datadir rather than risking data loss, UNLESS
+#    --reinitialize-empty-instance was passed AND the guard above
+#    clears it)
 # ============================================================
 initialize_datadir() {
     # Stop any currently-running instance FIRST, unconditionally.
@@ -295,6 +357,16 @@ initialize_datadir() {
     # genuine fresh start against whatever ends up on disk, regardless
     # of how many times a human clears the datadir between invocations.
     if systemctl is-active --quiet yandi-db 2>/dev/null; then
+        # Verify the process we are about to stop is unambiguously OURS
+        # before touching it — its command line must reference our own
+        # dedicated datadir. Cheap, real proof, not an assumption.
+        local main_pid
+        main_pid="$(systemctl show yandi-db -p MainPID --value 2>/dev/null || echo 0)"
+        if [ "$main_pid" != "0" ] && [ -r "/proc/$main_pid/cmdline" ]; then
+            if ! tr '\0' ' ' < "/proc/$main_pid/cmdline" | grep -qF -- "$DATADIR"; then
+                die "yandi-db.service's running process (pid $main_pid) does not reference our own datadir ($DATADIR) in its command line — refusing to stop/touch a process that isn't unambiguously ours."
+            fi
+        fi
         log "yandi-db.service is currently active — stopping it before inspecting/touching the datadir"
         systemctl stop yandi-db
     fi
@@ -307,10 +379,25 @@ initialize_datadir() {
         # always creates — their absence means this is some other,
         # unidentified content this script has no business guessing about.
         if [ -f "${DATADIR}/ibdata1" ] && [ -d "${DATADIR}/mysql" ]; then
-            log "datadir $DATADIR is non-empty and looks like an already-initialized MySQL datadir — skipping --initialize"
-            return
+            if [ "$REINIT_EMPTY_INSTANCE" -eq 1 ]; then
+                reinitialize_empty_instance_guard
+                # Whole-directory removal, not a `data/*` glob — a glob
+                # does NOT match dotfiles, live-confirmed as a real risk
+                # (mysqld/InnoDB can leave dotfile-shaped entries).
+                # Removing and recreating the directory itself catches
+                # everything, dotfiles included.
+                rm -rf "$DATADIR"
+                install -d -o "$YANDI_DB_USER" -g "$YANDI_DB_USER" -m 0700 "$DATADIR"
+                log "dedicated datadir wiped and recreated empty (instance identity file UNCHANGED) — proceeding to fresh --initialize"
+                # Falls through to the real --initialize below —
+                # deliberately no `return` here.
+            else
+                log "datadir $DATADIR is non-empty and looks like an already-initialized MySQL datadir — skipping --initialize"
+                return
+            fi
+        else
+            die "datadir $DATADIR is non-empty but does NOT look like a valid MySQL datadir (missing ibdata1 and/or mysql/) — refusing to guess whether it is safe to initialize over. Investigate manually and clear or relocate it before re-running (mandate: ambiguous state -> STOP, never auto-resolve)."
         fi
-        die "datadir $DATADIR is non-empty but does NOT look like a valid MySQL datadir (missing ibdata1 and/or mysql/) — refusing to guess whether it is safe to initialize over. Investigate manually and clear or relocate it before re-running (mandate: ambiguous state -> STOP, never auto-resolve)."
     fi
 
     # Re-check storage state with a CURRENT reading immediately before the
@@ -418,19 +505,35 @@ run_python_bootstrap() {
 }
 
 main() {
-    # Required, not cosmetic: makes explicit AT THE CALL SITE — not just
-    # implicit in this script's own steps — that this installer only
-    # ever provisions the dedicated YANDI database appliance
-    # (/var/lib/yandi, yandi-db OS user/service) and never touches the
-    # shared FastPanel mysql.service. No other mode exists yet (there is
-    # only one thing this script does), so this doesn't change any step
-    # below — it just refuses to run silently without the owner typing
-    # the explicit, self-documenting flag.
-    if [ "${1:-}" != "--database-only" ]; then
-        die "usage: sudo $0 --database-only (flag required — this installer only ever provisions the dedicated YANDI database appliance, never the shared FastPanel mysql.service)"
+    # --database-only is required, not cosmetic: makes explicit AT THE
+    # CALL SITE — not just implicit in this script's own steps — that
+    # this installer only ever provisions the dedicated YANDI database
+    # appliance (/var/lib/yandi, yandi-db OS user/service) and never
+    # touches the shared FastPanel mysql.service.
+    #
+    # --reinitialize-empty-instance is an OPTIONAL, additional
+    # destructive modifier (owner-explicit, mandate §8) — see
+    # reinitialize_empty_instance_guard() for the fail-closed
+    # conditions that must ALL hold before it does anything at all.
+    # Ordinary --database-only (without this flag) NEVER reinitializes
+    # an existing datadir — behavior is byte-for-byte unchanged from
+    # before this flag existed.
+    local database_only=0
+    for arg in "$@"; do
+        case "$arg" in
+            --database-only) database_only=1 ;;
+            --reinitialize-empty-instance) REINIT_EMPTY_INSTANCE=1 ;;
+            *) die "unknown argument: '$arg' (usage: sudo $0 --database-only [--reinitialize-empty-instance])" ;;
+        esac
+    done
+    if [ "$database_only" -ne 1 ]; then
+        die "usage: sudo $0 --database-only [--reinitialize-empty-instance] (--database-only required — this installer only ever provisions the dedicated YANDI database appliance, never the shared FastPanel mysql.service)"
     fi
 
     log "=== YANDI dedicated database appliance installer (DESIGN — review before running) ==="
+    if [ "$REINIT_EMPTY_INSTANCE" -eq 1 ]; then
+        log "--reinitialize-empty-instance requested — will be evaluated against a fail-closed guard if/when an already-initialized datadir is found (see reinitialize_empty_instance_guard())"
+    fi
     precheck
     disk_gate
     create_os_identity

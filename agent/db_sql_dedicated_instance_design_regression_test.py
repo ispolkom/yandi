@@ -169,7 +169,8 @@ check(
     "BOOTSTRAP V1 mandate: the invocation itself must make it unambiguous this "
     "installer only ever provisions the dedicated YANDI DB, never the shared "
     "FastPanel mysql.service)",
-    '"${1:-}" != "--database-only"' in script_text,
+    "--database-only) database_only=1" in script_text
+    and 'if [ "$database_only" -ne 1 ]; then' in script_text,
 )
 
 _no_flag = subprocess.run(["bash", str(INSTALL_SCRIPT)], capture_output=True, text=True)
@@ -274,6 +275,123 @@ check(
     "shared, ever-growing historical log this bug came from)",
     "--fresh-init-marker" in script_text and "--error-log" not in script_text,
 )
+
+# ============================================================
+# --reinitialize-empty-instance: fail-closed recovery flag.
+#
+# Sixth Phase B attempt hit an honest, correct "AMBIGUOUS AUTH STATE"
+# stop (root unreachable, no fresh-init marker). Owner explicitly
+# authorized a CONTROLLED reinitialization of the still-pre-production
+# dedicated datadir (no canonical YANDI data exists yet). This section
+# proves the recovery flag is fail-closed by construction — every
+# precondition independently gateable, none skippable, no override.
+#
+# Note: the guard function reads global path CONSTANTS defined earlier
+# in this same script (DATADIR/INSTANCE_ID_FILE/SOCKET_PATH/
+# SECRETS_DIR) — dynamically exercising it end-to-end would require
+# root to create files under /var/lib/yandi, /etc/yandi, /run/yandi,
+# which this non-privileged test environment does not have (matches
+# this whole file's existing posture: install-yandi.sh is verified by
+# static source inspection + bash -n, never executed — see the module
+# docstring). These checks prove the guard's STRUCTURE/ORDERING is
+# correct; DATABASE_BOOTSTRAP_V1_CHECKPOINT.md-style live verification
+# proves it end-to-end on a real host.
+# ============================================================
+
+_guard_body = script_text.split("reinitialize_empty_instance_guard() {", 1)[1].split("\n}\n", 1)[0]
+
+check(
+    "REINIT_EMPTY_INSTANCE defaults to 0 (OFF) — ordinary --database-only "
+    "(without the new flag) behaves byte-for-byte as before, never "
+    "reinitializing an existing datadir",
+    any(
+        line.strip() == "REINIT_EMPTY_INSTANCE=0"
+        for line in script_text.splitlines()
+    ),
+)
+check(
+    "--reinitialize-empty-instance is a separate, explicit CLI flag that "
+    "sets REINIT_EMPTY_INSTANCE=1 — never inferred, never a side effect "
+    "of --database-only alone",
+    "--reinitialize-empty-instance) REINIT_EMPTY_INSTANCE=1" in script_text,
+)
+check(
+    "the reinit branch in initialize_datadir() is gated on "
+    "REINIT_EMPTY_INSTANCE -eq 1, with the ORIGINAL unconditional skip "
+    "still the else-branch default",
+    '[ "$REINIT_EMPTY_INSTANCE" -eq 1 ]' in script_text
+    and "skipping --initialize" in script_text,
+)
+check(
+    "guard check 1: wrong/unexpected DATADIR is refused (case-match "
+    "against the exact expected dedicated path, not a prefix/substring "
+    "check that could be fooled)",
+    'case "$DATADIR" in' in _guard_body and '/var/lib/yandi/mysql/data)' in _guard_body,
+)
+check(
+    "guard check 1b: any path under the SHARED instance's own datadir "
+    "(/var/lib/mysql*) is explicitly and separately refused",
+    "/var/lib/mysql*) die" in _guard_body,
+)
+check(
+    "guard check 2: missing instance identity marker is refused — reinit "
+    "may only target a datadir a YANDI bootstrap attempt already claimed",
+    '[ -f "$INSTANCE_ID_FILE" ] || die' in _guard_body,
+)
+check(
+    "guard check 3: unexpected socket path is refused",
+    '[ "$SOCKET_PATH" = "/run/yandi/mysql.sock" ] || die' in _guard_body,
+)
+check(
+    "guard check 4: presence of EITHER readonly or migrator secret file "
+    "unconditionally dies — this is the 'canonical activation already "
+    "happened' proof",
+    'yandi_readonly.secret' in _guard_body and 'yandi_migrator.secret' in _guard_body
+    and "die " in _guard_body.split("yandi_migrator.secret", 1)[1][:200],
+)
+check(
+    "no --force/override flag exists anywhere in the CLI argument parser "
+    "that could supersede guard check 4",
+    "--force)" not in script_text and '"--force"' not in script_text,
+)
+check(
+    "guard check 5: storage state is re-checked with a CURRENT reading "
+    "(disk_gate call) inside the guard itself, not assumed from earlier",
+    "disk_gate" in _guard_body,
+)
+check(
+    "the guard prints exactly what will be reinitialized (datadir, "
+    "service, socket, UNCHANGED instance uuid) before the caller wipes "
+    "anything, and explicitly notes the shared instance is untouched",
+    "REINIT GUARD PASSED" in _guard_body
+    and "UNCHANGED" in _guard_body
+    and "shared mysql.service" in _guard_body,
+)
+check(
+    "datadir wipe removes the WHOLE directory and recreates it, rather "
+    "than a `data/*` glob (which does not match dotfiles — live-flagged "
+    "risk) — dotfiles can never survive the wipe",
+    'rm -rf "$DATADIR"' in script_text and 'rm -rf "$DATADIR"/*' not in script_text,
+)
+check(
+    "the wipe recreates DATADIR with correct ownership immediately "
+    "(0700, yandi-db:yandi-db) rather than leaving it missing",
+    'install -d -o "$YANDI_DB_USER" -g "$YANDI_DB_USER" -m 0700 "$DATADIR"' in script_text,
+)
+check(
+    "the reinit path never touches INSTANCE_ID_FILE/CONFIG_DIR — the "
+    "wipe is scoped to DATADIR only, so the instance UUID is physically "
+    "impossible for this code path to change",
+    "rm -rf \"$CONFIG_DIR\"" not in script_text
+    and "rm -rf \"$INSTANCE_ID_FILE\"" not in script_text,
+)
+check(
+    "before stopping yandi-db.service, the running process's own cmdline "
+    "is verified to reference OUR datadir — refuses to stop/touch a "
+    "process that isn't unambiguously ours",
+    "MainPID" in script_text and "/proc/$main_pid/cmdline" in script_text,
+)
+
 check(
     "install script's OS-identity/filesystem/config steps are idempotent (id check, "
     "install -d, existence check before writing config) — safe to re-run",
