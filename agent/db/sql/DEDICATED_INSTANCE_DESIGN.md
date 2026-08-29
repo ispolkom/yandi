@@ -49,8 +49,11 @@ grep this session's own regression suite already runs
 ```
 /var/lib/yandi/mysql/data/          -- InnoDB datadir (new, dedicated)
 /var/lib/yandi/mysql-keyring/       -- Percona keyring backend storage
-/run/yandi/mysql.sock               -- Unix socket (tmpfs, recreated each boot)
-/run/yandi/mysql.pid                -- pidfile
+/run/yandi/mysql/mysql.sock         -- Unix socket (systemd RuntimeDirectory=yandi/mysql, tmpfs, recreated each boot)
+/run/yandi/mysql/mysql.pid          -- pidfile (same systemd-managed directory as the socket)
+/run/yandi/bootstrap/               -- root:root 0700, NEVER a systemd RuntimeDirectory= target — the
+                                        one-time temp-password marker lives here (survives every mysqld
+                                        service stop/start; see install-yandi.sh's ensure_secure_bootstrap_dir())
 /etc/yandi/mysql/my.cnf             -- dedicated instance config
 /var/log/yandi/mysql-error.log      -- error log (dedicated, never merged with FastPanel's)
 /var/lib/yandi/integrity/           -- external integrity checkpoints (mandate §27, Этап 5E-S §15)
@@ -95,7 +98,7 @@ different convention.
 0750` — decided at install time based on which supervising process
 needs directory-traversal access, e.g. a healthcheck script running as
 a different user). The socket file itself
-(`/run/yandi/mysql.sock`) inherits mysqld's own `umask`-controlled
+(`/run/yandi/mysql/mysql.sock`) inherits mysqld's own `umask`-controlled
 creation mode — Percona/MySQL typically creates the socket at `0777`
 by default (`--socket` has no built-in mode restriction of its own in
 stock Percona 8.0), so the DESIGN explicitly sets
@@ -162,7 +165,7 @@ only: it adds a path the mysqld binary MAY use, it removes nothing and
 restricts nothing already granted, so the shared instance's own
 confinement is unaffected). The local override then lists YANDI's
 dedicated paths (`/var/lib/yandi/mysql/data/`, `/var/lib/yandi/mysql-
-keyring/`, `/run/yandi/mysql.sock`, `/etc/yandi/mysql/`, `/var/log/
+keyring/`, `/run/yandi/mysql/mysql.sock`, `/etc/yandi/mysql/`, `/var/log/
 yandi/`) as allowed read/write targets.
 
 **Since the shared profile is currently `complain` mode, this addition
