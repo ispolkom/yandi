@@ -490,17 +490,123 @@ def _ollama_section() -> Dict[str, Any]:
     return result
 
 
-def _sql_engine_clients_section() -> Dict[str, Any]:
+def _classify_mysql_implementation(version_text: Optional[str]) -> str:
+    """CLIENT and SERVER binaries of the mysql family are shipped by
+    three different projects that all answer to similar names — a
+    version string is the only cheap way to tell them apart, and V1.1's
+    own audit found `mysql --version`/`mysqld --version` already
+    include the vendor name in plain text (e.g. "... Percona Server
+    (GPL) ...") on this exact host."""
+    if not version_text or version_text == UNKNOWN:
+        return UNKNOWN
+    lower = version_text.lower()
+    if "percona" in lower:
+        return "PERCONA"
+    if "mariadb" in lower:
+        return "MARIADB"
+    if "mysql" in lower:
+        return "MYSQL"
+    return UNKNOWN
+
+
+def _mysql_family_section() -> Dict[str, Any]:
+    """
+    V1.1 fix (mandate: "убедись, что detection НЕ смешивает: mysql
+    client installed / mysqld server binary installed / Percona package
+    installed / server process running / server reachable / server
+    usable by YANDI — это разные факты"). Each is now its own field,
+    never collapsed into one status:
+
+        client.status         — the `mysql` CLI binary, independent of
+                                 any server.
+        server.binary          — the `mysqld` binary (V1's sbin-
+                                 fallback fix, unchanged).
+        server.implementation  — PERCONA/MYSQL/MARIADB/UNKNOWN, parsed
+                                 from the server binary's OWN version
+                                 string, never guessed from the client's.
+        server.running         — is SOME mysql-family systemd service
+                                 active right now (`systemctl is-active
+                                 mysql`) — a real signal, but says
+                                 nothing about WHICH instance (this
+                                 codebase's shared FastPanel one is the
+                                 only one that has ever run on this
+                                 host — see agent/db/sql/
+                                 SQL_DEPLOYMENT_DEFERRED.md).
+        server.reachable       — ALWAYS UNKNOWN in V1.1, on purpose:
+                                 determining this would require actually
+                                 opening a connection, which is exactly
+                                 the "не подключайся к shared FastPanel
+                                 DB ради readiness" the mandate forbids.
+        server.readiness       — YANDI's OWN usability judgment, never
+                                 inferred from binary/running alone.
+        server.reason          — controlled vocabulary explaining the
+                                 readiness verdict.
+
+    `yandi_sql_configured` below checks the SAME two env var names
+    agent.db.sql.connection.is_configured() checks — re-checked
+    directly here (NOT by importing agent.db.sql, preserving the
+    module's own "no SQL dependency" boundary from V1) because it is
+    the one fact that distinguishes "some mysql server exists on this
+    host" from "YANDI itself has been given credentials for one" —
+    without it, "server running" would be misread as "YANDI's database
+    is ready", exactly the FACT/READINESS conflation this task exists
+    to fix.
+    """
+    client = _component(["mysql"])
+    server_binary = _component(["mysqld"], version_args=["--version"])
+
+    server_version = server_binary.get("version") if server_binary.get("status") == PRESENT else None
+    implementation = _classify_mysql_implementation(server_version)
+
+    running = UNKNOWN
+    systemctl = shutil.which("systemctl")
+    if systemctl:
+        svc_state = _run([systemctl, "is-active", "mysql"], timeout=2.0)
+        if svc_state == "active":
+            running = PRESENT
+        elif svc_state in ("inactive", "failed", "unknown", "activating", "deactivating", ""):
+            running = ABSENT
+        # any other/no output (e.g. systemctl itself errored) -> stays UNKNOWN
+
+    reachable = UNKNOWN  # deliberately never tested, see docstring
+
+    yandi_sql_configured = bool(os.environ.get("YANDI_SQL_USER")) and bool(os.environ.get("YANDI_SQL_PASSWORD"))
+
+    if yandi_sql_configured:
+        # Configured != verified — V1.1 still does not connect to check
+        # this, so it stays an honest UNKNOWN rather than a fabricated READY.
+        readiness, reason = UNKNOWN, "CONFIGURED_NOT_VERIFIED"
+    elif running == PRESENT:
+        readiness, reason = NOT_READY, "SHARED_OR_UNCONFIGURED"
+    else:
+        readiness, reason = NOT_READY, "NOT_CONFIGURED"
+
+    return {
+        "client": client,
+        "server": {
+            "binary": server_binary.get("status", ABSENT),
+            "implementation": implementation,
+            "version": server_version or UNKNOWN,
+            "running": running,
+            "reachable": reachable,
+            "readiness": readiness,
+            "reason": reason,
+        },
+    }
+
+
+def _sql_engines_section() -> Dict[str, Any]:
     """Presence/version of SQL CLIENT/SERVER binaries ONLY — no
     connection attempt, no import of agent.db.sql.* anywhere (mandate:
     "SYSTEM STATE V1 НЕ ЗАВИСИТ ОТ SQL", and 5E-S/5E-S2 stay shelved,
     see agent/db/sql/SQL_DEPLOYMENT_DEFERRED.md). This is the FACT
     layer only (mandate §4's own worked example: "Percona package
     8.0.46 installed" is a FACT, not a READINESS claim about YANDI's
-    own database backend)."""
+    own database backend) — except `mysql.server.readiness`, which IS
+    a deliberate, narrow READINESS judgment (see _mysql_family_section()
+    docstring for why that one field earns the exception)."""
     return {
-        "mysql_client": _component(["mysql"]),
-        "mysqld": _component(["mysqld"], version_args=["--version"]),
+        "mysql": _mysql_family_section(),
         "postgresql_client": _component(["psql"]),
         "sqlite3": _component(["sqlite3"]),
     }
@@ -516,10 +622,11 @@ def _software_section() -> Dict[str, Any]:
         },
         "pip": _component(["pip", "pip3"]),
         "rust_cargo": _component(["cargo"]),
+        "rustc": _component(["rustc"]),
         "node": _component(["node"]),
         "npm": _component(["npm"]),
         "ollama": _ollama_section(),
-        "sql_engines": _sql_engine_clients_section(),
+        "sql_engines": _sql_engines_section(),
     }
 
 
@@ -608,6 +715,45 @@ def _bucket_percent(value: float, bucket_size: int = 5) -> int:
     return int(round(value / bucket_size) * bucket_size)
 
 
+def _component_view(c: Dict[str, Any]) -> Dict[str, Any]:
+    """Shared by _material_view() and _sql_engines_material_view() —
+    reduces any component dict to just its {status, version}, the two
+    fields that matter for materiality (mandate §3: FACT != READINESS
+    — a component's `path`/other diagnostic fields never participate
+    in the fingerprint)."""
+    if not isinstance(c, dict):
+        return {"status": UNKNOWN}
+    return {"status": c.get("status"), "version": c.get("version")}
+
+
+def _sql_engines_material_view(sql_engines: Dict[str, Any]) -> Dict[str, Any]:
+    """V1.1: `sql_engines.mysql` is a nested {client, server} structure,
+    not a flat component dict — a plain _component_view() call on it
+    would silently produce {"status": None, "version": None} (mandate
+    §3's own "version != readiness" caution applies here too: getting
+    this wrong wouldn't crash, it would just quietly stop tracking
+    mysql-family changes in the fingerprint/delta, a worse failure mode
+    than a loud one). `server.reachable` is deliberately excluded —
+    it is ALWAYS UNKNOWN by design (never tested), so including it
+    would add a field with zero variance, not a real material signal."""
+    out: Dict[str, Any] = {}
+    for name, value in sql_engines.items():
+        if name == "mysql" and isinstance(value, dict):
+            client = value.get("client", {})
+            server = value.get("server", {})
+            out["mysql"] = {
+                "client": _component_view(client),
+                "server_binary": server.get("binary"),
+                "server_implementation": server.get("implementation"),
+                "server_version": server.get("version"),
+                "server_running": server.get("running"),
+                "server_readiness": server.get("readiness"),
+            }
+        else:
+            out[name] = _component_view(value if isinstance(value, dict) else {})
+    return out
+
+
 def _material_view(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     """Strips volatile, non-material fields (mandate §6: "Не включай
     timestamp в fingerprint", §7: bucket disk usage) before hashing.
@@ -636,11 +782,6 @@ def _material_view(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             ),
         })
 
-    def _component_view(c: Dict[str, Any]) -> Dict[str, Any]:
-        if not isinstance(c, dict):
-            return {"status": UNKNOWN}
-        return {"status": c.get("status"), "version": c.get("version")}
-
     return {
         "schema_version": ident.get("schema_version"),
         "os": {
@@ -662,9 +803,7 @@ def _material_view(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "rust_cargo": _component_view(software.get("rust_cargo", {})),
             "node": _component_view(software.get("node", {})),
             "ollama_binary": _component_view(software.get("ollama", {}).get("binary", {})),
-            "sql_engines": {
-                k: _component_view(v) for k, v in (software.get("sql_engines") or {}).items()
-            },
+            "sql_engines": _sql_engines_material_view(software.get("sql_engines") or {}),
         },
         "services": {
             "systemd": _component_view(services.get("systemd", {})),
@@ -780,7 +919,26 @@ def compare(old_snapshot: Dict[str, Any], new_snapshot: Dict[str, Any]) -> Dict[
         if name == "sql_engines":
             sub_diff = {}
             for engine in (old_v or {}).keys() | (new_v or {}).keys():
-                d = _diff_component_dict((old_v or {}).get(engine, {}), (new_v or {}).get(engine, {}))
+                old_engine = (old_v or {}).get(engine, {})
+                new_engine = (new_v or {}).get(engine, {})
+                if engine == "mysql":
+                    # A compound facts bundle (client/server_binary/
+                    # server_implementation/server_version/
+                    # server_running/server_readiness) — never
+                    # collapsed into ADDED/REMOVED semantics that would
+                    # only make sense for a single status transition;
+                    # a plain field-by-field diff instead (mandate §3:
+                    # keep "server running" and "server ready" as
+                    # DISTINCT, separately-diffable facts, never merged).
+                    field_diffs = {}
+                    for field in old_engine.keys() | new_engine.keys():
+                        fd = _diff_scalar(old_engine.get(field), new_engine.get(field))
+                        if fd:
+                            field_diffs[field] = fd
+                    if field_diffs:
+                        sub_diff[engine] = {"change": "CHANGED", "diffs": field_diffs}
+                    continue
+                d = _diff_component_dict(old_engine, new_engine)
                 if d:
                     sub_diff[engine] = d
             if sub_diff:

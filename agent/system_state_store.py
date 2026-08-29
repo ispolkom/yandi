@@ -78,6 +78,17 @@ def _append_history(
         f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
 
+# V1.1 (mandate §4/§5/§6): state words distinguish WHY a fingerprint
+# is being treated as new/unchanged, not just whether it is —
+# specifically so "latest.json was corrupted, but we recovered" (a
+# genuinely different situation, worth a different startup log line)
+# is never silently reported as an ordinary NEW.
+STATE_NEW = "NEW"
+STATE_UNCHANGED = "UNCHANGED"
+STATE_CHANGED = "CHANGED"
+STATE_RECOVERED = "RECOVERED"
+
+
 def update_state(
     probe_source: str = "agent_local_probe",
     latest_path: Path = LATEST_PATH,
@@ -93,31 +104,55 @@ def update_state(
     current free-memory/disk numbers even between material changes).
 
     `history.jsonl` ONLY gets a new line when the snapshot's
-    FINGERPRINT changed from the previously stored one (mandate §7:
-    never flood history from routine numeric noise — the fingerprint
-    already excludes timestamps and buckets disk-usage percentages,
-    see agent.system_awareness.fingerprint()/_material_view()).
+    FINGERPRINT changed from the previously stored one, OR when latest.
+    json could not be trusted at all (mandate §5: a corrupted latest.json
+    is NEVER treated as a valid "previous snapshot" to diff against —
+    the only honest thing to do is record the current, successfully-
+    probed state as a fresh history entry, marked RECOVERED, not silently
+    assume nothing changed).
 
     Returns {"snapshot", "fingerprint", "material_change": bool,
-    "delta": {...}} — `delta` is empty on the very first observation
-    (nothing to compare against) and non-empty exactly when material_
-    change is True and a prior observation existed.
+    "delta": {...}, "state": one of STATE_NEW/UNCHANGED/CHANGED/
+    RECOVERED}. `material_change` is kept for backward compatibility
+    with existing callers/tests — it is True for NEW/CHANGED/RECOVERED,
+    False only for UNCHANGED.
     """
     new_snapshot = build_snapshot(probe_source=probe_source)
     new_fp = fingerprint(new_snapshot)
 
+    latest_path = Path(latest_path)
+    file_existed_before = latest_path.exists()
     prior = _load_latest(latest_path)
-    material_change = prior is None or prior.get("fingerprint") != new_fp
+    latest_was_corrupted = file_existed_before and prior is None
 
     delta: Dict[str, Any] = {}
-    if material_change:
-        if prior is not None and isinstance(prior.get("snapshot"), dict):
+
+    if prior is None:
+        state = STATE_RECOVERED if latest_was_corrupted else STATE_NEW
+        material_change = True
+        # delta stays {} — a corrupted prior state genuinely cannot be
+        # diffed against (mandate §5: never treat it as a trustworthy
+        # previous snapshot), and a first-ever observation has nothing
+        # to compare against either. Both are honest emptiness, not a
+        # claim that "nothing changed".
+    elif prior.get("fingerprint") == new_fp:
+        state = STATE_UNCHANGED
+        material_change = False
+    else:
+        state = STATE_CHANGED
+        material_change = True
+        if isinstance(prior.get("snapshot"), dict):
             delta = compare(prior["snapshot"], new_snapshot)
+
+    if material_change:
         _append_history(new_snapshot, new_fp, delta, path=history_path)
 
     _save_latest(new_snapshot, new_fp, path=latest_path)
 
-    return {"snapshot": new_snapshot, "fingerprint": new_fp, "material_change": material_change, "delta": delta}
+    return {
+        "snapshot": new_snapshot, "fingerprint": new_fp,
+        "material_change": material_change, "delta": delta, "state": state,
+    }
 
 
 def get_latest(path: Path = LATEST_PATH) -> Optional[Dict[str, Any]]:
@@ -142,24 +177,44 @@ def read_history(limit: int = 50, path: Path = HISTORY_PATH) -> List[Dict[str, A
 
 def summary_line(result: Dict[str, Any]) -> str:
     """One concise, human-readable log line for AGENT startup (mandate
-    §12) — never the full snapshot dict."""
-    snap = result["snapshot"]
-    os_ = snap.get("os", {})
-    cpu = snap.get("cpu", {})
-    mem = snap.get("memory", {})
-    gpu = snap.get("gpu", {})
+    §4/§12) — NEVER the full snapshot dict (mandate: "Не печатай весь
+    snapshot при каждом startup").
 
-    gpu_desc = "none/unknown"
-    if gpu.get("status") == "PRESENT" and gpu.get("gpus"):
-        gpu_desc = ", ".join(f"{g.get('model')} ({g.get('driver_version')})" for g in gpu["gpus"])
+    NEW/RECOVERED (the two states where a human benefits from full
+    context — a fresh install, or a just-repaired corrupted state file)
+    get the one-time descriptive line. UNCHANGED/CHANGED (the routine
+    case on every subsequent startup) get the SHORT form the mandate's
+    own examples show verbatim: "[SystemAwareness] CHANGED fp=...
+    delta=3" / "[SystemAwareness] UNCHANGED fp=..." — a change lists
+    which TOP-LEVEL SECTIONS changed (e.g. "gpu, storage"), never the
+    full before/after values, and never a causal explanation (mandate
+    §8: no "GPU driver changed caused X" — just the fact that section
+    changed)."""
+    fp_short = result["fingerprint"][:12]
+    state = result.get("state") or (STATE_CHANGED if result.get("material_change") else STATE_UNCHANGED)
 
-    mem_total = mem.get("total_bytes")
-    mem_gb = round(mem_total / 1e9, 1) if isinstance(mem_total, (int, float)) else "?"
+    if state in (STATE_NEW, STATE_RECOVERED):
+        snap = result["snapshot"]
+        os_ = snap.get("os", {})
+        cpu = snap.get("cpu", {})
+        mem = snap.get("memory", {})
+        gpu = snap.get("gpu", {})
 
-    state_word = "CHANGED" if result.get("material_change") else "unchanged"
+        gpu_desc = "none/unknown"
+        if gpu.get("status") == "PRESENT" and gpu.get("gpus"):
+            gpu_desc = ", ".join(f"{g.get('model')} ({g.get('driver_version')})" for g in gpu["gpus"])
 
-    return (
-        f"[SystemAwareness] {os_.get('distro', '?')} kernel={os_.get('kernel', '?')} "
-        f"cpu={cpu.get('model', '?')} mem={mem_gb}GB gpu={gpu_desc} "
-        f"fingerprint={result['fingerprint'][:12]} state={state_word}"
-    )
+        mem_total = mem.get("total_bytes")
+        mem_gb = round(mem_total / 1e9, 1) if isinstance(mem_total, (int, float)) else "?"
+
+        return (
+            f"[SystemAwareness] {state} {os_.get('distro', '?')} kernel={os_.get('kernel', '?')} "
+            f"cpu={cpu.get('model', '?')} mem={mem_gb}GB gpu={gpu_desc} fingerprint={fp_short}"
+        )
+
+    if state == STATE_CHANGED:
+        changed_sections = sorted((result.get("delta") or {}).keys())
+        sections_desc = f" ({', '.join(changed_sections)})" if changed_sections else ""
+        return f"[SystemAwareness] CHANGED fp={fp_short} delta={len(changed_sections)}{sections_desc}"
+
+    return f"[SystemAwareness] UNCHANGED fp={fp_short}"
