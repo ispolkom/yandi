@@ -78,6 +78,7 @@ diagnostic):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import secrets
 import shutil
@@ -97,6 +98,16 @@ class LiveBootstrapError(Exception):
     automatically (mandate §8: ambiguous/failed state -> STOP)."""
 
 
+def _fingerprint(value: str) -> str:
+    """Short, ONE-WAY, non-secret diagnostic fingerprint — safe to
+    print/log, never reversible to the original value. Used ONLY to
+    prove/disprove byte-for-byte equality between pipeline stages
+    (bash extraction -> marker file -> Python read -> subprocess env)
+    without ever exposing the real secret (mandate: never print/log
+    the password itself, safe characteristics only)."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
 def load_and_consume_fresh_init_marker(path: str) -> Optional[str]:
     """Reads the ONE-TIME temp password install-yandi.sh's
     initialize_datadir() captured directly from THIS invocation's own
@@ -107,12 +118,30 @@ def load_and_consume_fresh_init_marker(path: str) -> Optional[str]:
     run --initialize — the caller decides what that means: see run()'s
     Case B/C). Deletes the marker immediately after a successful read
     so it can NEVER be reused across runs (mandate: reruns must be
-    idempotent and must not need the one-time temp password again)."""
+    idempotent and must not need the one-time temp password again).
+
+    Live-debugging note (eighth Phase B attempt): this used to call
+    plain `.strip()` on the file content — Python's str.strip() removes
+    ANY leading/trailing whitespace character (space, tab, form feed,
+    vertical tab, CR, LF), not just a trailing line ending. install-
+    yandi.sh writes the marker via `printf '%s'` (no trailing newline
+    at all), so in the CURRENT design .strip() should be a no-op — but
+    it was flagged as an unproven risk rather than something merely
+    assumed safe, so it is replaced here with a surgical removal of
+    ONLY a single trailing "\\n" or "\\r\\n", never touching any other
+    byte the real password might legitimately contain."""
     if not os.path.exists(path):
         return None
     with open(path, "r", encoding="utf-8") as f:
-        value = f.read().strip()
+        raw = f.read()
     os.remove(path)
+    # Surgical: strip exactly one trailing line ending, nothing else.
+    if raw.endswith("\r\n"):
+        value = raw[:-2]
+    elif raw.endswith("\n"):
+        value = raw[:-1]
+    else:
+        value = raw
     return value or None
 
 
@@ -143,37 +172,92 @@ _MYSQL_CLIENT_BIN = shutil.which("mysql")
 
 _ALTER_ROOT_TO_AUTH_SOCKET_SQL = "ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket;"
 
+# Isolated, NON-DESTRUCTIVE probe outcomes — see _probe_temp_password_
+# auth()'s own docstring for why a "failure" here can mean two very
+# different things that MUST NOT be collapsed into one message.
+TEMP_PASSWORD_AUTH_OK_BUT_PASSWORD_EXPIRED = "TEMP_PASSWORD_AUTH_OK_BUT_PASSWORD_EXPIRED"
+TEMP_PASSWORD_AUTH_FAILED = "TEMP_PASSWORD_AUTH_FAILED"
+TEMP_PASSWORD_AUTH_UNEXPECTED = "TEMP_PASSWORD_AUTH_UNEXPECTED"
+
+
+def _probe_temp_password_auth(socket_path: str, temp_password: str) -> str:
+    """Isolated, NON-DESTRUCTIVE proof that AUTHENTICATION ITSELF
+    succeeds with the given credential — decoupled from whether the
+    separate, later ALTER USER statement succeeds. Runs a harmless
+    `SELECT 1`, never a write.
+
+    A freshly-`--initialize`d root account is in MySQL's post-
+    initialize password-expiration "sandbox mode": even a CORRECT
+    password will have this harmless SELECT rejected with error 1820
+    ("You must reset your password using ALTER USER statement...") —
+    that is NOT an auth failure, it is proof the credential WAS
+    accepted and the session is (correctly) restricted pending a
+    password change. Only a genuine credential mismatch produces error
+    1045 ("Access denied ... using password: YES"). Collapsing both
+    into one "failed to convert" message (the eighth-attempt bug) made
+    it impossible to tell a wrong-password bug from a normal, expected
+    sandbox restriction.
+
+    Returns one of the three module-level TEMP_PASSWORD_AUTH_* constants.
+    """
+    if not _MYSQL_CLIENT_BIN:
+        return TEMP_PASSWORD_AUTH_UNEXPECTED
+
+    result = subprocess.run(
+        [_MYSQL_CLIENT_BIN, f"--socket={socket_path}", "--user=root",
+         "--connect-expired-password", "-Nse", "SELECT 1;"],
+        env={**os.environ, "MYSQL_PWD": temp_password},
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode == 0:
+        # SELECT actually succeeded — sandbox mode wasn't even
+        # enforced (some builds/configs may not enforce it); either
+        # way, auth itself is proven fine.
+        return TEMP_PASSWORD_AUTH_OK_BUT_PASSWORD_EXPIRED
+    stderr = result.stderr
+    if "1045" in stderr or "Access denied" in stderr:
+        return TEMP_PASSWORD_AUTH_FAILED
+    if "1820" in stderr or "must reset your password" in stderr:
+        return TEMP_PASSWORD_AUTH_OK_BUT_PASSWORD_EXPIRED
+    return TEMP_PASSWORD_AUTH_UNEXPECTED
+
 
 def _retire_temporary_root_password(socket_path: str, temp_password: str):
-    """Connects ONCE with the ephemeral temp password and immediately
-    converts root to auth_socket, permanently retiring that password —
-    from this point on nothing in this codebase ever holds a root SQL
-    password again. Returns nothing; raises LiveBootstrapError on
-    failure.
+    """Connects with the ephemeral temp password and converts root to
+    auth_socket, permanently retiring that password — from this point
+    on nothing in this codebase ever holds a root SQL password again.
+    Returns nothing; raises LiveBootstrapError on failure, with a
+    message that distinguishes WHICH of two very different bugs
+    happened (mandate: never collapse "wrong credential" and "ALTER
+    USER itself failed" into one message again):
 
-    Uses the `mysql` CLI client, NOT pymysql, for this one statement.
-    Live-confirmed (second Phase B run, after fixing the first found
-    bug — HANDLE_EXPIRED_PASSWORDS): even once the connection itself
-    succeeds, pymysql's connect() unconditionally issues a "SET NAMES"
-    query right after authentication (Connection.set_character_set(),
-    for collation-precision reasons its own source comment explains —
-    there is no public parameter to suppress this), and a freshly
-    `--initialize`d root account is in MySQL's post-initialize
-    password-expiration "sandbox mode", which the server enforces by
-    rejecting every statement except a small ALTER USER/SET PASSWORD-
-    shaped set — SET NAMES included, rejected with error 1820. The
-    `mysql` CLI client (the exact client Percona/MySQL's own error
-    messages point to as "a client that supports expired passwords")
-    does not have this problem, so it is used here for exactly this
-    one, security-sensitive, single-statement operation instead.
+        TEMP_PASSWORD_AUTH_FAILED       — the credential value itself
+                                           was rejected at auth. A
+                                           capture/marker/pipeline bug,
+                                           not a SQL/plugin problem.
+        AUTH_SOCKET_CONVERSION_FAILED   — auth succeeded (proven by
+                                           the probe above), but the
+                                           ALTER USER statement itself
+                                           failed — a SQL/plugin
+                                           problem, not a credential one.
+
+    Uses the `mysql` CLI client, NOT pymysql, for both the probe and
+    the real ALTER USER. Live-confirmed (second Phase B attempt):
+    pymysql's connect() unconditionally issues a "SET NAMES" query
+    right after authentication (Connection.set_character_set(), for
+    collation-precision reasons its own source comment explains — no
+    public parameter suppresses this), which the post-initialize
+    sandbox mode rejects with error 1820 before this module's own code
+    ever runs. The `mysql` CLI client does not have this problem.
 
     The temp password is passed via the MYSQL_PWD environment variable
-    of this one subprocess (never a CLI argument, which would be
-    visible to any local user via `ps`/`/proc/<pid>/cmdline`) — the
-    standard mechanism the mysql client itself documents for
-    non-interactive password use; /proc/<pid>/environ is readable only
-    by the owning uid (root, here) and root itself, and the value is
-    never logged/printed/persisted anywhere by this function.
+    of each subprocess (never a CLI argument, which would be visible
+    to any local user via `ps`/`/proc/<pid>/cmdline`) — the standard
+    mechanism the mysql client itself documents for non-interactive
+    password use; /proc/<pid>/environ is readable only by the owning
+    uid (root, here) and root itself. The value is never logged/
+    printed/persisted anywhere by this function — only its one-way
+    SHA-256 fingerprint (see _fingerprint()) is ever surfaced.
     """
     if not _MYSQL_CLIENT_BIN:
         raise LiveBootstrapError(
@@ -184,17 +268,46 @@ def _retire_temporary_root_password(socket_path: str, temp_password: str):
             "alongside mysqld/percona-server-server."
         )
 
+    probe_result = _probe_temp_password_auth(socket_path, temp_password)
+    print(f"[live_bootstrap] MYSQL_AUTH={probe_result}")
+
+    if probe_result == TEMP_PASSWORD_AUTH_FAILED:
+        raise LiveBootstrapError(
+            "TEMP_PASSWORD_AUTH_FAILED: the temporary password was rejected at "
+            "authentication itself (error 1045) — this is a credential-VALUE "
+            "mismatch somewhere in the capture/marker/read pipeline (bash "
+            "extraction -> marker file -> Python read -> subprocess env), NOT a "
+            "problem with the ALTER USER statement or auth_socket plugin. "
+            "Compare the TEMP_SOURCE_FP (install-yandi.sh's own log) / MARKER_FP "
+            "/ PYTHON_FP fingerprints printed this run to localize exactly which "
+            "stage diverged — they must all be identical for a correct value."
+        )
+    if probe_result == TEMP_PASSWORD_AUTH_UNEXPECTED:
+        raise LiveBootstrapError(
+            "TEMP_PASSWORD_AUTH_UNEXPECTED: the auth probe returned neither a "
+            "clean credential failure (1045) nor the expected post-initialize "
+            "sandbox restriction (1820) — investigate manually (journalctl -u "
+            "yandi-db, or the mysql CLI's own non-secret stderr text)."
+        )
+    # probe_result == TEMP_PASSWORD_AUTH_OK_BUT_PASSWORD_EXPIRED: the
+    # expected, normal state for a fresh temp password. Proceed to the
+    # real, SEPARATE ALTER USER conversion.
+
     result = subprocess.run(
         [_MYSQL_CLIENT_BIN, f"--socket={socket_path}", "--user=root",
-         "-e", _ALTER_ROOT_TO_AUTH_SOCKET_SQL],
+         "--connect-expired-password", "-e", _ALTER_ROOT_TO_AUTH_SOCKET_SQL],
         env={**os.environ, "MYSQL_PWD": temp_password},
         capture_output=True, text=True, timeout=10,
     )
     if result.returncode != 0:
         raise LiveBootstrapError(
-            f"failed to convert root@localhost to auth_socket via the mysql CLI "
-            f"client (exit={result.returncode}) — the temporary password may "
-            f"still be active. stderr: {result.stderr.strip()}"
+            f"AUTH_SOCKET_CONVERSION_FAILED: authentication itself succeeded "
+            f"(MYSQL_AUTH={probe_result} above proves the credential was "
+            f"correct) but the ALTER USER ... IDENTIFIED WITH auth_socket "
+            f"statement failed (exit={result.returncode}) — a DIFFERENT bug "
+            f"than a credential mismatch (check auth_socket plugin "
+            f"availability, not the temp-password pipeline). "
+            f"stderr: {result.stderr.strip()}"
         )
 
 
@@ -256,6 +369,10 @@ def run(
 
     temp_password = load_and_consume_fresh_init_marker(fresh_init_marker)
     if temp_password is not None:
+        # Non-secret diagnostic only — see _fingerprint()'s own
+        # docstring. Compare against install-yandi.sh's own
+        # TEMP_SOURCE_FP/MARKER_FP log lines to localize a divergence.
+        print(f"[live_bootstrap] PYTHON_LEN={len(temp_password)} PYTHON_FP={_fingerprint(temp_password)}")
         _retire_temporary_root_password(socket_path, temp_password)
     elif not _root_reachable_via_auth_socket(socket_path):
         raise LiveBootstrapError(
