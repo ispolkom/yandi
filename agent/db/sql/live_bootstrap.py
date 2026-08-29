@@ -46,16 +46,39 @@ CLI (matches the invocation shape install-yandi.sh's run_python_
 bootstrap() already documented as its intended shape):
     python3 -m agent.db.sql.live_bootstrap \\
         --socket /run/yandi/mysql.sock \\
-        --error-log /var/log/yandi/mysql-error.log \\
+        --fresh-init-marker /run/yandi/fresh_init_temp_password \\
         --instance-id-file /etc/yandi/mysql/instance.id \\
         --secrets-dir /var/lib/yandi/keys \\
         --agent-os-user iam
+
+ROOT AUTH STATE — three cases, never a guess (live-confirmed bug this
+replaced: scanning install-yandi.sh's ever-growing $ERROR_LOG for the
+LAST "temporary password is generated..." line could pick up a real
+password belonging to a datadir that was since wiped and reinitialized
+without this exact process ever running, producing a real-looking but
+WRONG credential and a confusing "Access denied" instead of a clear
+diagnostic):
+
+    A) FRESH INITIALIZATION — install-yandi.sh's initialize_datadir()
+       just ran `mysqld --initialize` THIS invocation and captured ITS
+       OWN output directly into a one-time marker file (never derived
+       from re-reading any log). run() consumes that marker exactly
+       once (deletes it immediately after reading) and uses ONLY that
+       password to retire root's temp credential.
+    B) EXISTING MANAGED INSTANCE — no marker present (this invocation
+       did not just initialize). run() verifies root is ALREADY
+       reachable via auth_socket (an earlier run already completed the
+       one-time conversion) and proceeds directly — no password
+       anywhere in this path.
+    C) AMBIGUOUS AUTH STATE — no marker AND auth_socket doesn't work
+       either. run() raises LiveBootstrapError with a precise
+       diagnostic and does nothing further. Never scans a historical
+       log, never guesses, never retries with a different credential.
 """
 from __future__ import annotations
 
 import argparse
 import os
-import re
 import secrets
 import shutil
 import socket
@@ -67,8 +90,6 @@ from agent.db.sql.bootstrap import run_bootstrap
 from agent.db.sql.instance_identity import ensure_instance_id_file, get_db_instance_id
 from agent.db.sql.security_selfcheck import run_selfcheck
 
-_TEMP_PASSWORD_RE = re.compile(r"temporary password is generated for root@localhost:\s*(\S+)")
-
 
 class LiveBootstrapError(Exception):
     """Raised for any live-bootstrap failure — the caller (install-
@@ -76,35 +97,23 @@ class LiveBootstrapError(Exception):
     automatically (mandate §8: ambiguous/failed state -> STOP)."""
 
 
-def extract_temporary_root_password(error_log_path: str) -> Optional[str]:
-    """Reads the `mysqld --initialize` error log ONCE to find the
-    one-time temporary root password. Returns None if no such line is
-    found (e.g. a second run against an already-initialized datadir,
-    where no new temp password was ever generated — NOT an error by
-    itself, the caller decides what that means).
+def load_and_consume_fresh_init_marker(path: str) -> Optional[str]:
+    """Reads the ONE-TIME temp password install-yandi.sh's
+    initialize_datadir() captured directly from THIS invocation's own
+    `mysqld --initialize` output (never from re-scanning a shared,
+    ever-growing error log — see this module's docstring, Case A/B/C).
 
-    The password is returned to the caller's memory ONLY — this
-    function never writes it anywhere, never logs it, and the error log
-    file itself is left completely untouched (mandate §32: this
-    function only READS a secret that's already unavoidably on disk in
-    Percona's own log; it does not make that exposure worse).
-
-    Live-confirmed bug (fourth Phase B attempt, after several earlier
-    failed attempts in the same debugging session): install-yandi.sh's
-    initialize_datadir() pipes mysqld's output through `tee -a
-    "$ERROR_LOG"` — APPEND, never truncate/rotate — so after more than
-    one real `mysqld --initialize` run (e.g. a failed attempt followed
-    by `rm -rf` + retry), this log accumulates MULTIPLE "temporary
-    password is generated for root@localhost: ..." lines, one per past
-    initialize. The FIRST such line belongs to a datadir that may no
-    longer even exist; only the LAST one is valid for the CURRENT
-    datadir/root account. Returns the LAST match, not the first."""
-    if not os.path.exists(error_log_path):
+    Returns None if the marker is absent (this invocation did not just
+    run --initialize — the caller decides what that means: see run()'s
+    Case B/C). Deletes the marker immediately after a successful read
+    so it can NEVER be reused across runs (mandate: reruns must be
+    idempotent and must not need the one-time temp password again)."""
+    if not os.path.exists(path):
         return None
-    with open(error_log_path, "r", encoding="utf-8", errors="replace") as f:
-        text = f.read()
-    matches = list(_TEMP_PASSWORD_RE.finditer(text))
-    return matches[-1].group(1) if matches else None
+    with open(path, "r", encoding="utf-8") as f:
+        value = f.read().strip()
+    os.remove(path)
+    return value or None
 
 
 def save_protected_secret(path: str, value: str) -> None:
@@ -189,6 +198,24 @@ def _retire_temporary_root_password(socket_path: str, temp_password: str):
         )
 
 
+def _root_reachable_via_auth_socket(socket_path: str) -> bool:
+    """Case B probe: is root@localhost ALREADY reachable via auth_socket
+    (peer credentials, no password) — meaning an EARLIER run already
+    completed the one-time conversion? This process must itself be
+    running as the OS root user for auth_socket peer-cred matching to
+    succeed (true here: install-yandi.sh always invokes this under
+    sudo). Uses the mysql CLI, same as _retire_temporary_root_password(),
+    so this module's root-auth surface stays in one place rather than
+    also involving pymysql for this one check."""
+    if not _MYSQL_CLIENT_BIN:
+        return False
+    result = subprocess.run(
+        [_MYSQL_CLIENT_BIN, f"--socket={socket_path}", "--user=root", "-e", "SELECT 1;"],
+        capture_output=True, text=True, timeout=10,
+    )
+    return result.returncode == 0
+
+
 def _connect_as_root_auth_socket(socket_path: str):
     import pymysql
     import pymysql.cursors
@@ -207,24 +234,41 @@ def _connect_as_root_auth_socket(socket_path: str):
 
 
 def run(
-    *, socket_path: str, error_log_path: str, instance_id_file: str,
+    *, socket_path: str, fresh_init_marker: str, instance_id_file: str,
     secrets_dir: str, agent_os_user: str, created_by_host: Optional[str] = None,
 ) -> dict:
     """The full Phase B sequence. Idempotent per mandate §8: safe to
-    re-run against an already-bootstrapped instance (temp password
-    absent -> skip retirement step; instance id file already present ->
-    reused unchanged; run_bootstrap()'s own idempotency handles the
-    rest; existing secret files are never overwritten)."""
+    re-run against an already-bootstrapped instance (no fresh-init
+    marker -> skip retirement step, verify auth_socket instead;
+    instance id file already present -> reused unchanged;
+    run_bootstrap()'s own idempotency handles the rest; existing secret
+    files are never overwritten).
+
+    Case A/B/C (see module docstring for the full rationale):
+        A: fresh_init_marker present -> THIS invocation's own
+           --initialize just ran; consume that exact password once.
+        B: marker absent, root already reachable via auth_socket ->
+           an earlier run already converted it; proceed directly.
+        C: marker absent AND auth_socket unreachable -> ambiguous;
+           raise LiveBootstrapError rather than guess/scan any log.
+    """
     instance_uuid = ensure_instance_id_file(instance_id_file)
 
-    temp_password = extract_temporary_root_password(error_log_path)
-    if temp_password:
+    temp_password = load_and_consume_fresh_init_marker(fresh_init_marker)
+    if temp_password is not None:
         _retire_temporary_root_password(socket_path, temp_password)
-    # If no temp password was found, root is assumed to already be on
-    # auth_socket from a previous run of this same script — NOT
-    # re-derived or guessed, just attempted directly below; a genuine
-    # auth failure there raises LiveBootstrapError rather than silently
-    # falling back to anything.
+    elif not _root_reachable_via_auth_socket(socket_path):
+        raise LiveBootstrapError(
+            "AMBIGUOUS AUTH STATE: no fresh mysqld --initialize marker is present "
+            "for this invocation (install-yandi.sh did not just run --initialize "
+            "this time), and root@localhost is not reachable via auth_socket "
+            "either. This usually means an earlier attempt left root on a "
+            "different/unknown credential. Refusing to guess or scan any "
+            "historical log for a password — that is exactly the bug this "
+            "replaced. Manual investigation required before retrying."
+        )
+    # else: Case B — root already on auth_socket from an earlier
+    # successful run; nothing to retire, proceed directly below.
 
     conn = _connect_as_root_auth_socket(socket_path)
     try:
@@ -268,7 +312,7 @@ def run(
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--socket", required=True)
-    parser.add_argument("--error-log", required=True)
+    parser.add_argument("--fresh-init-marker", required=True)
     parser.add_argument("--instance-id-file", required=True)
     parser.add_argument("--secrets-dir", required=True)
     parser.add_argument("--agent-os-user", required=True)
@@ -276,7 +320,7 @@ def main(argv=None) -> int:
 
     try:
         result = run(
-            socket_path=args.socket, error_log_path=args.error_log,
+            socket_path=args.socket, fresh_init_marker=args.fresh_init_marker,
             instance_id_file=args.instance_id_file, secrets_dir=args.secrets_dir,
             agent_os_user=args.agent_os_user,
         )
