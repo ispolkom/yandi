@@ -125,11 +125,49 @@ def yandi_runtime_statements(username: str, host: str, password: str) -> List[Tu
         (nothing else) — no DELETE anywhere, no DDL, no admin
                  privilege of any kind (FORBIDDEN_FOR_RUNTIME).
     """
-    stmts = [create_user_statement(username, host, password)]
-    stmts.append((
+    return [create_user_statement(username, host, password)] + yandi_runtime_grant_statements(username, host)
+
+
+def yandi_runtime_auth_socket_statement(username: str, os_user: str) -> Tuple[str, tuple]:
+    """DATABASE BOOTSTRAP V1, mandate §11 / DEDICATED_INSTANCE_DESIGN.md
+    §H Option 1: creates YANDI_RUNTIME with NO PASSWORD AT ALL — the
+    server's `auth_socket` plugin authenticates a local Unix-socket
+    connection by kernel-verified peer UID instead. `os_user` is the
+    real OS account the AGENT process runs as (NOT a YANDI-internal
+    label) — a connection only succeeds if the connecting process's own
+    UID maps to this name via `getpwnam`, so there is no SQL credential
+    of any kind to leak from config/env/logs/git for this, the hottest
+    and most-exposed of the four roles (closes T7 entirely for this
+    role, rather than mitigating it).
+
+    Host is always 'localhost' here: `auth_socket` is a local-Unix-
+    socket-only mechanism, it has no meaning for `%`/remote hosts (a
+    remote TCP client has no OS peer UID to check) — unlike
+    yandi_runtime_statements()'s password variant, this function does
+    not take a `host` parameter at all, to make that constraint
+    structural rather than a caller convention to remember.
+
+    Same GRANT statements as yandi_runtime_statements() are still
+    needed afterward (this function only replaces the CREATE USER line)
+    — callers apply this INSTEAD OF yandi_runtime_statements()'s first
+    statement, then still issue the SELECT/INSERT/UPDATE grants for
+    'yandi_runtime'@'localhost'."""
+    return (
+        "CREATE USER IF NOT EXISTS %s@'localhost' IDENTIFIED WITH auth_socket AS %s",
+        (username, os_user),
+    )
+
+
+def yandi_runtime_grant_statements(username: str, host: str) -> List[Tuple[str, tuple]]:
+    """The GRANT half of YANDI_RUNTIME's privileges, factored out of
+    yandi_runtime_statements() so both the password-based CREATE USER
+    and the auth_socket-based CREATE USER (above) can share the exact
+    same grant logic — never two copies of this privilege list to keep
+    in sync."""
+    stmts = [(
         f"GRANT SELECT, INSERT ON `{DATABASE_NAME}`.* TO %s@%s",
         (username, host),
-    ))
+    )]
     for table in CLASS_C_TABLES + CLASS_D_TABLES:
         stmts.append((
             f"GRANT UPDATE ON `{DATABASE_NAME}`.`{table}` TO %s@%s",

@@ -182,9 +182,18 @@ check(
     "already exists" in script_text,
 )
 check(
-    "install script's DB-level bootstrap hand-off is a documented STUB that REFUSES "
-    "to proceed (die) rather than guessing at undecided auth wiring (§H)",
-    'die "run_python_bootstrap() is a documented STUB' in script_text,
+    "install script's DB-level bootstrap hand-off (DATABASE BOOTSTRAP V1: §H's auth "
+    "decision is now made, see agent/db/sql/DEDICATED_INSTANCE_DESIGN.md §H's own update "
+    "note) delegates to the separately-regression-tested agent.db.sql.live_bootstrap "
+    "module, rather than reimplementing auth/credential logic inline in this shell script",
+    "agent.db.sql.live_bootstrap" in script_text and "run_python_bootstrap()" in script_text,
+)
+check(
+    "install script's run_python_bootstrap() function body itself contains no inline "
+    "SQL password/credential value — it only passes filesystem paths (--socket, "
+    "--error-log, --instance-id-file, --secrets-dir, --agent-os-user) to live_bootstrap, "
+    "which generates/stores credentials itself (separately tested)",
+    "IDENTIFIED BY" not in script_text and "IDENTIFIED WITH" not in script_text,
 )
 
 _secret_shaped_patterns = ["password=", "PASSWORD=", "root_password", "rootpass"]

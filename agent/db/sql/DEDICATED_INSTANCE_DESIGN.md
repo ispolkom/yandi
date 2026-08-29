@@ -205,10 +205,19 @@ outside-repo convention) — a high-entropy (`secrets.token_urlsafe(32)`
 KEK already is. Never a human-chosen or hardcoded password (mandate
 §29: "NO PLAINTEXT SQL PASSWORD UX").
 
-**Decision on WHICH option is deferred to the actual install** (the
-owner or a later pass), gated on confirming `auth_socket` really works
-end-to-end with this exact Percona build + PyMySQL version — a **LIVE
-VERIFICATION REQUIRED AT INSTALL TIME** item, not assumed.
+**Update (DATABASE BOOTSTRAP V1)**: Option 1 has now been IMPLEMENTED
+as the default for YANDI_RUNTIME — `security_grants.
+yandi_runtime_auth_socket_statement()`, wired through `bootstrap.
+run_bootstrap(runtime_auth_socket_os_user=...)` and orchestrated by
+`agent/db/sql/live_bootstrap.py`, mapped to `AGENT_OS_USER="iam"` in
+`deploy/install-yandi.sh`. This is still a DESIGN/OFFLINE-TESTED choice,
+not a live-proven one — **LIVE VERIFICATION IS STILL REQUIRED AT
+INSTALL TIME**, specifically whether `auth_socket` peer-credential
+matching actually behaves as expected against this exact Percona
+8.0.46 build once a real connection is attempted. Option 2 (random
+secret) remains the documented fallback and is what YANDI_MIGRATOR/
+YANDI_READONLY already use unconditionally (auth_socket was only judged
+worth the complexity for the hot-path runtime role).
 
 ## I. `verify_database_encryption()` / TDE — NOT configured this pass
 

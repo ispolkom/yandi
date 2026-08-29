@@ -42,7 +42,9 @@ from agent.db.sql.schema import ALL_TABLES_IN_ORDER, ALTER_STATEMENTS_IN_ORDER
 from agent.db.sql.security_grants import (
     DATABASE_NAME, revoke_all_statement,
     yandi_migrator_statements, yandi_readonly_statements, yandi_runtime_statements,
+    yandi_runtime_auth_socket_statement, yandi_runtime_grant_statements,
 )
+from agent.db.sql.instance_identity import record_instance_identity
 from agent.db.sql.security_triggers import immutability_triggers
 
 
@@ -157,33 +159,65 @@ def revoke_bootstrap(conn, username: str, host: str) -> None:
 
 
 def run_bootstrap(
-    conn, *, runtime_password: str, readonly_password: str, migrator_password: str,
+    conn, *, readonly_password: str, migrator_password: str, runtime_password: str = "",
     runtime_host: str = "%", readonly_host: str = "localhost", migrator_host: str = "localhost",
+    runtime_auth_socket_os_user: str = None,
+    instance_uuid: str = None, instance_created_by_host: str = None,
 ) -> Dict[str, Any]:
     """The full flow, minus YANDI_BOOTSTRAP's own account creation —
     the caller is assumed to already be connected AS a bootstrap-
     capable account (mandate §10.1: that identity's lifecycle is
     managed by whatever invoked this, not by this function).
 
-    Passwords are REQUIRED, explicit arguments — this function never
-    generates or defaults a password (mandate §52: no credential
-    guessing). It also never logs them: every password value here only
-    ever flows into a `%s`-bound SQL parameter (see security_grants.py)
+    Passwords are explicit arguments — this function never generates or
+    defaults one (mandate §52: no credential guessing). It also never
+    logs them: every password value here only ever flows into a
+    `%s`-bound SQL parameter (see security_grants.py)
     (agent/db_sql_security_bootstrap_regression_test.py greps this
     module for exactly that property).
+
+    `runtime_auth_socket_os_user` (DATABASE BOOTSTRAP V1, mandate §11):
+    when given, YANDI_RUNTIME is created with `auth_socket` instead of a
+    password (DEDICATED_INSTANCE_DESIGN.md §H Option 1) —
+    `runtime_password`/`runtime_host` are then ignored entirely for that
+    role (auth_socket is inherently 'localhost'-only, see
+    security_grants.yandi_runtime_auth_socket_statement()'s docstring).
+    Leaving this None preserves the original password-only behavior
+    exactly — existing callers/tests are unaffected.
+
+    `instance_uuid` (mandate §4/§27): when given, also records the
+    single instance_identity row via instance_identity.record_
+    instance_identity() — idempotent (a second call with the SAME uuid
+    is a no-op; a DIFFERENT uuid raises rather than silently
+    overwriting, see that function's own docstring). Left None, no
+    identity row is touched (a caller doing a plain schema-only
+    bootstrap does not have to reason about identity at all).
 
     Idempotent end-to-end: calling this twice against the SAME database
     creates zero duplicate users, zero duplicate tables (CREATE TABLE
     IF NOT EXISTS), and zero duplicate triggers (apply_immutability_
     triggers()'s own explicit check)."""
+    if not runtime_auth_socket_os_user and not runtime_password:
+        raise ValueError(
+            "run_bootstrap() needs either runtime_password (password auth) or "
+            "runtime_auth_socket_os_user (auth_socket auth) for YANDI_RUNTIME — "
+            "refusing to create it with an empty password by omission."
+        )
     ensure_database(conn)
-    ensure_role(conn, yandi_runtime_statements("yandi_runtime", runtime_host, runtime_password))
+    if runtime_auth_socket_os_user:
+        ensure_role(conn, [yandi_runtime_auth_socket_statement("yandi_runtime", runtime_auth_socket_os_user)]
+                    + yandi_runtime_grant_statements("yandi_runtime", "localhost"))
+    else:
+        ensure_role(conn, yandi_runtime_statements("yandi_runtime", runtime_host, runtime_password))
     ensure_role(conn, yandi_readonly_statements("yandi_readonly", readonly_host, readonly_password))
     ensure_role(conn, yandi_migrator_statements("yandi_migrator", migrator_host, migrator_password))
     apply_schema(conn)
     triggers_created = apply_immutability_triggers(conn)
+    if instance_uuid:
+        record_instance_identity(conn, instance_uuid, created_by_host=instance_created_by_host)
     return {
         "database": DATABASE_NAME,
         "roles_ensured": ["yandi_runtime", "yandi_readonly", "yandi_migrator"],
         "triggers_created": triggers_created,
+        "runtime_auth_mode": "auth_socket" if runtime_auth_socket_os_user else "password",
     }

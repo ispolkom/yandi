@@ -14,15 +14,93 @@ to repeat it in full below.
 | 5E | SQL shadow wiring | DONE |
 | 5E-S | SQL Bastion (offline design + regression) | DONE |
 | 5E-S2 | Dedicated DB design/audit | DONE |
-| 5E-S2-LIVE | Privileged deployment | BLOCKED / DEFERRED |
+| 5E-S2-LIVE (DATABASE BOOTSTRAP V1) | Privileged deployment | OFFLINE PREP DONE — AWAITING OWNER SUDO |
 | 5F | JSON↔SQL equivalence | NOT STARTED |
 | RESET | Clearing old runtime history | FORBIDDEN |
 
-**The SQL Bastion work is deliberately shelved here** — the project
-owner's own words: "SQL-бастион теперь можно спокойно положить на
-полку до момента, когда реально понадобится canonical cutover." The
-next SQL-related task is not "finish the installer" — see
-`SQL_DEPLOYMENT_DEFERRED.md` §3 for the explicit do-not-touch list.
+**The SQL Bastion shelving is now explicitly REOPENED** — DATABASE
+BOOTSTRAP V1 (this stage) is the "real canonical cutover" moment
+`SQL_DEPLOYMENT_DEFERRED.md` said would eventually justify revisiting
+it. See `SQL_DEPLOYMENT_DEFERRED.md` for what changed and what is
+still off-limits (the SHARED FastPanel instance stays permanently
+off-limits — reopening this stage never meant touching that).
+
+## Current phase: DATABASE BOOTSTRAP V1 — offline prep DONE, owner sudo NOT YET RUN
+
+Goal: stand up YANDI's own dedicated Percona instance for the FIRST
+time and prove the existing SQL persistence layer against a REAL
+database (still shadow/non-canonical — 5F, proving JSON/SQL
+equivalence, is separate future work, not started by this stage).
+
+What THIS pass added, offline/design only, nothing privileged executed:
+- `agent/db/sql/instance_identity.py` (mandate §4/§27) — a single-row
+  `instance_identity` table (schema.py, class A) plus a filesystem
+  marker (`/etc/yandi/mysql/instance.id`), cross-checked by
+  `verify_instance_identity()` before any future destructive/privileged
+  operation. "NO VERIFIED YANDI INSTANCE ID -> NO DESTRUCTIVE/PRIVILEGED
+  DATABASE OPERATION."
+- `agent/db/sql/connection.py` — Unix socket support
+  (`YANDI_SQL_SOCKET`) and `auth_socket` auth mode
+  (`YANDI_SQL_AUTH_MODE=auth_socket`), additive: existing TCP/password
+  callers are completely unaffected. No fallback between socket and
+  TCP ever exists in this function (mandate §26).
+- `agent/db/sql/security_grants.py` — `yandi_runtime_auth_socket_statement()`
+  (auth_socket variant for YANDI_RUNTIME, `localhost`-only, no `host`
+  param at all — structural, not a caller convention).
+- `agent/db/sql/bootstrap.py::run_bootstrap()` — the §H auth decision is
+  now MADE (not just recorded as two options): auth_socket preferred
+  for YANDI_RUNTIME via the new `runtime_auth_socket_os_user` param
+  (backward compatible — omitted, behavior is byte-for-byte unchanged);
+  also now optionally records instance identity via `instance_uuid`.
+- `agent/db/sql/security_selfcheck.py::run_selfcheck()` — optional
+  `expected_instance_uuid` param folds mandate §27's identity gate into
+  the existing selfcheck report (`NOT_REQUESTED` when omitted — every
+  existing caller keeps its exact original "ok" semantics).
+- `agent/db/sql/live_bootstrap.py` (NEW) — the Phase B orchestration
+  script: retires the ephemeral `mysqld --initialize` temp root
+  password (converts root to auth_socket, permanently), records
+  instance identity, calls the (unchanged) `run_bootstrap()`, generates
+  and 0600-stores migrator/readonly secrets exactly once
+  (`secrets.token_urlsafe(32)`, never a human-chosen password), never
+  prints or logs any secret. **Live-unverified**: whether `ALTER USER
+  ... IDENTIFIED WITH auth_socket` actually clears Percona's post-
+  `--initialize` mandatory-password-change sandbox mode on this exact
+  build has never been tried against a real server — if it fails, this
+  script fails LOUD (no silent fallback), see its own docstring.
+- `deploy/install-yandi.sh` — `run_python_bootstrap()` is NO LONGER a
+  bare stub; it now calls `agent.db.sql.live_bootstrap`. A new
+  `create_instance_identity_marker()` step writes the identity file
+  BEFORE `mysqld --initialize` runs. **Still never executed** — this
+  script remains `sudo`-gated, unrun, design-reviewed-only until the
+  project owner explicitly runs it.
+- `agent/system_awareness.py` — new `yandi_db_instance` top-level
+  snapshot section (mandate §23): `service_running` (`systemctl
+  is-active yandi-db` — a DIFFERENT unit than the shared instance's
+  `mysql`), `socket_present`, `identity_file_present`. Purely
+  filesystem/systemctl facts, no SQL import, no DB connection — the
+  BEFORE state on this host today is `ABSENT`/`ABSENT`/`ABSENT` across
+  all three; AFTER a successful owner-run bootstrap this is expected to
+  read `PRESENT`/`PRESENT`/`PRESENT` while `software.sql_engines.mysql`
+  (the shared instance's own facts) stay completely unchanged —
+  demonstrating the two servers are tracked as genuinely separate
+  facts, never confused.
+- New tests: `agent/db_sql_instance_identity_regression_test.py` (32
+  checks), `agent/db_sql_live_bootstrap_regression_test.py` (22
+  checks), `agent/system_awareness_v2_dedicated_instance_regression_test.py`
+  (13 checks) — all offline/mocked, no live server.
+
+**Not done by this pass, deliberately** (mandate §12/§24/§35): TDE/
+keyring activation, AppArmor enforcement, full isolation proof, restart-
+persistence proof, production shadow-write smoke test, System Awareness
+BEFORE/AFTER live comparison, 5F. All of these require the dedicated
+instance to actually exist, which requires the owner to run the one
+command below.
+
+**OWNER ACTION REQUIRED**: `sudo ./deploy/install-yandi.sh` — a single
+command, reviewed end-to-end (§K of `DEDICATED_INSTANCE_DESIGN.md` plus
+everything added this pass). The human operator enters their OWN sudo
+password once, for the OS-level steps; the script never asks for,
+prints, or stores a database credential of any kind.
 
 ## Current phase: 5E-S2 (DEDICATED DATABASE APPLIANCE) — design/audit only, NOT deployed
 

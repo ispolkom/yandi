@@ -258,11 +258,33 @@ check(
     not hasattr(bootstrap_mod, "generate_kek"),
 )
 check(
-    "bootstrap.py never hardcodes a default password anywhere (all three role "
-    "passwords are REQUIRED keyword arguments with no default)",
-    "password=" not in inspect.signature(run_bootstrap).__str__() or
-    all("=" not in str(p) or p.default is inspect.Parameter.empty
-        for name, p in inspect.signature(run_bootstrap).parameters.items() if "password" in name),
+    "bootstrap.py never hardcodes a default password anywhere: readonly_password/"
+    "migrator_password are REQUIRED keyword arguments with no default (runtime_"
+    "password alone may default to '' — DATABASE BOOTSTRAP V1's auth_socket path, "
+    "mandate §11, means YANDI_RUNTIME sometimes needs NO password at all — but "
+    "run_bootstrap() must then refuse to proceed with an empty one silently, see "
+    "the next check)",
+    all(
+        p.default is inspect.Parameter.empty
+        for name, p in inspect.signature(run_bootstrap).parameters.items()
+        if name in ("readonly_password", "migrator_password")
+    ),
+)
+def _raises_value_error_on_blank_runtime_credential() -> bool:
+    try:
+        run_bootstrap(StatefulFakeConnection(), readonly_password="pw2", migrator_password="pw3")
+    except ValueError:
+        return True
+    except Exception:
+        return False
+    return False
+
+
+check(
+    "run_bootstrap() refuses to create YANDI_RUNTIME with a blank password when "
+    "auth_socket was NOT requested either (never silently proceeds with an empty "
+    "credential by omission)",
+    _raises_value_error_on_blank_runtime_credential(),
 )
 
 print()
