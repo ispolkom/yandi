@@ -104,6 +104,35 @@ async def _reconcile_stale_sql_runs() -> None:
     if reconciled:
         print(f"[SqlShadow] startup reconciliation: {reconciled} stale run(s) marked aborted")
 
+
+@app.on_event("startup")
+async def _system_awareness_probe() -> None:
+    """
+    SYSTEM AWARENESS V1 (mandate §12): AGENT startup -> system probe ->
+    state memory update -> concise log summary. This process is the
+    same daemon _reconcile_stale_sql_runs() above already identified as
+    "AGENT startup" for this codebase — both launch paths (start.sh,
+    start_headless.sh) hit this event.
+
+    Cheap by design (agent.system_awareness.build_snapshot() measured
+    well under 1s cold on this exact host) — no LLM call, no web
+    retrieval, no full-disk scan, matching mandate §11. One detector
+    failing never aborts this hook or startup itself (agent.system_
+    awareness's own per-section try/except contract, re-guarded here
+    with an outer try/except so a bug in the probe/store layer itself
+    can never block the daemon from starting).
+    """
+    try:
+        from agent.system_state_store import update_state, summary_line
+
+        result = update_state(probe_source="agent_local_probe")
+        print(summary_line(result))
+        if result["material_change"] and result["delta"]:
+            print(f"[SystemAwareness] material change detected: {sorted(result['delta'].keys())}")
+    except Exception as e:
+        print(f"[SystemAwareness] startup probe failed (non-fatal): {type(e).__name__}")
+
+
 import time as _time
 
 # Три отдельных очереди — по одной на каждый Firefox
