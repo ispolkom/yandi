@@ -179,6 +179,81 @@ TEMP_PASSWORD_AUTH_OK_BUT_PASSWORD_EXPIRED = "TEMP_PASSWORD_AUTH_OK_BUT_PASSWORD
 TEMP_PASSWORD_AUTH_FAILED = "TEMP_PASSWORD_AUTH_FAILED"
 TEMP_PASSWORD_AUTH_UNEXPECTED = "TEMP_PASSWORD_AUTH_UNEXPECTED"
 
+# auth_socket plugin lifecycle states — see _ensure_auth_socket_plugin_
+# active()'s own docstring for the live-confirmed bug (ERROR 1524,
+# "Plugin 'auth_socket' is not loaded") these separate out. Never
+# collapsed into one "bootstrap failed" message.
+AUTH_SOCKET_PLUGIN_ALREADY_ACTIVE = "AUTH_SOCKET_PLUGIN_ALREADY_ACTIVE"
+AUTH_SOCKET_PLUGIN_INSTALLED = "AUTH_SOCKET_PLUGIN_INSTALLED"
+AUTH_SOCKET_PLUGIN_NOT_FOUND = "AUTH_SOCKET_PLUGIN_NOT_FOUND"
+AUTH_SOCKET_PLUGIN_INSTALL_FAILED = "AUTH_SOCKET_PLUGIN_INSTALL_FAILED"
+AUTH_SOCKET_PLUGIN_NOT_ACTIVE = "AUTH_SOCKET_PLUGIN_NOT_ACTIVE"
+AUTH_SOCKET_VERIFICATION_FAILED = "AUTH_SOCKET_VERIFICATION_FAILED"
+AUTH_SOCKET_READY = "AUTH_SOCKET_READY"
+
+_AUTH_SOCKET_PLUGIN_STATUS_SQL = (
+    "SELECT PLUGIN_STATUS FROM INFORMATION_SCHEMA.PLUGINS "
+    "WHERE PLUGIN_NAME='auth_socket';"
+)
+_AUTH_SOCKET_PLUGIN_INSTALL_SQL = "INSTALL PLUGIN auth_socket SONAME 'auth_socket.so';"
+
+
+def _ensure_auth_socket_plugin_active(socket_path: str, password: str) -> str:
+    """Checks whether the `auth_socket` plugin is ACTIVE and installs
+    it if not, using an ALREADY-non-expired connection (see the
+    caller's own docstring for why this must run AFTER exiting
+    password-expiration sandbox mode, never before).
+
+    Live-confirmed bug (twelfth Phase B attempt): TEMP_PASSWORD_AUTH
+    proved credential auth succeeds, and the ALTER USER statement
+    itself was accepted by the sandbox-mode gate (it's on the small
+    permitted-statement list) — but the SERVER then failed to resolve
+    the plugin: "ERROR 1524 (HY000): Plugin 'auth_socket' is not
+    loaded". Confirmed directly (not guessed): /usr/lib/mysql/plugin/
+    auth_socket.so exists on this host (ls -la), so the .so file is
+    present — it was simply never `INSTALL PLUGIN`ed. Percona/MySQL's
+    Debian/Ubuntu packaging does not load auth_socket by default; it
+    must be installed explicitly, exactly once per instance (it then
+    persists in the datadir's own `mysql.plugin` system table across
+    restarts, same as any other installed plugin).
+
+    Returns one of the five module-level AUTH_SOCKET_PLUGIN_* constants
+    above. Never assumes "the .so file exists" implies "the SQL plugin
+    is loaded" — these are checked as two separate facts (mandate: "Не
+    считать наличие auth_socket.so доказательством, что SQL plugin
+    загружен").
+    """
+    status_result = subprocess.run(
+        [_MYSQL_CLIENT_BIN, "--no-defaults", f"--socket={socket_path}", "--user=root",
+         "-Nse", _AUTH_SOCKET_PLUGIN_STATUS_SQL],
+        env={**os.environ, "MYSQL_PWD": password},
+        capture_output=True, text=True, timeout=10,
+    )
+    if status_result.returncode == 0 and status_result.stdout.strip() == "ACTIVE":
+        return AUTH_SOCKET_PLUGIN_ALREADY_ACTIVE
+
+    install_result = subprocess.run(
+        [_MYSQL_CLIENT_BIN, "--no-defaults", f"--socket={socket_path}", "--user=root",
+         "-e", _AUTH_SOCKET_PLUGIN_INSTALL_SQL],
+        env={**os.environ, "MYSQL_PWD": password},
+        capture_output=True, text=True, timeout=10,
+    )
+    if install_result.returncode != 0:
+        stderr = install_result.stderr
+        if "Can't open shared library" in stderr or "No such file" in stderr:
+            return AUTH_SOCKET_PLUGIN_NOT_FOUND
+        return AUTH_SOCKET_PLUGIN_INSTALL_FAILED
+
+    verify_result = subprocess.run(
+        [_MYSQL_CLIENT_BIN, "--no-defaults", f"--socket={socket_path}", "--user=root",
+         "-Nse", _AUTH_SOCKET_PLUGIN_STATUS_SQL],
+        env={**os.environ, "MYSQL_PWD": password},
+        capture_output=True, text=True, timeout=10,
+    )
+    if verify_result.returncode == 0 and verify_result.stdout.strip() == "ACTIVE":
+        return AUTH_SOCKET_PLUGIN_INSTALLED
+    return AUTH_SOCKET_PLUGIN_NOT_ACTIVE
+
 
 def _probe_temp_password_auth(socket_path: str, temp_password: str) -> str:
     """Isolated, NON-DESTRUCTIVE proof that AUTHENTICATION ITSELF
@@ -243,22 +318,33 @@ def _retire_temporary_root_password(socket_path: str, temp_password: str):
     auth_socket, permanently retiring that password — from this point
     on nothing in this codebase ever holds a root SQL password again.
     Returns nothing; raises LiveBootstrapError on failure, with a
-    message that distinguishes WHICH of two very different bugs
-    happened (mandate: never collapse "wrong credential" and "ALTER
-    USER itself failed" into one message again):
+    message that distinguishes WHICH bug happened — never collapsed
+    into one ambiguous "bootstrap failed":
 
         TEMP_PASSWORD_AUTH_FAILED       — the credential value itself
                                            was rejected at auth. A
-                                           capture/marker/pipeline bug,
-                                           not a SQL/plugin problem.
-        AUTH_SOCKET_CONVERSION_FAILED   — auth succeeded (proven by
-                                           the probe above), but the
-                                           ALTER USER statement itself
-                                           failed — a SQL/plugin
-                                           problem, not a credential one.
+                                           capture/marker/pipeline bug.
+        AUTH_SOCKET_PLUGIN_NOT_FOUND    — auth_socket.so missing/unreadable.
+        AUTH_SOCKET_PLUGIN_INSTALL_FAILED — INSTALL PLUGIN itself failed.
+        AUTH_SOCKET_PLUGIN_NOT_ACTIVE   — installed but not ACTIVE afterward.
+        AUTH_SOCKET_CONVERSION_FAILED   — auth + plugin both fine, but an
+                                           ALTER USER statement itself failed.
+        AUTH_SOCKET_VERIFICATION_FAILED — conversion reported success but
+                                           a fresh passwordless connection
+                                           still could not reach root.
 
-    Uses the `mysql` CLI client, NOT pymysql, for both the probe and
-    the real ALTER USER. Live-confirmed (second Phase B attempt):
+    Full sequence (see this module's own top docstring for why each
+    step exists — the twelfth Phase B attempt's "Plugin 'auth_socket'
+    is not loaded" error is what the plugin-lifecycle steps close):
+        1. Probe auth with the temp password (proves the credential).
+        2. Exit sandbox mode via a THROWAWAY password (INSTALL PLUGIN
+           is not itself permitted while still in sandbox mode).
+        3. Ensure auth_socket is ACTIVE (install it if not).
+        4. The REAL ALTER USER ... IDENTIFIED WITH auth_socket.
+        5. Verify via a fresh, separate passwordless connection.
+
+    Uses the `mysql` CLI client, NOT pymysql, for every one of these
+    steps. Live-confirmed (second Phase B attempt):
     pymysql's connect() unconditionally issues a "SET NAMES" query
     right after authentication (Connection.set_character_set(), for
     collation-precision reasons its own source comment explains — no
@@ -306,25 +392,100 @@ def _retire_temporary_root_password(socket_path: str, temp_password: str):
             "yandi-db, or the mysql CLI's own non-secret stderr text)."
         )
     # probe_result == TEMP_PASSWORD_AUTH_OK_BUT_PASSWORD_EXPIRED: the
-    # expected, normal state for a fresh temp password. Proceed to the
-    # real, SEPARATE ALTER USER conversion.
+    # expected, normal state for a fresh temp password.
 
-    result = subprocess.run(
+    # Live-confirmed bug (twelfth Phase B attempt): the real ALTER USER
+    # ... IDENTIFIED WITH auth_socket statement was itself ACCEPTED by
+    # the sandbox-mode gate (it's on the small permitted-statement
+    # list) but then failed with "ERROR 1524 (HY000): Plugin
+    # 'auth_socket' is not loaded" — Percona/MySQL's Debian/Ubuntu
+    # packaging does not load this plugin by default, and INSTALL
+    # PLUGIN is NOT itself on sandbox mode's permitted-statement list
+    # (confirmed by this exact chicken-and-egg: it cannot run while
+    # still expired, but auth_socket can't be set as the login method
+    # until it IS loaded). The fix: exit sandbox mode FIRST via a
+    # throwaway password (any ALTER USER ... IDENTIFIED BY satisfies
+    # MySQL's "you changed your expired password" requirement,
+    # regardless of which plugin ends up in charge afterward), THEN
+    # install the plugin using that now-non-expired session, THEN
+    # perform the REAL auth_socket conversion. The throwaway password
+    # is generated fresh in memory, used immediately, and never
+    # written to disk/printed/logged anywhere — same discipline as the
+    # migrator/readonly secrets.
+    #
+    # secrets.token_urlsafe()'s alphabet is exactly [A-Za-z0-9_-] — no
+    # quote/backslash/semicolon characters — so embedding it directly
+    # in a single-quoted SQL string literal below cannot break out of
+    # that literal; this is not user input, it is generated by this
+    # process from the same secrets module already used for the
+    # migrator/readonly passwords.
+    throwaway_password = secrets.token_urlsafe(32)
+    exit_sandbox_result = subprocess.run(
         [_MYSQL_CLIENT_BIN, "--no-defaults", f"--socket={socket_path}", "--user=root",
-         "--connect-expired-password", "-e", _ALTER_ROOT_TO_AUTH_SOCKET_SQL],
+         "--connect-expired-password", "-e",
+         f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{throwaway_password}';"],
         env={**os.environ, "MYSQL_PWD": temp_password},
         capture_output=True, text=True, timeout=10,
     )
+    if exit_sandbox_result.returncode != 0:
+        raise LiveBootstrapError(
+            f"AUTH_SOCKET_CONVERSION_FAILED: could not exit password-expiration "
+            f"sandbox mode via a throwaway ALTER USER ... IDENTIFIED BY "
+            f"(exit={exit_sandbox_result.returncode}) — this must succeed before "
+            f"INSTALL PLUGIN can run (INSTALL PLUGIN is not itself permitted "
+            f"while still in sandbox mode). stderr: {exit_sandbox_result.stderr.strip()}"
+        )
+
+    plugin_status = _ensure_auth_socket_plugin_active(socket_path, throwaway_password)
+    print(f"[live_bootstrap] AUTH_SOCKET_PLUGIN={plugin_status}")
+    if plugin_status == AUTH_SOCKET_PLUGIN_NOT_FOUND:
+        raise LiveBootstrapError(
+            "AUTH_SOCKET_PLUGIN_NOT_FOUND: auth_socket.so could not be loaded by "
+            "the server (INSTALL PLUGIN reported a missing/unreadable shared "
+            "library) — check plugin_dir and that the percona-server-server "
+            "package's plugin files are actually present and readable by the "
+            "yandi-db OS user under this unit's sandboxing."
+        )
+    if plugin_status == AUTH_SOCKET_PLUGIN_INSTALL_FAILED:
+        raise LiveBootstrapError(
+            "AUTH_SOCKET_PLUGIN_INSTALL_FAILED: INSTALL PLUGIN auth_socket "
+            "failed for a reason other than a missing shared library — "
+            "investigate the server's own error log."
+        )
+    if plugin_status == AUTH_SOCKET_PLUGIN_NOT_ACTIVE:
+        raise LiveBootstrapError(
+            "AUTH_SOCKET_PLUGIN_NOT_ACTIVE: INSTALL PLUGIN reported success but "
+            "a follow-up status check did not find it ACTIVE — ambiguous state, "
+            "refusing to proceed with the real auth_socket conversion."
+        )
+    # plugin_status is ALREADY_ACTIVE or INSTALLED — safe to proceed.
+
+    result = subprocess.run(
+        [_MYSQL_CLIENT_BIN, "--no-defaults", f"--socket={socket_path}", "--user=root",
+         "-e", _ALTER_ROOT_TO_AUTH_SOCKET_SQL],
+        env={**os.environ, "MYSQL_PWD": throwaway_password},
+        capture_output=True, text=True, timeout=10,
+    )
+    del throwaway_password
     if result.returncode != 0:
         raise LiveBootstrapError(
-            f"AUTH_SOCKET_CONVERSION_FAILED: authentication itself succeeded "
-            f"(MYSQL_AUTH={probe_result} above proves the credential was "
-            f"correct) but the ALTER USER ... IDENTIFIED WITH auth_socket "
-            f"statement failed (exit={result.returncode}) — a DIFFERENT bug "
-            f"than a credential mismatch (check auth_socket plugin "
-            f"availability, not the temp-password pipeline). "
-            f"stderr: {result.stderr.strip()}"
+            f"AUTH_SOCKET_CONVERSION_FAILED: the plugin is {plugin_status} but the "
+            f"real ALTER USER ... IDENTIFIED WITH auth_socket statement itself "
+            f"still failed (exit={result.returncode}). stderr: {result.stderr.strip()}"
         )
+
+    # G: a FRESH, separate connection with NO password at all (peer
+    # credentials) — never assume the ALTER USER's own success implies
+    # the account is actually reachable this way.
+    if not _root_reachable_via_auth_socket(socket_path):
+        raise LiveBootstrapError(
+            "AUTH_SOCKET_VERIFICATION_FAILED: ALTER USER ... IDENTIFIED WITH "
+            "auth_socket reported success, but a fresh passwordless connection "
+            "as the OS root user still could not reach root@localhost — refusing "
+            "to treat the conversion as trustworthy. Investigate manually before "
+            "retrying (this is now an ambiguous state, not a clean failure)."
+        )
+    print("[live_bootstrap] AUTH_SOCKET_READY")
 
 
 def _root_reachable_via_auth_socket(socket_path: str) -> bool:
