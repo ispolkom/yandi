@@ -65,15 +65,32 @@ RestartForceExitStatus=16
 # mysqld's own "RESTART" signal for the SQL RESTART statement) — not
 # reinvented.
 
-RuntimeDirectory=yandi
+RuntimeDirectory=yandi/mysql
 RuntimeDirectoryMode=0750
-# WHY: /run/yandi/ (socket + pidfile) created fresh each boot, owned
-# yandi-db:yandi-db, mode 0750 — traversable only by yandi-db and its
-# group, never world-readable (WHAT IT BLOCKS: any other OS user/
-# process listing or entering the directory to find the socket path).
-# MYSQL COMPATIBILITY RISK: none — RuntimeDirectory is a systemd-
-# managed tmpfs-backed directory mysqld just writes into, identical in
-# kind to the shared instance's own RuntimeDirectory=mysqld.
+# WHY: /run/yandi/mysql/ (socket + pidfile) created fresh each boot,
+# owned yandi-db:yandi-db, mode 0750 — traversable only by yandi-db
+# and its group, never world-readable (WHAT IT BLOCKS: any other OS
+# user/process listing or entering the directory to find the socket
+# path). MYSQL COMPATIBILITY RISK: none — RuntimeDirectory is a
+# systemd-managed tmpfs-backed directory mysqld just writes into,
+# identical in kind to the shared instance's own RuntimeDirectory=mysqld.
+#
+# Live-confirmed bug (ninth Phase B attempt): this used to be plain
+# "RuntimeDirectory=yandi" (i.e. /run/yandi itself). systemd tears
+# down a RuntimeDirectory= target entirely on `systemctl stop`
+# (RuntimeDirectoryPreserve= defaults to "no") — install-yandi.sh also
+# writes a root-owned, root-only one-time bootstrap secret marker
+# under /run/yandi (see deploy/install-yandi.sh's RUNTIME_BOOTSTRAP_DIR),
+# which must SURVIVE this unit's own stop/start cycles and must never
+# live in a directory $YANDI_DB_USER (this unit's own User=) can write
+# into (a real TOCTOU risk: that account could otherwise delete/
+# replace the marker, even though it could never read its 0600
+# contents). Nesting this unit's OWN runtime directory one level
+# deeper (yandi/mysql) means systemd only ever creates/tears down
+# /run/yandi/mysql — /run/yandi itself (the stable parent both this
+# directory and the separate root-only bootstrap directory live
+# under) is entirely install-yandi.sh's own responsibility, untouched
+# by this unit's lifecycle.
 
 # ── Filesystem sandboxing ────────────────────────────────────────────
 ProtectSystem=strict

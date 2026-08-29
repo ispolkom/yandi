@@ -34,13 +34,50 @@ DATADIR="${YANDI_DB_HOME}/mysql/data"
 KEYRING_DIR="${YANDI_DB_HOME}/mysql-keyring"
 TMPDIR_PATH="${YANDI_DB_HOME}/tmp"
 INTEGRITY_DIR="${YANDI_DB_HOME}/integrity"
+# Live-confirmed bug (ninth Phase B attempt): RUNTIME_DIR used to be a
+# single directory (/run/yandi) that was BOTH the systemd
+# RuntimeDirectory= for mysqld's socket/pid AND where this script wrote
+# the bootstrap secret marker. systemd tears down RuntimeDirectory=
+# entirely on `systemctl stop` (RuntimeDirectoryPreserve= defaults to
+# "no") — so initialize_datadir()'s own "stop yandi-db.service before
+# touching the datadir" step (an earlier fix) silently deleted the
+# whole directory, and the later marker write failed with "No such
+# file or directory". Splitting into two subdirectories under the same
+# stable parent fixes the lifecycle bug AND closes a real TOCTOU risk
+# the single-directory design had: mysqld runs as $YANDI_DB_USER, and
+# if that account owned (or could write into) the SAME directory a
+# root-owned secret lived in, it could delete/replace the marker out
+# from under this script even though it could never read the 0600
+# file's contents directly.
+#
+#   RUNTIME_DIR                stable parent, root:root, created by
+#                               this script (create_filesystem()),
+#                               NEVER declared as a systemd
+#                               RuntimeDirectory= target itself, so it
+#                               is untouched by any service stop/start.
+#   RUNTIME_MYSQL_DIR           systemd-managed (RuntimeDirectory=
+#                               yandi/mysql in yandi-db.service),
+#                               owned yandi-db:yandi-db, torn down/
+#                               recreated with the service's own
+#                               lifecycle exactly as before — socket
+#                               and pid file live here, unchanged
+#                               otherwise.
+#   RUNTIME_BOOTSTRAP_DIR       root:root 0700, created/verified by
+#                               THIS script only, completely
+#                               inaccessible to $YANDI_DB_USER — the
+#                               one-time temp-password marker lives
+#                               here, and survives every mysqld
+#                               service stop/start since it is never
+#                               part of any RuntimeDirectory=.
 RUNTIME_DIR="/run/yandi"
+RUNTIME_MYSQL_DIR="${RUNTIME_DIR}/mysql"
+RUNTIME_BOOTSTRAP_DIR="${RUNTIME_DIR}/bootstrap"
 CONFIG_DIR="/etc/yandi/mysql"
 CONFIG_FILE="${CONFIG_DIR}/my.cnf"
 LOG_DIR="/var/log/yandi"
 ERROR_LOG="${LOG_DIR}/mysql-error.log"
-SOCKET_PATH="${RUNTIME_DIR}/mysql.sock"
-PID_FILE="${RUNTIME_DIR}/mysql.pid"
+SOCKET_PATH="${RUNTIME_MYSQL_DIR}/mysql.sock"
+PID_FILE="${RUNTIME_MYSQL_DIR}/mysql.pid"
 SYSTEMD_UNIT_SRC="$(dirname "$0")/yandi-db.service"
 SYSTEMD_UNIT_DST="/etc/systemd/system/yandi-db.service"
 APPARMOR_LOCAL_DIR="/etc/apparmor.d/local"
@@ -51,13 +88,15 @@ SECRETS_DIR="${YANDI_DB_HOME}/keys"
 INSTANCE_ID_FILE="${CONFIG_DIR}/instance.id"
 # One-time marker for THIS invocation's own mysqld --initialize temp
 # password — see initialize_datadir()/run_python_bootstrap(). Under
-# /run (tmpfs), so it can never outlive a reboot by accident. Never the
+# /run (tmpfs), so it can never outlive a reboot by accident, in the
+# root-only bootstrap subdirectory (see RUNTIME_BOOTSTRAP_DIR above,
+# never RUNTIME_MYSQL_DIR/$YANDI_DB_USER-writable space). Never the
 # shared, ever-growing $ERROR_LOG: live_bootstrap.py must consume ONLY
 # the password THIS run actually generated, never scrape historical
 # log lines from earlier attempts (live-confirmed bug: a stale historical
 # password looks exactly like a valid one and produces a confusing
 # "Access denied" instead of a clear diagnostic).
-FRESH_INIT_MARKER="${RUNTIME_DIR}/fresh_init_temp_password"
+FRESH_INIT_MARKER="${RUNTIME_BOOTSTRAP_DIR}/fresh_init_temp_password"
 YANDI_REPO="/home/iam/yandi"
 YANDI_VENV_PYTHON="/home/iam/venv/bin/python3"
 # The real OS user the AGENT process runs as today (confirmed during
@@ -127,6 +166,56 @@ PYEOF
 }
 
 # ============================================================
+# SECURE BOOTSTRAP MARKER DIRECTORY
+#
+# root:root 0700, completely inaccessible to $YANDI_DB_USER — the
+# one-time temp-password marker (FRESH_INIT_MARKER) lives here,
+# deliberately separate from RUNTIME_MYSQL_DIR (systemd-managed,
+# yandi-db:yandi-db, torn down on every service stop — mysqld's own
+# OS account owns/can write into that directory) so mysqld can never
+# delete/replace/race the marker even though it could never read the
+# 0600 file's contents directly, and so this directory survives every
+# mysqld service stop/start untouched (it is never declared as a
+# systemd RuntimeDirectory= target).
+#
+# Idempotent AND paranoid: verifies canonical path, rejects a symlink
+# or wrong-type entry at either RUNTIME_DIR or RUNTIME_BOOTSTRAP_DIR
+# rather than blindly chown/chmod-ing over something unexpected
+# (mandate: reject symlink, reject unexpected owner/type, fail closed
+# rather than guess). Called both early (create_filesystem()) and
+# again immediately before the marker write in initialize_datadir()
+# — cheap, and removes any dependence on exactly how systemd handles
+# an implied intermediate directory for a nested RuntimeDirectory=
+# path, which this script does not assume without live verification.
+# ============================================================
+ensure_secure_bootstrap_dir() {
+    if [ -L "$RUNTIME_DIR" ]; then
+        die "SECURITY: $RUNTIME_DIR is a symlink — refusing to follow it for a security-sensitive bootstrap path."
+    fi
+    if [ -e "$RUNTIME_DIR" ] && [ ! -d "$RUNTIME_DIR" ]; then
+        die "SECURITY: $RUNTIME_DIR exists but is not a directory (unexpected type) — refusing to proceed."
+    fi
+    install -d -o root -g root -m 0755 "$RUNTIME_DIR"
+
+    if [ -L "$RUNTIME_BOOTSTRAP_DIR" ]; then
+        die "SECURITY: $RUNTIME_BOOTSTRAP_DIR is a symlink — refusing to follow it for a security-sensitive bootstrap path."
+    fi
+    if [ -e "$RUNTIME_BOOTSTRAP_DIR" ]; then
+        if [ ! -d "$RUNTIME_BOOTSTRAP_DIR" ]; then
+            die "SECURITY: $RUNTIME_BOOTSTRAP_DIR exists but is not a directory (unexpected type) — refusing to proceed."
+        fi
+        local owner mode
+        owner="$(stat -c '%U:%G' "$RUNTIME_BOOTSTRAP_DIR")"
+        mode="$(stat -c '%a' "$RUNTIME_BOOTSTRAP_DIR")"
+        if [ "$owner" != "root:root" ] || [ "$mode" != "700" ]; then
+            die "SECURITY: $RUNTIME_BOOTSTRAP_DIR has unexpected owner/mode ($owner $mode, expected root:root 700) — refusing to chown/chmod over an unexpected existing directory. Investigate manually rather than assume it is safe."
+        fi
+    else
+        install -d -o root -g root -m 0700 "$RUNTIME_BOOTSTRAP_DIR"
+    fi
+}
+
+# ============================================================
 # 3. CREATE OS IDENTITY (idempotent)
 # ============================================================
 create_os_identity() {
@@ -150,7 +239,18 @@ create_filesystem() {
     install -d -o "$YANDI_DB_USER" -g "$YANDI_DB_USER" -m 0700 "$KEYRING_DIR"
     install -d -o "$YANDI_DB_USER" -g "$YANDI_DB_USER" -m 0750 "$TMPDIR_PATH"
     install -d -o "$YANDI_DB_USER" -g "$YANDI_DB_USER" -m 0750 "$INTEGRITY_DIR"
-    install -d -o root -g "$YANDI_DB_USER" -m 0750 "$RUNTIME_DIR"
+    # RUNTIME_DIR itself: stable root:root parent, NOT a systemd
+    # RuntimeDirectory= target (that's RUNTIME_MYSQL_DIR, declared in
+    # yandi-db.service) — created here so it exists independent of
+    # mysqld's own service lifecycle. Mode 0755: nothing sensitive
+    # lives directly in it, only the two subdirectories below, each
+    # with their own restrictive mode.
+    install -d -o root -g root -m 0755 "$RUNTIME_DIR"
+    # RUNTIME_MYSQL_DIR is NOT created here — it is systemd's
+    # RuntimeDirectory= responsibility (created on service start, torn
+    # down on stop, owned yandi-db:yandi-db). Creating it here too
+    # would just be immediately superseded/removed by systemd anyway.
+    ensure_secure_bootstrap_dir
     install -d -o root -g root -m 0755 "$CONFIG_DIR"
     install -d -o "$YANDI_DB_USER" -g "$YANDI_DB_USER" -m 0750 "$LOG_DIR"
     install -d -o "$YANDI_DB_USER" -g "$YANDI_DB_USER" -m 0700 "$(dirname "$KEK_PATH")"
@@ -255,8 +355,8 @@ ${TMPDIR_PATH}/ r,
 ${TMPDIR_PATH}/** rwk,
 ${LOG_DIR}/ r,
 ${LOG_DIR}/** rw,
-${RUNTIME_DIR}/mysql.sock rw,
-${RUNTIME_DIR}/mysql.pid rw,
+${RUNTIME_MYSQL_DIR}/mysql.sock rw,
+${RUNTIME_MYSQL_DIR}/mysql.pid rw,
 ${CONFIG_DIR}/ r,
 ${CONFIG_DIR}/** r,
 EOF
@@ -317,7 +417,7 @@ reinitialize_empty_instance_guard() {
     [ -f "$INSTANCE_ID_FILE" ] || die "REFUSING --reinitialize-empty-instance: no instance identity marker at $INSTANCE_ID_FILE — this datadir was never claimed by a YANDI bootstrap attempt."
 
     # 3. Socket path is the dedicated one, never the shared instance's.
-    [ "$SOCKET_PATH" = "/run/yandi/mysql.sock" ] || die "REFUSING --reinitialize-empty-instance: unexpected socket path '$SOCKET_PATH'."
+    [ "$SOCKET_PATH" = "/run/yandi/mysql/mysql.sock" ] || die "REFUSING --reinitialize-empty-instance: unexpected socket path '$SOCKET_PATH'."
 
     # 4. Canonical/production activation must NOT have happened yet.
     #    live_bootstrap.py's run_bootstrap() only ever writes the
@@ -663,7 +763,19 @@ initialize_datadir() {
 
     local temp_pw
     temp_pw="$(_extract_unique_temp_password "$init_output" "$log_delta")"
-    log "TEMP_SOURCE_LEN=${#temp_pw} TEMP_SOURCE_FP=$(_temp_pw_fp "$temp_pw")"
+    if [ "${YANDI_INSTALL_DEBUG_SECRETS:-0}" = "1" ]; then
+        log "TEMP_SOURCE_LEN=${#temp_pw} TEMP_SOURCE_FP=$(_temp_pw_fp "$temp_pw")"
+    fi
+
+    # Re-verify (not just assume) the secure bootstrap directory
+    # immediately before writing into it — live-confirmed bug: the
+    # service-stop call above tore down the OLD single-level
+    # RUNTIME_DIR (a systemd RuntimeDirectory= target back then), and
+    # this script had nothing recreating it before this exact write.
+    # Cheap, idempotent, and removes any dependence on precisely how
+    # systemd handles the (now separate) RUNTIME_MYSQL_DIR's own
+    # teardown/recreation for this UNRELATED directory.
+    ensure_secure_bootstrap_dir
 
     # Atomic write: create with a restrictive umask FROM THE START (no
     # window where the file is briefly world/group-readable), then
@@ -674,14 +786,18 @@ initialize_datadir() {
     chown root:root "$marker_tmp"
     mv -f "$marker_tmp" "$FRESH_INIT_MARKER"
 
-    # Read the marker straight back and fingerprint THAT — proves (or
-    # disproves) byte-for-byte round-trip fidelity of the bash-side
-    # write/rename alone, independent of anything Python does later.
-    local marker_readback
-    marker_readback="$(cat "$FRESH_INIT_MARKER")"
-    log "MARKER_LEN=${#marker_readback} MARKER_FP=$(_temp_pw_fp "$marker_readback")"
+    if [ "${YANDI_INSTALL_DEBUG_SECRETS:-0}" = "1" ]; then
+        # Read the marker straight back and fingerprint THAT — proves
+        # (or disproves) byte-for-byte round-trip fidelity of the
+        # bash-side write/rename alone, independent of anything Python
+        # does later.
+        local marker_readback
+        marker_readback="$(cat "$FRESH_INIT_MARKER")"
+        log "MARKER_LEN=${#marker_readback} MARKER_FP=$(_temp_pw_fp "$marker_readback")"
+        unset marker_readback
+    fi
 
-    unset temp_pw init_output log_delta marker_readback
+    unset temp_pw init_output log_delta
 
     log "datadir initialized — this invocation's own one-time temp password was captured via transaction-scoped log delta (never re-derived from \$ERROR_LOG's historical content)"
     log "this script will use it once, immediately, in run_python_bootstrap() below, then retire it"
