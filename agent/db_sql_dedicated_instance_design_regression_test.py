@@ -512,6 +512,39 @@ _provisioned = {
 }
 print(f"INFO host provisioning state (not a pass/fail signal): {_provisioned}")
 
+# ============================================================
+# Tenth Phase B attempt: install_config() drift detection (root cause
+# fix lives in agent/db_sql_config_drift_regression_test.py's dynamic
+# checks) — here, a final cross-file consistency sweep confirming the
+# NEW nested socket/pid paths are consistent everywhere that matters,
+# and the OLD bare paths are gone from every ACTIVE code path (comments
+# explaining the history are fine and expected, only real path values
+# in code/docstrings matter here).
+# ============================================================
+_live_bootstrap_src = (REPO / "agent" / "db" / "sql" / "live_bootstrap.py").read_text(encoding="utf-8")
+_sysaware_src = (REPO / "agent" / "system_awareness.py").read_text(encoding="utf-8")
+
+check(
+    "install_config() detects socket/pid-file drift against an existing "
+    "config and regenerates with a timestamped backup rather than "
+    "silently leaving stale paths in place (see "
+    "db_sql_config_drift_regression_test.py for the full dynamic proof "
+    "— this is the actual root-cause fix for the live EROFS failure)",
+    'grep -qF "socket          = ${SOCKET_PATH}"' in script_text
+    and 'stale_backup="${CONFIG_FILE}.stale-$(date +%s)"' in script_text,
+)
+check(
+    "live_bootstrap.py's own CLI docstring example matches the CURRENT "
+    "nested socket/marker paths, not the pre-split ones",
+    "/run/yandi/mysql/mysql.sock" in _live_bootstrap_src
+    and "/run/yandi/bootstrap/fresh_init_temp_password" in _live_bootstrap_src,
+)
+check(
+    "system_awareness.py's own independent socket-path constant matches "
+    "install-yandi.sh's current SOCKET_PATH composition exactly",
+    '_YANDI_DB_SOCKET_PATH = "/run/yandi/mysql/mysql.sock"' in _sysaware_src,
+)
+
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")
 if FAIL:

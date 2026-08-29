@@ -45,8 +45,8 @@ Auth strategy actually used (DEDICATED_INSTANCE_DESIGN.md §H):
 CLI (matches the invocation shape install-yandi.sh's run_python_
 bootstrap() already documented as its intended shape):
     python3 -m agent.db.sql.live_bootstrap \\
-        --socket /run/yandi/mysql.sock \\
-        --fresh-init-marker /run/yandi/fresh_init_temp_password \\
+        --socket /run/yandi/mysql/mysql.sock \\
+        --fresh-init-marker /run/yandi/bootstrap/fresh_init_temp_password \\
         --instance-id-file /etc/yandi/mysql/instance.id \\
         --secrets-dir /var/lib/yandi/keys \\
         --agent-os-user iam
