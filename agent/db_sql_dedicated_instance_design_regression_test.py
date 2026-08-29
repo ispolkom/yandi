@@ -258,16 +258,19 @@ check(
     "|| init_rc=$?" in script_text and '[ "$init_rc" -eq 0 ] ||' in script_text,
 )
 check(
-    "initialize_datadir() dies with a clear message if --initialize's own "
-    "output contains no temp-password line, rather than falling back to "
-    "scanning $ERROR_LOG's historical content",
-    "refusing to fall back to scanning $ERROR_LOG's historical content" in script_text,
+    "_extract_unique_temp_password() dies with a clear message if neither "
+    "current source (subprocess output or fresh log delta) contains a "
+    "temp-password line, rather than falling back to scanning historical "
+    "log content",
+    "refusing to fall back to scanning historical log content" in script_text,
 )
 check(
-    "the extracted temp password is written to FRESH_INIT_MARKER as root-only "
-    "(0600), not left group/world-readable",
-    'chown root:root "$FRESH_INIT_MARKER"' in script_text
-    and 'chmod 0600 "$FRESH_INIT_MARKER"' in script_text,
+    "the extracted temp password is written atomically (temp file + "
+    "rename) and root-only (0600) — never a window where it's briefly "
+    "world/group-readable at the real marker path",
+    'chown root:root "$marker_tmp"' in script_text
+    and 'mv -f "$marker_tmp" "$FRESH_INIT_MARKER"' in script_text
+    and "umask 077" in script_text,
 )
 check(
     "run_python_bootstrap() passes --fresh-init-marker (the dedicated, "
@@ -444,16 +447,18 @@ check(
 _code_only_text = "\n".join(
     line for line in script_text.splitlines() if not line.strip().startswith("#")
 )
-_init_call_match = re.search(
-    r"mysqld\s+((?:--\S+\s+)*)--initialize\b", _code_only_text,
-)
+# A precise literal match, not a generic regex — a generic "mysqld ...
+# --initialize" pattern with an optional flags group also matches bare
+# prose inside die() message strings (e.g. "...this single mysqld
+# --initialize invocation...", a real false positive hit while writing
+# this exact check), since an empty flags-group satisfies the pattern
+# trivially. The real invocation is written exactly this way, word for
+# word — matching that literal string only matches the real call site.
 check(
     "mysqld --initialize is invoked with --defaults-file as the FIRST "
     "argument (mysqld only honors --defaults-file in argv[1] — placed "
     "anywhere else, the whole config file is silently ignored)",
-    _init_call_match is not None
-    and _init_call_match.group(1).strip().startswith("--defaults-file="),
-    f"match={_init_call_match.group(0) if _init_call_match else None!r}",
+    'mysqld --defaults-file="$CONFIG_FILE" --initialize' in _code_only_text,
 )
 
 # Live-confirmed bug (second owner run, after the --defaults-file fix):

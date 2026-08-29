@@ -462,6 +462,80 @@ verify_running_instance_ownership() {
 }
 
 # ============================================================
+# TRANSACTION-SCOPED TEMP-PASSWORD CAPTURE
+#
+# Three small, independently-testable pure functions — extracted
+# rather than inlined so each piece (log-delta boundary/read,
+# multi-source password reconciliation) can be exercised directly
+# against fabricated inputs without needing a real mysqld invocation.
+#
+# Live-confirmed bug (seventh Phase B attempt, after fixing
+# --defaults-file ordering): once log-error is correctly loaded from
+# $CONFIG_FILE, Percona/MySQL redirects essentially ALL of its own
+# logging — including the "A temporary password is generated..."
+# NOTE — directly into that FILE, never to the process's stdout/
+# stderr. Capturing only the subprocess's own `2>&1` output (this
+# script's original approach) found nothing, even though --initialize
+# completed successfully. Re-scanning $ERROR_LOG's WHOLE historical
+# content (an earlier, since-reverted fix) is explicitly forbidden by
+# mandate — it can pick up a password belonging to a datadir that was
+# since wiped and reinitialized.
+#
+# Fix: record $ERROR_LOG's inode+size BEFORE running --initialize (or
+# "absent"), run --initialize ONCE, then read ONLY the bytes appended
+# after that exact boundary. Combined with the subprocess's own
+# stdout/stderr as an additional allowed source (mandate:
+# "CURRENT_PROCESS_OUTPUT OR CURRENT_INITIALIZATION_LOG_DELTA, NEVER
+# whole historical error log"), both unioned and deduplicated by VALUE
+# — an identical event in both sources is not ambiguous, two DIFFERING
+# values are.
+# ============================================================
+
+# Prints "<inode> <size>" for an existing file, nothing if absent.
+_stat_log_boundary() {
+    local path="$1"
+    [ -f "$path" ] && stat -c '%i %s' "$path"
+    return 0
+}
+
+# Reads ONLY the bytes appended to $path after the given boundary.
+# Dies on inode change or shrinkage during the window — both are
+# inherently anomalous (nothing else should touch this file while we
+# hold it) and this refuses rather than guessing which part is new.
+_read_fresh_log_delta() {
+    local path="$1" pre_inode="$2" pre_size="${3:-0}"
+    [ -f "$path" ] || return 0
+    local post_inode post_size
+    read -r post_inode post_size < <(stat -c '%i %s' "$path")
+    if [ -n "$pre_inode" ] && [ "$post_inode" != "$pre_inode" ]; then
+        die "$path's inode changed during this single mysqld --initialize invocation (was $pre_inode, now $post_inode) — refusing to guess which content is new; something replaced/rotated this file unexpectedly."
+    fi
+    if [ "$post_size" -lt "$pre_size" ]; then
+        die "$path shrank during this invocation (was ${pre_size} bytes, now ${post_size}) — refusing to guess; the file was truncated unexpectedly."
+    fi
+    tail -c +"$((pre_size + 1))" "$path"
+}
+
+# Extracts the ONE temp password consistent across BOTH sources — 0
+# matches or 2+ DIFFERING values both fail closed (never guesses
+# first/last).
+_extract_unique_temp_password() {
+    local init_output="$1" log_delta="$2"
+    local all_matches unique_matches match_count
+    all_matches="$( { printf '%s\n' "$init_output"; printf '%s\n' "$log_delta"; } \
+        | grep -oP 'temporary password is generated for root@localhost:\s*\K\S+' || true )"
+    unique_matches="$(printf '%s\n' "$all_matches" | grep -v '^$' | sort -u)"
+    match_count="$(printf '%s\n' "$unique_matches" | grep -c . || true)"
+
+    if [ "$match_count" -eq 0 ]; then
+        die "mysqld --initialize completed but no 'temporary password' event was found in THIS invocation's own subprocess output OR the fresh \$ERROR_LOG segment written during it — refusing to fall back to scanning historical log content. Check whether log_error_verbosity or a custom log-error path suppressed the NOTE."
+    elif [ "$match_count" -gt 1 ]; then
+        die "mysqld --initialize produced $match_count DIFFERING temporary-password values across this invocation's own output/log segment — refusing to guess which is correct (ambiguous)."
+    fi
+    printf '%s' "$unique_matches"
+}
+
+# ============================================================
 # 8. INITIALIZE DATADIR (idempotent — refuses to re-initialize a
 #    non-empty datadir rather than risking data loss, UNLESS
 #    --reinitialize-empty-instance was passed AND the guard above
@@ -553,37 +627,46 @@ initialize_datadir() {
     # and --user were unaffected only because they were ALSO passed as
     # explicit CLI flags (which apply regardless of defaults-file
     # loading) — the dedicated datadir itself was never at risk.
-    # Capture THIS invocation's own --initialize output directly, rather
-    # than relying on live_bootstrap.py to later re-scan $ERROR_LOG for a
-    # "temporary password is generated..." line. $ERROR_LOG accumulates
-    # across every past attempt in a debugging session (append-only, by
-    # design, for a real diagnostic trail) — live-confirmed bug: scanning
-    # it (even taking the LAST match) can find a line belonging to a
-    # datadir that was since wiped and reinitialized without this exact
-    # process ever having run, producing a real-looking but WRONG
-    # password and a confusing "Access denied" instead of a clear
-    # diagnostic. The fix: extract the password from THIS command's OWN
-    # captured output, immediately, while we know for certain it belongs
-    # to the datadir THIS invocation just created.
+    # Capture THIS invocation's own --initialize temp password via a
+    # TRANSACTION-SCOPED LOG DELTA — see the three _stat_log_boundary/
+    # _read_fresh_log_delta/_extract_unique_temp_password functions
+    # above for the full rationale (live-confirmed bug: once log-error
+    # is correctly loaded, Percona writes the temp-password NOTE
+    # directly to that file, never to stdout/stderr).
+    local pre_inode pre_size
+    read -r pre_inode pre_size < <(_stat_log_boundary "$ERROR_LOG"; echo)
+
     # `|| init_rc=$?` (not a bare command) so `set -e` does not abort
-    # BEFORE the diagnostic output below gets written to $ERROR_LOG —
-    # a real mysqld --initialize failure must still leave a full trail,
-    # exactly like the old `| tee -a` pipe did.
+    # BEFORE the diagnostic output below gets appended to $ERROR_LOG —
+    # a real mysqld --initialize failure must still leave a full trail.
     local init_output init_rc=0
     init_output="$(mysqld --defaults-file="$CONFIG_FILE" --initialize \
         --user="$YANDI_DB_USER" --datadir="$DATADIR" 2>&1)" || init_rc=$?
+
+    local log_delta
+    log_delta="$(_read_fresh_log_delta "$ERROR_LOG" "$pre_inode" "$pre_size")"
+
+    # Append the diagnostic trail AFTER computing the delta above, so
+    # this script's own appended text is never mistaken for part of
+    # mysqld's own fresh segment.
     printf '%s\n' "$init_output" >> "$ERROR_LOG"
     [ "$init_rc" -eq 0 ] || die "mysqld --initialize failed (exit=$init_rc) — see $ERROR_LOG for full output"
 
     local temp_pw
-    temp_pw="$(printf '%s\n' "$init_output" | grep -oP 'temporary password is generated for root@localhost:\s*\K\S+' || true)"
-    [ -n "$temp_pw" ] || die "mysqld --initialize completed but its OWN output contained no 'temporary password' line — refusing to fall back to scanning $ERROR_LOG's historical content for a credential from a different attempt. Check $ERROR_LOG for what actually happened."
+    temp_pw="$(_extract_unique_temp_password "$init_output" "$log_delta")"
 
-    printf '%s' "$temp_pw" > "$FRESH_INIT_MARKER"
-    chown root:root "$FRESH_INIT_MARKER"
-    chmod 0600 "$FRESH_INIT_MARKER"
+    # Atomic write: create with a restrictive umask FROM THE START (no
+    # window where the file is briefly world/group-readable), then
+    # rename into place — a crash mid-write can never leave a
+    # half-written or wrongly-permissioned marker visible at the real path.
+    local marker_tmp="${FRESH_INIT_MARKER}.tmp.$$"
+    ( umask 077; printf '%s' "$temp_pw" > "$marker_tmp" )
+    chown root:root "$marker_tmp"
+    mv -f "$marker_tmp" "$FRESH_INIT_MARKER"
 
-    log "datadir initialized — this invocation's own one-time temp password was captured directly (never re-derived from $ERROR_LOG's historical content)"
+    unset temp_pw init_output log_delta
+
+    log "datadir initialized — this invocation's own one-time temp password was captured via transaction-scoped log delta (never re-derived from \$ERROR_LOG's historical content)"
     log "this script will use it once, immediately, in run_python_bootstrap() below, then retire it"
 }
 
