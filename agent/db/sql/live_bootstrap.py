@@ -57,7 +57,9 @@ import argparse
 import os
 import re
 import secrets
+import shutil
 import socket
+import subprocess
 import sys
 from typing import Optional
 
@@ -117,48 +119,63 @@ def load_protected_secret(path: str) -> str:
         return f.read().strip()
 
 
+_MYSQL_CLIENT_BIN = shutil.which("mysql")
+
+_ALTER_ROOT_TO_AUTH_SOCKET_SQL = "ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket;"
+
+
 def _retire_temporary_root_password(socket_path: str, temp_password: str):
     """Connects ONCE with the ephemeral temp password and immediately
     converts root to auth_socket, permanently retiring that password —
     from this point on nothing in this codebase ever holds a root SQL
-    password again. Returns nothing; raises LiveBootstrapError if the
-    conversion statement itself fails (see this module's own docstring
-    for why this exact statement's success is UNVERIFIED until a real
-    run happens)."""
-    import pymysql
-    import pymysql.cursors
-    from pymysql.constants import CLIENT
+    password again. Returns nothing; raises LiveBootstrapError on
+    failure.
 
-    try:
-        conn = pymysql.connect(
-            unix_socket=socket_path, user="root", password=temp_password,
-            charset="utf8mb4", connect_timeout=5, autocommit=True,
-            cursorclass=pymysql.cursors.DictCursor,
-            # Live-confirmed bug (first Phase B run): pymysql's default
-            # capability bitmask does NOT include HANDLE_EXPIRED_
-            # PASSWORDS, so the server outright refuses the connection
-            # (error 1862) for the mandatory post-`--initialize`
-            # "sandbox mode" account instead of letting us in far enough
-            # to run the one ALTER USER statement sandbox mode permits.
-            # client_flag is OR'd with pymysql's own default CAPABILITIES
-            # (see pymysql.connections.Connection.__init__), not a
-            # replacement — this only ADDS the one missing bit.
-            client_flag=CLIENT.HANDLE_EXPIRED_PASSWORDS,
-        )
-    except Exception as e:
-        raise LiveBootstrapError(f"could not connect with the temporary root password: {e}") from e
+    Uses the `mysql` CLI client, NOT pymysql, for this one statement.
+    Live-confirmed (second Phase B run, after fixing the first found
+    bug — HANDLE_EXPIRED_PASSWORDS): even once the connection itself
+    succeeds, pymysql's connect() unconditionally issues a "SET NAMES"
+    query right after authentication (Connection.set_character_set(),
+    for collation-precision reasons its own source comment explains —
+    there is no public parameter to suppress this), and a freshly
+    `--initialize`d root account is in MySQL's post-initialize
+    password-expiration "sandbox mode", which the server enforces by
+    rejecting every statement except a small ALTER USER/SET PASSWORD-
+    shaped set — SET NAMES included, rejected with error 1820. The
+    `mysql` CLI client (the exact client Percona/MySQL's own error
+    messages point to as "a client that supports expired passwords")
+    does not have this problem, so it is used here for exactly this
+    one, security-sensitive, single-statement operation instead.
 
-    try:
-        with conn.cursor() as cur:
-            cur.execute("ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket")
-    except Exception as e:
+    The temp password is passed via the MYSQL_PWD environment variable
+    of this one subprocess (never a CLI argument, which would be
+    visible to any local user via `ps`/`/proc/<pid>/cmdline`) — the
+    standard mechanism the mysql client itself documents for
+    non-interactive password use; /proc/<pid>/environ is readable only
+    by the owning uid (root, here) and root itself, and the value is
+    never logged/printed/persisted anywhere by this function.
+    """
+    if not _MYSQL_CLIENT_BIN:
         raise LiveBootstrapError(
-            f"failed to convert root@localhost to auth_socket — the temporary password may "
-            f"still be active; this is the exact live-verification-required step this "
-            f"module's docstring flags as unproven. Original error: {e}"
-        ) from e
-    finally:
-        conn.close()
+            "the `mysql` CLI client was not found on PATH — required to convert "
+            "root@localhost to auth_socket without tripping pymysql's automatic "
+            "SET NAMES query (rejected under MySQL's post-initialize password-"
+            "expiration sandbox mode). Install the client package that ships "
+            "alongside mysqld/percona-server-server."
+        )
+
+    result = subprocess.run(
+        [_MYSQL_CLIENT_BIN, f"--socket={socket_path}", "--user=root",
+         "-e", _ALTER_ROOT_TO_AUTH_SOCKET_SQL],
+        env={**os.environ, "MYSQL_PWD": temp_password},
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode != 0:
+        raise LiveBootstrapError(
+            f"failed to convert root@localhost to auth_socket via the mysql CLI "
+            f"client (exit={result.returncode}) — the temporary password may "
+            f"still be active. stderr: {result.stderr.strip()}"
+        )
 
 
 def _connect_as_root_auth_socket(socket_path: str):
