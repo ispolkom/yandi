@@ -2,7 +2,33 @@
 
 Read this before touching anything in `agent/db/sql/`.
 
-## Current phase: 5E-S (SQL BASTION) — primitives built + unit-tested, wiring + live enforcement NOT DONE
+## Current phase: 5E-S2 (DEDICATED DATABASE APPLIANCE) — design/audit only, NOT deployed
+
+Sequence: 5E → 5E-S SQL BASTION → **5E-S2 dedicated appliance
+(design phase, current)** → 5F equivalence → 5G reset → 5H virgin run
+→ 5I read cutover → 5J remove JSON dependency.
+
+**CRITICAL DECISION (owner, this stage)**: the shared FastPanel Percona
+instance found during 5E-S must NEVER be used for YANDI — not
+modified, not connected to with guessed/obtained credentials, not
+touched at all. YANDI needs its OWN dedicated local instance.
+
+This stage produced a full non-privileged design (`agent/db/sql/
+DEDICATED_INSTANCE_DESIGN.md`, `agent/db/sql/DISK_CAPACITY_REPORT.md`,
+`agent/db/sql/storage_policy.py`, `deploy/yandi-db.service`, `deploy/
+install-yandi.sh`) but **deployed nothing** — this session has no
+passwordless sudo (`sudo -n` fails), and per explicit instruction did
+not request, obtain, or work around that. No `yandi-db` OS user, no
+`/var/lib/yandi`/`/etc/yandi`/`/run/yandi` paths, no systemd unit, no
+dedicated mysqld process exist anywhere on this host. See `DEDICATED_
+INSTANCE_DESIGN.md` §L for the exact list of what remains unverified
+until an owner-authorized `sudo ./deploy/install-yandi.sh` run
+happens — including the fact that `install-yandi.sh`'s own DB-level
+hand-off (`run_python_bootstrap()`) is a deliberate stub that refuses
+to proceed, because the auth-mechanism decision (§H: `auth_socket` vs.
+a generated secret file) has not been made yet.
+
+## Prior phase: 5E-S (SQL BASTION) — primitives built + unit-tested, wiring + live enforcement NOT DONE
 
 New sequence (mandate: 5E → 5E-S SQL BASTION → 5F equivalence → 5G
 reset → 5H virgin run → 5I read cutover → 5J remove JSON dependency).
