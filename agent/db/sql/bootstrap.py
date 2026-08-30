@@ -52,6 +52,7 @@ from agent.db.sql.security_grants import (
 )
 from agent.db.sql.instance_identity import record_instance_identity
 from agent.db.sql.security_triggers import immutability_triggers
+from agent.db.sql.migrate import record_schema_version
 
 
 _IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -129,7 +130,21 @@ def apply_schema(conn) -> None:
     the SAME ones agent.db.sql.migrate.apply() uses. Not duplicated:
     this function and migrate.apply() both read from schema.py's single
     source of truth (mandate's own "no parallel truths" discipline,
-    already established earlier in Этап 5)."""
+    already established earlier in Этап 5).
+
+    Also records the schema_migrations version row via migrate.py's own
+    record_schema_version() — live-confirmed gap: migrate.apply() (the
+    ONLY prior caller of that INSERT) is never invoked by this bootstrap
+    path (it opens its own connection via get_connection()'s env-var
+    credentials, incompatible with the already-open root/auth_socket
+    connection this module receives), so a virgin bootstrap left every
+    table created but schema_migrations permanently empty —
+    security_selfcheck.check_schema_version() reported "version None,
+    expected 1" forever, even though the schema WAS fully applied.
+    Recording happens ONLY after every CREATE TABLE/ALTER statement
+    above has executed without raising — the same "successful apply is
+    the proof" precedent migrate.apply() itself already established,
+    not a new, stricter rule invented just for this."""
     for _name, ddl in ALL_TABLES_IN_ORDER:
         with conn.cursor() as cur:
             cur.execute(ddl)
@@ -140,6 +155,7 @@ def apply_schema(conn) -> None:
             except Exception as e:
                 if "Duplicate" not in str(e) and "already exists" not in str(e).lower():
                     raise
+    record_schema_version(conn)
 
 
 def trigger_exists(conn, trigger_name: str) -> bool:
@@ -244,9 +260,11 @@ def run_bootstrap(
     # and are unaffected by this reordering.
     apply_schema(conn)
     if runtime_auth_socket_os_user:
+        actual_runtime_host = "localhost"
         ensure_role(conn, [yandi_runtime_auth_socket_statement("yandi_runtime", runtime_auth_socket_os_user)]
-                    + yandi_runtime_grant_statements("yandi_runtime", "localhost"))
+                    + yandi_runtime_grant_statements("yandi_runtime", actual_runtime_host))
     else:
+        actual_runtime_host = runtime_host
         ensure_role(conn, yandi_runtime_statements("yandi_runtime", runtime_host, runtime_password))
     ensure_role(conn, yandi_readonly_statements("yandi_readonly", readonly_host, readonly_password))
     ensure_role(conn, yandi_migrator_statements("yandi_migrator", migrator_host, migrator_password))
@@ -258,4 +276,14 @@ def run_bootstrap(
         "roles_ensured": ["yandi_runtime", "yandi_readonly", "yandi_migrator"],
         "triggers_created": triggers_created,
         "runtime_auth_mode": "auth_socket" if runtime_auth_socket_os_user else "password",
+        # The EXACT (username, host) pairs just created — single source
+        # of truth for any caller that needs to verify these specific
+        # accounts' grants afterward (security_selfcheck.run_selfcheck()'s
+        # role_principals=), rather than a caller re-deriving/hardcoding
+        # the same host defaults a second time and risking drift.
+        "role_principals": {
+            "runtime": ("yandi_runtime", actual_runtime_host),
+            "readonly": ("yandi_readonly", readonly_host),
+            "migrator": ("yandi_migrator", migrator_host),
+        },
     }
