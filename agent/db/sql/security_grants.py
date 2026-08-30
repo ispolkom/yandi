@@ -44,6 +44,19 @@ FORBIDDEN_FOR_RUNTIME = (
 )
 FORBIDDEN_FOR_READONLY = FORBIDDEN_FOR_RUNTIME + ("INSERT", "UPDATE", "DELETE")
 
+# YANDI_MIGRATOR legitimately holds CREATE/ALTER/DROP (schema-upgrade
+# DDL, see yandi_migrator_statements() above) — the one role in this
+# design where those four are NOT a violation. Still forbidden: every
+# genuinely global/admin privilege no lesser role should ever hold,
+# same as runtime. Derived from FORBIDDEN_FOR_RUNTIME (not a third,
+# independently-hardcoded list) so the two policies cannot silently
+# drift apart — DATABASE BOOTSTRAP V1, mandate: "ROLE POLICY != CURRENT
+# BOOTSTRAP CONNECTION POLICY," extended to mean each role's OWN policy
+# must not accidentally borrow another role's list either.
+FORBIDDEN_FOR_MIGRATOR = tuple(
+    p for p in FORBIDDEN_FOR_RUNTIME if p not in ("CREATE", "ALTER", "DROP", "TRUNCATE")
+)
+
 
 def create_user_statement(username: str, host: str, password: str) -> Tuple[str, tuple]:
     """CREATE USER's username/host/password are all string-literal

@@ -25,13 +25,52 @@ Covers:
       (no CREATE/GRANT/INSERT/UPDATE/DELETE in any call it makes) —
       mandate §39: "не делать silent repair от runtime account."
 
+DATABASE BOOTSTRAP V1, sixteenth Phase B attempt — LIVE BUG in the
+grants half of this check. Owner-run live output (auth_socket bootstrap
++ schema fully applied, tables_ok=True, triggers_ok=True,
+identity_ok=True MATCH):
+
+    grants_ok=False
+    grant_violations=[CREATE, DROP, RELOAD, SHUTDOWN, PROCESS, FILE,
+                       ALTER, SUPER, EXECUTE, CREATE USER]
+
+ROOT CAUSE: live_bootstrap.py's run() calls run_selfcheck(conn,
+role="runtime", ...) using the SAME `conn` it just used to BOOTSTRAP
+everything — root@localhost via auth_socket (necessarily privileged;
+that connection is how yandi_runtime/readonly/migrator get created at
+all). check_current_grants_against_allowlist() runs `SHOW GRANTS FOR
+CURRENT_USER()`, so this was checking ROOT's own legitimate admin
+grants against FORBIDDEN_FOR_RUNTIME — an account holding CREATE
+USER/SUPER/etc. is not a runtime-role misconfiguration, it is exactly
+what a bootstrap-capable account is supposed to hold. The violations
+list is a perfect literal match for a fresh MySQL root account's
+default global grants, not a hint of anything wrong with
+yandi_runtime.
+
+FIX: check_named_principal_grants(conn, username, host, forbidden) —
+SHOW GRANTS FOR the EXPLICITLY NAMED account, never CURRENT_USER().
+run_selfcheck() gained an optional role_principals={"runtime": (user,
+host), "readonly": (...), "migrator": (...)} parameter — when given,
+each named account is checked against ITS OWN policy via
+FORBIDDEN_BY_ROLE (runtime/readonly/migrator each have a distinct
+list; bootstrap/root is deliberately absent from FORBIDDEN_BY_ROLE
+entirely — it is never evaluated against any deny-list). Omitting
+role_principals (every pre-existing test above, and any future
+genuine "a runtime process self-checks its OWN connection" caller)
+preserves the exact original CURRENT_USER()-based behavior — zero
+regression risk for that use case. live_bootstrap.py's run() now
+passes role_principals=result["role_principals"] (bootstrap.
+run_bootstrap()'s own return value — the exact accounts/hosts it just
+created, not re-derived/hardcoded a second time).
+
 Run: /home/iam/venv/bin/python3 -m agent.db_sql_security_selfcheck_regression_test
 """
 from __future__ import annotations
 
 from agent.db.sql.security_selfcheck import (
     check_schema_version, check_required_tables, check_required_triggers,
-    check_current_grants_against_allowlist, parse_show_grants, run_selfcheck,
+    check_current_grants_against_allowlist, check_named_principal_grants,
+    parse_show_grants, run_selfcheck, FORBIDDEN_BY_ROLE,
 )
 from agent.db.sql.schema import ALL_TABLES_IN_ORDER, SCHEMA_VERSION
 from agent.db.sql.security_triggers import immutability_triggers
@@ -86,17 +125,30 @@ class ScriptedCursor:
 
     def fetchall(self):
         if self._last_sql and self._last_sql.upper().startswith("SHOW GRANTS"):
-            return [{"Grants for ...": row} for row in self.conn.show_grants_rows]
+            if self.conn.principal_grants is not None and self._last_params:
+                username = self._last_params[0]
+                rows = self.conn.principal_grants.get(username, [])
+            else:
+                rows = self.conn.show_grants_rows
+            return [{"Grants for ...": row} for row in rows]
         return []
 
 
 class ScriptedConnection:
-    def __init__(self, schema_version, existing_tables, existing_triggers, show_grants_rows):
+    def __init__(self, schema_version, existing_tables, existing_triggers, show_grants_rows,
+                 principal_grants=None):
         self.calls = []
         self.schema_version = schema_version
         self.existing_tables = set(existing_tables)
         self.existing_triggers = set(existing_triggers)
         self.show_grants_rows = show_grants_rows
+        # {username: [raw SHOW GRANTS lines]} — used ONLY by the
+        # role_principals= path (SHOW GRANTS FOR %s@%s, a NAMED account,
+        # never CURRENT_USER()). None means "not exercised by this
+        # scenario" — the CURRENT_USER()-based show_grants_rows above
+        # stays the single fallback, matching every pre-existing test
+        # in this file exactly.
+        self.principal_grants = principal_grants
 
     def cursor(self):
         return ScriptedCursor(self)
@@ -283,6 +335,170 @@ try:
 except ValueError:
     bad_role_raised = True
 check("run_selfcheck() rejects an unrecognized role argument rather than silently defaulting", bad_role_raised)
+
+
+# ============================================================
+# THE LIVE BUG: role_principals= checks NAMED accounts, never
+# CURRENT_USER() — root/bootstrap's own grants must never be evaluated
+# against a lesser role's deny-list.
+# ============================================================
+
+_ROOT_LIKE_GRANTS = [
+    "GRANT USAGE ON *.* TO `root`@`localhost`",
+    "GRANT CREATE, DROP, RELOAD, SHUTDOWN, PROCESS, FILE, ALTER, SUPER, "
+    "EXECUTE, CREATE USER ON *.* TO `root`@`localhost`",
+    "GRANT ALL PRIVILEGES ON `yandi_epistemic`.* TO `root`@`localhost`",
+]
+
+# 5+9: THE LIVE BUG, reproduced directly — checking root's OWN
+# (necessarily privileged) grants against FORBIDDEN_FOR_RUNTIME must
+# fail (this is exactly the wrong comparison the live bug made); the
+# FIX is that run_selfcheck() must never be ASKED to do this in bootstrap
+# mode — role_principals= checks the NAMED yandi_runtime account
+# instead, which is what check 6 below proves.
+root_forbidden = FORBIDDEN_BY_ROLE["runtime"]
+root_conn_for_direct_check = ScriptedConnection(
+    schema_version=SCHEMA_VERSION, existing_tables=_ALL_TABLE_NAMES, existing_triggers=_ALL_TRIGGER_NAMES,
+    show_grants_rows=_ROOT_LIKE_GRANTS,
+)
+root_ok_if_misused, root_violations_if_misused = check_current_grants_against_allowlist(
+    root_conn_for_direct_check, root_forbidden,
+)
+check(
+    "5/9. THE LIVE BUG, reproduced directly: checking a root-like "
+    "CURRENT_USER() connection's grants against FORBIDDEN_FOR_RUNTIME "
+    "DOES report violations (proving this was a real, reproducible "
+    "false-positive mechanism, not a one-off fluke) — this is exactly "
+    "why run_selfcheck() must be given role_principals= at bootstrap "
+    "time instead of relying on CURRENT_USER()",
+    root_ok_if_misused is False and set(root_violations_if_misused) >= {"CREATE", "SUPER", "CREATE USER"},
+    f"{root_violations_if_misused}",
+)
+
+# 6/7/8: THE FIX — role_principals= checks each NAMED account against
+# its OWN policy, all in ONE run_selfcheck() call, never against
+# root's grants.
+principal_grants = {
+    "yandi_runtime": ["GRANT SELECT, INSERT ON `yandi_epistemic`.* TO `yandi_runtime`@`localhost`"],
+    "yandi_readonly": ["GRANT SELECT ON `yandi_epistemic`.* TO `yandi_readonly`@`localhost`"],
+    "yandi_migrator": [
+        "GRANT CREATE, ALTER, INDEX, REFERENCES, CREATE VIEW, TRIGGER, DROP "
+        "ON `yandi_epistemic`.* TO `yandi_migrator`@`localhost`",
+    ],
+}
+bootstrap_conn = ScriptedConnection(
+    schema_version=SCHEMA_VERSION, existing_tables=_ALL_TABLE_NAMES, existing_triggers=_ALL_TRIGGER_NAMES,
+    show_grants_rows=_ROOT_LIKE_GRANTS,  # what CURRENT_USER() would see if wrongly used
+    principal_grants=principal_grants,
+)
+result_bootstrap = run_selfcheck(
+    bootstrap_conn,
+    role_principals={
+        "runtime": ("yandi_runtime", "localhost"),
+        "readonly": ("yandi_readonly", "localhost"),
+        "migrator": ("yandi_migrator", "localhost"),
+    },
+)
+check(
+    "6. runtime grants are checked EXPLICITLY for the named yandi_runtime "
+    "account (SELECT/INSERT only) — clean, not a false positive from "
+    "root's grants leaking in",
+    result_bootstrap["grants_detail"]["runtime"]["ok"] is True
+    and result_bootstrap["grants_detail"]["runtime"]["principal"] == "yandi_runtime@localhost",
+    f"{result_bootstrap['grants_detail'].get('runtime')}",
+)
+check(
+    "7. readonly grants are checked SEPARATELY for yandi_readonly "
+    "(SELECT only) — its own entry, not merged with runtime's",
+    result_bootstrap["grants_detail"]["readonly"]["ok"] is True
+    and result_bootstrap["grants_detail"]["readonly"]["principal"] == "yandi_readonly@localhost",
+    f"{result_bootstrap['grants_detail'].get('readonly')}",
+)
+check(
+    "8/11. migrator grants are checked SEPARATELY against its OWN policy "
+    "(FORBIDDEN_FOR_MIGRATOR) — its legitimate CREATE/ALTER/DROP DDL is "
+    "NOT a false-positive 'runtime role violation' (FORBIDDEN_FOR_RUNTIME "
+    "would have flagged all three)",
+    result_bootstrap["grants_detail"]["migrator"]["ok"] is True
+    and result_bootstrap["grants_detail"]["migrator"]["violations"] == [],
+    f"{result_bootstrap['grants_detail'].get('migrator')}",
+)
+check(
+    "6b/7b/8b: the overall bootstrap-mode selfcheck is CLEAN "
+    "(grants_ok=True, ok=True) once each account is checked against its "
+    "own, correctly-scoped policy — this is the live fix end-to-end",
+    result_bootstrap["grants_ok"] is True and result_bootstrap["ok"] is True,
+    f"{result_bootstrap}",
+)
+check(
+    "role_principals= mode never issues SHOW GRANTS FOR CURRENT_USER() "
+    "at all (only the three named-account queries) — root is consulted "
+    "only as whatever runs the query, never as a checked principal",
+    not any(
+        "CURRENT_USER" in sql.upper()
+        for sql, _p in bootstrap_conn.calls if sql.upper().startswith("SHOW GRANTS")
+    ),
+)
+
+# 9: runtime forbidden privilege actually present -> selfcheck FAILS
+# even in role_principals= mode (the new path is not accidentally
+# more lenient than the CURRENT_USER() path already proven above).
+bad_runtime_conn = ScriptedConnection(
+    schema_version=SCHEMA_VERSION, existing_tables=_ALL_TABLE_NAMES, existing_triggers=_ALL_TRIGGER_NAMES,
+    show_grants_rows=[], principal_grants={
+        **principal_grants,
+        "yandi_runtime": ["GRANT SELECT, INSERT, DROP ON `yandi_epistemic`.* TO `yandi_runtime`@`localhost`"],
+    },
+)
+result_bad_runtime = run_selfcheck(
+    bad_runtime_conn,
+    role_principals={"runtime": ("yandi_runtime", "localhost"), "readonly": ("yandi_readonly", "localhost"),
+                      "migrator": ("yandi_migrator", "localhost")},
+)
+check(
+    "9. a forbidden privilege (DROP) actually granted to yandi_runtime "
+    "IS detected and fails the overall selfcheck, even via the "
+    "role_principals= path",
+    result_bad_runtime["ok"] is False
+    and result_bad_runtime["grants_detail"]["runtime"]["ok"] is False
+    and "DROP" in result_bad_runtime["grants_detail"]["runtime"]["violations"],
+    f"{result_bad_runtime['grants_detail'].get('runtime')}",
+)
+
+# 10: readonly write privilege -> FAIL, same guarantee via role_principals=.
+bad_readonly_conn = ScriptedConnection(
+    schema_version=SCHEMA_VERSION, existing_tables=_ALL_TABLE_NAMES, existing_triggers=_ALL_TRIGGER_NAMES,
+    show_grants_rows=[], principal_grants={
+        **principal_grants,
+        "yandi_readonly": ["GRANT SELECT, INSERT ON `yandi_epistemic`.* TO `yandi_readonly`@`localhost`"],
+    },
+)
+result_bad_readonly = run_selfcheck(
+    bad_readonly_conn,
+    role_principals={"runtime": ("yandi_runtime", "localhost"), "readonly": ("yandi_readonly", "localhost"),
+                      "migrator": ("yandi_migrator", "localhost")},
+)
+check(
+    "10. a write privilege (INSERT) actually granted to yandi_readonly "
+    "IS detected and fails the overall selfcheck via role_principals=",
+    result_bad_readonly["ok"] is False
+    and result_bad_readonly["grants_detail"]["readonly"]["ok"] is False
+    and "INSERT" in result_bad_readonly["grants_detail"]["readonly"]["violations"],
+    f"{result_bad_readonly['grants_detail'].get('readonly')}",
+)
+
+# Unknown role name inside role_principals= -> explicit error, never a
+# silently-skipped check.
+try:
+    run_selfcheck(bootstrap_conn, role_principals={"nonexistent_role": ("someone", "localhost")})
+    bad_role_principal_raised = False
+except ValueError:
+    bad_role_principal_raised = True
+check(
+    "run_selfcheck() rejects an unrecognized role name inside "
+    "role_principals= rather than silently skipping that account's check",
+    bad_role_principal_raised,
+)
 
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")

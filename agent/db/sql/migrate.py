@@ -24,6 +24,35 @@ from agent.db.sql.schema import (
     SCHEMA_VERSION,
 )
 
+SCHEMA_VERSION_DESCRIPTION = "Этап 5 canonical epistemic memory, initial schema"
+
+
+def record_schema_version(
+    conn, version: int = SCHEMA_VERSION, description: str = SCHEMA_VERSION_DESCRIPTION,
+) -> None:
+    """INSERT IGNORE the schema_migrations row for `version` — the single
+    place that records "schema V{version} has been fully applied,"
+    shared by this module's own apply() AND agent.db.sql.bootstrap.
+    apply_schema() (DATABASE BOOTSTRAP V1's own schema-application path,
+    used when a bootstrap-capable connection is already open rather than
+    one obtained via get_connection()'s env-var credentials).
+
+    `version INT PRIMARY KEY` (schema.py's own SCHEMA_MIGRATIONS DDL)
+    makes IGNORE the correct idempotency mechanism here — a second call
+    with the SAME version is a silent no-op, never a duplicate row or an
+    error; this is what makes re-running either caller's schema
+    application safe any number of times.
+
+    Callers are expected to call this ONLY after every required DDL
+    statement for `version` has already executed without raising — this
+    function does not itself re-verify that any table/column exists, it
+    only records that the apply loop leading up to it completed."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT IGNORE INTO schema_migrations (version, description) VALUES (%s, %s)",
+            (version, description),
+        )
+
 
 def dry_run() -> None:
     print(f"-- schema_version target: {SCHEMA_VERSION}")
@@ -72,12 +101,7 @@ def apply() -> bool:
                             print(f"SKIP {name} (already applied)")
                         else:
                             raise
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT IGNORE INTO schema_migrations (version, description) "
-                    "VALUES (%s, %s)",
-                    (SCHEMA_VERSION, "Этап 5 canonical epistemic memory, initial schema"),
-                )
+            record_schema_version(conn)
         return True
     except SqlUnavailable as e:
         print(f"SQL UNAVAILABLE: {e}")

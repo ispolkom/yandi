@@ -143,7 +143,24 @@ class _FakeCursor:
         elif "information_schema.triggers" in norm:
             self._last = {"c": 1}
         elif norm.startswith("SHOW GRANTS"):
-            self._rows = [{"g": "GRANT SELECT, INSERT ON `yandi_epistemic`.* TO `yandi_runtime`@`localhost`"}]
+            # Realistic, PRINCIPAL-AWARE canned grants — run_selfcheck()'s
+            # role_principals= path (DATABASE BOOTSTRAP V1 fix) issues
+            # `SHOW GRANTS FOR %s@%s` per named account, each of which
+            # must come back with ONLY that role's own legitimate
+            # privileges, or a happy-path run() would spuriously fail
+            # (e.g. readonly's FORBIDDEN list includes INSERT — a canned
+            # response that always said "SELECT, INSERT" regardless of
+            # which principal was asked about would falsely violate it).
+            username = params[0] if params else None
+            grants_by_user = {
+                "yandi_runtime": "GRANT SELECT, INSERT ON `yandi_epistemic`.* TO `yandi_runtime`@`localhost`",
+                "yandi_readonly": "GRANT SELECT ON `yandi_epistemic`.* TO `yandi_readonly`@`localhost`",
+                "yandi_migrator": "GRANT CREATE, ALTER, INDEX, REFERENCES, CREATE VIEW, TRIGGER, DROP "
+                                  "ON `yandi_epistemic`.* TO `yandi_migrator`@`localhost`",
+            }
+            self._rows = [{"g": grants_by_user.get(
+                username, "GRANT SELECT, INSERT ON `yandi_epistemic`.* TO `yandi_runtime`@`localhost`",
+            )}]
         else:
             pass  # every other DDL/GRANT in this flow is a pure side-effect statement
 

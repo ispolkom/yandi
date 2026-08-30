@@ -604,7 +604,20 @@ def run(
         if not os.path.exists(migrator_secret_path):
             save_protected_secret(migrator_secret_path, migrator_password)
 
-        selfcheck = run_selfcheck(conn, role="runtime", expected_instance_uuid=instance_uuid)
+        # role_principals=result["role_principals"]: check the grants of
+        # the three ACCOUNTS run_bootstrap() just created/ensured, not
+        # of `conn` itself — `conn` is root@localhost via auth_socket
+        # (necessarily privileged, that's how those accounts get
+        # created at all), so a naive role="runtime" CURRENT_USER()
+        # check here would evaluate ROOT's own grants against
+        # YANDI_RUNTIME's deny-list — live-confirmed bug: reported
+        # grants_ok=False with root's legitimate CREATE/DROP/SUPER/...
+        # privileges as "violations." See security_selfcheck.
+        # run_selfcheck()'s own docstring for the full explanation.
+        selfcheck = run_selfcheck(
+            conn, expected_instance_uuid=instance_uuid,
+            role_principals=result["role_principals"],
+        )
     finally:
         conn.close()
 
