@@ -31,6 +31,7 @@ Run: /home/iam/venv/bin/python3 -m agent.db_sql_startup_reconciliation_regressio
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 from unittest.mock import patch
 
@@ -88,9 +89,14 @@ check(
 
 
 # ============================================================
-# B. Functional: TestClient's context manager runs FastAPI's startup
-# lifecycle — the handler must actually fire, exactly once, and must
-# actually call shadow_reconcile_stale_runs() (not just import it).
+# B. Functional: invoke the registered async startup handler directly.
+# This used to use Starlette's TestClient as a lifecycle driver, but on
+# the current host even a minimal empty FastAPI app hangs inside
+# TestClient.__enter__ before any YANDI startup handler runs. That makes
+# TestClient a broken fixture here, not a useful assertion about SQL
+# reconciliation. The structural checks above prove the handler is
+# registered on the app; this functional check proves the handler body
+# calls shadow_reconcile_stale_runs() exactly once.
 # ============================================================
 
 _calls = []
@@ -102,14 +108,10 @@ def _spy_reconcile(*, log=None, verbose=False, older_than_seconds=3600):
 
 
 with patch("agent.db.sql.shadow_write.shadow_reconcile_stale_runs", _spy_reconcile):
-    from starlette.testclient import TestClient
-
-    with TestClient(ccs.app):
-        pass
+    asyncio.run(_startup_fn())
 
 check(
-    "B: shadow_reconcile_stale_runs() is actually called exactly once when the "
-    "app starts (TestClient's context manager runs the real FastAPI startup event)",
+    "B: the registered startup handler calls shadow_reconcile_stale_runs() exactly once",
     len(_calls) == 1,
     f"calls={_calls}",
 )
@@ -132,13 +134,11 @@ with patch.dict("os.environ", {"YANDI_SQL_SOCKET": "/nonexistent/startup-reconci
     )
 
     try:
-        from starlette.testclient import TestClient as _TC2
-        with _TC2(ccs.app):
-            pass
+        asyncio.run(_startup_fn())
         no_raise = True
     except Exception as e:
         no_raise = False
-    check("C: app startup does not raise with SQL endpoint unreachable (real fail-open, not mocked)", no_raise)
+    check("C: startup handler does not raise with SQL endpoint unreachable (real fail-open, not mocked)", no_raise)
 
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")
