@@ -2,16 +2,27 @@
 agent/db_sql_shadow_write_regression_test.py — Этап 5 (SQL persistence
 migration) regression: agent/db/sql/shadow_write.py fail-open contract.
 
-This is the ONE part of the SQL layer fully provable WITHOUT live
-MySQL credentials (mandate §44): "Shadow SQL failure на этапе dual-
-write НЕ должен ломать production JSON answer path" is exactly the
-"SQL unavailable" state this environment is actually in right now — not
-a simulation, the real current state (agent.db.sql.connection.
-is_configured() is False here). Every check below runs with ZERO
-YANDI_SQL_* environment variables set.
+DATABASE BOOTSTRAP V1, seventeenth Phase B attempt (default SQL config
+resolver): this suite's ORIGINAL premise — "every check below runs with
+ZERO YANDI_SQL_* environment variables set, proving fail-open against
+the REAL current 'not configured' state" — stopped being universally
+true the moment connection.py gained canonical dedicated-appliance
+defaults (is_configured() is now True out of the box on a host with a
+bootstrapped dedicated instance, by design — see connection.py's own
+module docstring). On THIS specific host, with zero env vars set, the
+default resolver now genuinely reaches the live dedicated socket.
+
+So this suite no longer relies on ambient environment state at all —
+every "SQL unavailable" scenario below is FORCED deterministically via
+an explicit YANDI_SQL_SOCKET override pointing at a path that cannot
+exist, so the suite proves the exact same fail-open contract
+regardless of whether the machine running it happens to have a live
+dedicated instance reachable or not (mandate: don't couple test
+determinism to which host happens to run it).
 
 Covers:
-    A. every shadow_* function returns cleanly (no raise) with no DB configured
+    A. every shadow_* function returns cleanly (no raise) when the
+       resolved SQL endpoint is genuinely unreachable
     B. a malformed/wrong-typed call still doesn't raise out of the shadow layer
     C. a repository-level exception (mocked) is caught and rolled back, not raised
     D. shadow functions never mutate their input arguments
@@ -49,12 +60,34 @@ def _noop_log(*a, **k):
     pass
 
 
-# Confirm the real precondition this whole suite depends on.
+# A path that cannot exist on any filesystem, ever — forces a real,
+# deterministic connection failure (ENOENT/ECONNREFUSED) regardless of
+# whether THIS host happens to have a live dedicated instance at the
+# real default path. Every scenario below runs inside this override so
+# the suite's result never depends on ambient host state.
+_UNREACHABLE_SOCKET = "/nonexistent/agent-db-sql-shadow-write-regression-test/mysql.sock"
+_forced_unreachable = patch.dict(
+    "os.environ", {"YANDI_SQL_SOCKET": _UNREACHABLE_SOCKET, "YANDI_SQL_AUTH_MODE": "auth_socket"},
+)
+_forced_unreachable.start()
+
 check(
-    "PRECONDITION: SQL layer genuinely unconfigured in this environment "
-    "(no credentials — this suite proves fail-open against the REAL current state, not a simulation)",
-    sqlconn.is_configured() is False,
+    "PRECONDITION: is_configured() is True (canonical defaults always resolve — "
+    "DATABASE BOOTSTRAP V1) even though the SOCKET this run forces is deliberately "
+    "unreachable — 'configured' and 'reachable' are different questions",
+    sqlconn.is_configured() is True,
     f"is_configured()={sqlconn.is_configured()}",
+)
+_precondition_raised = False
+try:
+    with sqlconn.get_connection():
+        pass
+except sqlconn.SqlUnavailable:
+    _precondition_raised = True
+check(
+    "PRECONDITION: get_connection() genuinely fails against the forced-unreachable "
+    "socket (deterministic 'SQL unavailable', independent of ambient host state)",
+    _precondition_raised,
 )
 
 # ============================================================
@@ -198,9 +231,12 @@ except sqlconn.SqlUnavailable:
     raised = True
 check(
     "E: get_connection() raises SqlUnavailable (not a raw pymysql/socket error) "
-    "when credentials are absent — this is what makes fail-open possible with ONE except clause",
+    "when the resolved SQL endpoint is unreachable — this is what makes fail-open "
+    "possible with ONE except clause",
     raised,
 )
+
+_forced_unreachable.stop()
 
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")

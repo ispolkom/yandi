@@ -1,35 +1,67 @@
 """
 agent/db/sql/connection.py — MySQL/Percona connection layer.
 
-Config is env-var only, NEVER hardcoded, per the mandate's explicit
-instruction (§27): "НЕ hardcode password. Использовать environment/
-config, секреты не коммитить." No default password, no default user —
-if those two are unset, the layer reports itself as NOT CONFIGURED
-rather than guessing or trying an empty-password connection.
+THE single runtime SQL configuration resolver (DATABASE BOOTSTRAP V1,
+seventeenth Phase B attempt) — every caller (repositories.py,
+shadow_write.py, orchestrator_v2.py, migrate.py) reads its connection
+config through _config()/is_configured()/get_connection() in THIS file
+and nowhere else. Nothing scatters its own copy of these defaults.
 
-    YANDI_SQL_HOST      default "127.0.0.1" (ignored if YANDI_SQL_SOCKET is set)
-    YANDI_SQL_PORT      default "3306" (ignored if YANDI_SQL_SOCKET is set)
-    YANDI_SQL_USER      required, no default
-    YANDI_SQL_PASSWORD  required unless YANDI_SQL_AUTH_MODE=auth_socket
-    YANDI_SQL_DATABASE  default "yandi_epistemic"
-    YANDI_SQL_CONNECT_TIMEOUT  default "3" (seconds)
-    YANDI_SQL_SOCKET    optional Unix socket path (DATABASE BOOTSTRAP V1,
-                        mandate §10) — e.g. /run/yandi/mysql.sock for
-                        YANDI's own dedicated instance. When set, this is
-                        the ONLY transport used: host/port are never
-                        consulted and there is NEVER a fallback to TCP if
-                        the socket connection fails (mandate §26: "Это
-                        абсолютный запрет" — a dedicated-socket failure
-                        must surface as SqlUnavailable, never silently
-                        retry against localhost:3306 or any other host).
-    YANDI_SQL_AUTH_MODE default "password"; "auth_socket" sends no
-                        password at all, relying on the server's
-                        auth_socket plugin to authenticate by kernel-
-                        verified peer UID (DEDICATED_INSTANCE_DESIGN.md
-                        §H, Option 1) — only meaningful together with
-                        YANDI_SQL_SOCKET; requesting it without a socket
-                        path configured is a configuration error, not a
-                        silent downgrade to password auth.
+Config is env-var only, NEVER hardcoded (mandate §27) — but "never
+hardcoded" means never a SECRET (password/credential); it does NOT mean
+"no default endpoint." The dedicated yandi-db appliance IS this
+deployment's canonical, always-present local database (DATABASE
+BOOTSTRAP V1 proved it live), so CANONICAL DEFAULTS below point at it
+out of the box — no operator has to manually export anything for a
+standard install. ENV remains the override mechanism, exactly as
+before; each of the three variables below resolves independently
+(setting one does not require setting the others).
+
+    YANDI_SQL_SOCKET    default "/run/yandi/mysql/mysql.sock" (the
+                        dedicated instance's own socket — DATABASE
+                        BOOTSTRAP V1). When resolved (default or
+                        explicit), this is the ONLY transport used:
+                        host/port are never consulted and there is
+                        NEVER a fallback to TCP if the socket
+                        connection fails (mandate §26: "Это абсолютный
+                        запрет" — a dedicated-socket failure must
+                        surface as SqlUnavailable, never silently retry
+                        against localhost:3306, 127.0.0.1, or the
+                        shared FastPanel MySQL instance, under any
+                        circumstance).
+    YANDI_SQL_AUTH_MODE default "auth_socket" (DATABASE BOOTSTRAP V1's
+                        own runtime role) — sends no password at all,
+                        relying on the server's auth_socket plugin to
+                        authenticate by kernel-verified peer UID
+                        (DEDICATED_INSTANCE_DESIGN.md §H, Option 1).
+                        Explicit "password" still requires an explicit
+                        YANDI_SQL_PASSWORD — there is no default
+                        password, ever, for either mode.
+    YANDI_SQL_USER      default "yandi_runtime" (DATABASE BOOTSTRAP
+                        V1's least-privilege runtime role — see
+                        security_grants.py; holds SELECT/INSERT and a
+                        narrow per-table UPDATE only, never DDL/admin).
+    YANDI_SQL_HOST      default "127.0.0.1" — only ever consulted if
+                        the resolved socket is somehow empty (not
+                        reachable in practice: the socket above always
+                        resolves to a non-empty value, default or
+                        explicit).
+    YANDI_SQL_PORT      default "3306" — same caveat as HOST above.
+    YANDI_SQL_PASSWORD  required only when YANDI_SQL_AUTH_MODE resolves
+                        to "password" (explicit override) — no default.
+    YANDI_SQL_DATABASE  default "yandi_epistemic".
+    YANDI_SQL_CONNECT_TIMEOUT  default "3" (seconds).
+
+Bootstrap/migration tooling (agent/db/sql/migrate.py, agent/db/sql/
+bootstrap.py via live_bootstrap.py's own root/auth_socket connection)
+has a DIFFERENT privilege context by necessity — bootstrap always
+connects as root to CREATE the yandi_runtime account these defaults
+now point at — but it is not a second resolver: migrate.py's own CLI
+still calls get_connection() from this same module, so it also
+benefits from (and is bound by) these same canonical defaults; an
+operator who wants migrate.py to run DDL simply overrides
+YANDI_SQL_USER/YANDI_SQL_PASSWORD to a DDL-capable account (e.g.
+yandi_migrator), same override mechanism as everything else.
 
 No connection pool in v1 — the mandate explicitly discourages reaching
 for heavy infrastructure without justification (§28: "НЕ тащи
@@ -46,6 +78,14 @@ import os
 from contextlib import contextmanager
 from typing import Optional
 
+# Canonical DEDICATED-APPLIANCE defaults (DATABASE BOOTSTRAP V1) — the
+# ONLY place these three values are hardcoded anywhere in this
+# codebase. ENV always overrides; see the module docstring above for
+# the full override semantics and rationale.
+_DEFAULT_SOCKET = "/run/yandi/mysql/mysql.sock"
+_DEFAULT_AUTH_MODE = "auth_socket"
+_DEFAULT_USER = "yandi_runtime"
+
 
 class SqlUnavailable(Exception):
     """
@@ -57,20 +97,43 @@ class SqlUnavailable(Exception):
     """
 
 
+def _resolve(env_name: str, default: str) -> str:
+    """`env_name` present (even as an explicit empty string) -> that
+    literal value; genuinely absent -> `default`. Deliberately NOT
+    `os.environ.get(env_name) or default` — that would make an
+    explicit empty-string override indistinguishable from "unset" and
+    silently re-impose the default, with no way left to genuinely opt
+    out of it (is_configured()'s own "explicitly empty socket ->
+    correctly reports not configured" case relies on this distinction)."""
+    return os.environ[env_name] if env_name in os.environ else default
+
+
 def _auth_mode() -> str:
-    return os.environ.get("YANDI_SQL_AUTH_MODE", "password")
+    return _resolve("YANDI_SQL_AUTH_MODE", _DEFAULT_AUTH_MODE)
+
+
+def _socket() -> str:
+    return _resolve("YANDI_SQL_SOCKET", _DEFAULT_SOCKET)
+
+
+def _user() -> str:
+    return _resolve("YANDI_SQL_USER", _DEFAULT_USER)
 
 
 def is_configured() -> bool:
-    user_set = bool(os.environ.get("YANDI_SQL_USER"))
-    if not user_set:
-        return False
+    # user/auth_mode always resolve to a non-empty value now (canonical
+    # defaults) — the only way this can be "not configured" is an
+    # EXPLICIT YANDI_SQL_AUTH_MODE=password override with no explicit
+    # YANDI_SQL_PASSWORD given (no default password exists, ever).
     if _auth_mode() == "auth_socket":
         # auth_socket needs no password, but IS meaningless without a
         # socket to connect over — never treat it as "configured" against
         # a bare host/port with no password (that would just be an
         # accidental anonymous-login attempt, not a deliberate choice).
-        return bool(os.environ.get("YANDI_SQL_SOCKET"))
+        # In practice _socket() always resolves to a non-empty value
+        # (default or explicit) — this check stays real, not vacuous,
+        # for the rare case a caller explicitly sets an empty override.
+        return bool(_socket())
     return bool(os.environ.get("YANDI_SQL_PASSWORD"))
 
 
@@ -78,11 +141,11 @@ def _config() -> dict:
     return {
         "host": os.environ.get("YANDI_SQL_HOST", "127.0.0.1"),
         "port": int(os.environ.get("YANDI_SQL_PORT", "3306")),
-        "user": os.environ.get("YANDI_SQL_USER", ""),
+        "user": _user(),
         "password": os.environ.get("YANDI_SQL_PASSWORD", ""),
         "database": os.environ.get("YANDI_SQL_DATABASE", "yandi_epistemic"),
         "connect_timeout": int(os.environ.get("YANDI_SQL_CONNECT_TIMEOUT", "3")),
-        "socket": os.environ.get("YANDI_SQL_SOCKET", ""),
+        "socket": _socket(),
         "auth_mode": _auth_mode(),
     }
 
@@ -102,17 +165,22 @@ def get_connection(autocommit: bool = False):
             f"YANDI_SQL_AUTH_MODE={_auth_mode()!r} is not recognized — expected "
             f"'password' or 'auth_socket'. Refusing to guess."
         )
-    if _auth_mode() == "auth_socket" and not os.environ.get("YANDI_SQL_SOCKET"):
+    if _auth_mode() == "auth_socket" and not _socket():
+        # _socket() always resolves to the canonical dedicated-appliance
+        # default unless a caller explicitly overrides it to something
+        # empty — this stays a real, reachable error path for that case,
+        # not dead code.
         raise SqlUnavailable(
-            "YANDI_SQL_AUTH_MODE=auth_socket requires YANDI_SQL_SOCKET to also be "
-            "set — auth_socket authenticates by Unix peer credentials, which only "
-            "exist over a Unix socket connection, never over TCP."
+            "YANDI_SQL_AUTH_MODE=auth_socket requires a socket path (default "
+            f"{_DEFAULT_SOCKET!r}, or an explicit YANDI_SQL_SOCKET) — auth_socket "
+            "authenticates by Unix peer credentials, which only exist over a Unix "
+            "socket connection, never over TCP."
         )
     if not is_configured():
         raise SqlUnavailable(
-            "YANDI_SQL_USER/YANDI_SQL_PASSWORD (or YANDI_SQL_SOCKET with "
-            "YANDI_SQL_AUTH_MODE=auth_socket) not set in the environment — "
-            "SQL layer is not configured, not a connection failure."
+            "YANDI_SQL_AUTH_MODE=password requires an explicit YANDI_SQL_PASSWORD "
+            "(no default password exists for password mode) — SQL layer is not "
+            "configured, not a connection failure."
         )
 
     try:

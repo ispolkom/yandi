@@ -315,10 +315,21 @@ check(
 
 
 # ============================================================
-# F. Fail-open — SQL genuinely unconfigured (real environment state).
+# F. Fail-open — SQL endpoint genuinely unreachable (forced,
+# deterministic — DATABASE BOOTSTRAP V1's canonical defaults mean
+# is_configured() is True out of the box now).
 # ============================================================
 
-check("F precondition: SQL layer genuinely unconfigured", sqlconn.is_configured() is False)
+_forced_unreachable = patch.dict(
+    "os.environ", {"YANDI_SQL_SOCKET": "/nonexistent/recheck-event-shadow-test/mysql.sock"},
+)
+_forced_unreachable.start()
+
+check(
+    "F precondition: SQL layer resolves canonical defaults (is_configured()=True) but "
+    "the forced socket path is genuinely unreachable",
+    sqlconn.is_configured() is True,
+)
 
 graph_f = _tmp_graph()
 bm_f = _tmp_belief_manager()
@@ -337,13 +348,15 @@ except Exception:
     no_raise = False
 _restore()
 
-check("F: apply_dependency_recheck never raises with no SQL configured", no_raise)
+check("F: apply_dependency_recheck never raises with SQL endpoint unreachable", no_raise)
 check(
     "F: its real (JSON-side) behavior is unaffected — recheck still performed, "
     "JSON recheck_log still updated",
     no_raise and stats_f["rechecks_performed"] == 1 and "fam_F" in graph_f.recheck_log,
     f"{stats_f if no_raise else None}",
 )
+
+_forced_unreachable.stop()
 
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")

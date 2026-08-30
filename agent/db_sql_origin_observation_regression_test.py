@@ -213,18 +213,25 @@ check(
 
 
 # ============================================================
-# C. Fail-open — SQL genuinely unconfigured, unaffected.
+# C. Fail-open — SQL endpoint genuinely unreachable (forced,
+# deterministic — DATABASE BOOTSTRAP V1's canonical defaults mean
+# is_configured() is True out of the box now).
 # ============================================================
 
-check("C precondition: SQL layer genuinely unconfigured", sqlconn.is_configured() is False)
-try:
-    sw.shadow_record_claims_and_evidence(
-        run_id="run_x", claims_data=claims_replay, evidence_data=evidence_replay, log=_noop_log, verbose=True,
+with patch.dict("os.environ", {"YANDI_SQL_SOCKET": "/nonexistent/origin-observation-test/mysql.sock"}):
+    check(
+        "C precondition: SQL layer resolves canonical defaults (is_configured()=True) "
+        "but the forced socket path is genuinely unreachable",
+        sqlconn.is_configured() is True,
     )
-    no_raise = True
-except Exception:
-    no_raise = False
-check("C: shadow_record_claims_and_evidence never raises with no DB configured", no_raise)
+    try:
+        sw.shadow_record_claims_and_evidence(
+            run_id="run_x", claims_data=claims_replay, evidence_data=evidence_replay, log=_noop_log, verbose=True,
+        )
+        no_raise = True
+    except Exception:
+        no_raise = False
+    check("C: shadow_record_claims_and_evidence never raises with SQL endpoint unreachable", no_raise)
 
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")

@@ -230,12 +230,24 @@ check(
 )
 
 # ============================================================
-# C. Fail-open with no DB configured (real current environment state).
+# C. Fail-open with SQL endpoint genuinely unreachable (forced,
+# deterministic — DATABASE BOOTSTRAP V1's canonical defaults mean
+# is_configured() is True out of the box now; forcing unreachability
+# also prevents this suite from ever writing test rows into a real
+# live dedicated DB on a host where one happens to be reachable).
+# Stopped at the very end of the file (also covers D/E below, which
+# would otherwise attempt real shadow writes too).
 # ============================================================
 
+_forced_unreachable = patch.dict(
+    "os.environ", {"YANDI_SQL_SOCKET": "/nonexistent/claims-evidence-shadow-test/mysql.sock"},
+)
+_forced_unreachable.start()
+
 check(
-    "C precondition: SQL layer genuinely unconfigured",
-    sqlconn.is_configured() is False,
+    "C precondition: SQL layer resolves canonical defaults (is_configured()=True) but "
+    "the forced socket path is genuinely unreachable",
+    sqlconn.is_configured() is True,
 )
 try:
     sw.shadow_record_claims_and_evidence(
@@ -244,7 +256,7 @@ try:
     no_raise = True
 except Exception as e:
     no_raise = False
-check("C: shadow_record_claims_and_evidence never raises with no DB configured", no_raise)
+check("C: shadow_record_claims_and_evidence never raises with SQL endpoint unreachable", no_raise)
 
 # ============================================================
 # D. No mutation of caller data.
@@ -293,6 +305,8 @@ check(
     len(trace.claims) == 1 and trace.claims[0].claim_id == "cl_e1",
     f"{[c.claim_id for c in trace.claims]}",
 )
+
+_forced_unreachable.stop()
 
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")
