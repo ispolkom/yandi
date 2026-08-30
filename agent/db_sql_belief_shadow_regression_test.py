@@ -232,20 +232,27 @@ check("B (decay): history insert has change_type='decayed' for the aged belief",
 
 
 # ============================================================
-# C. Fail-open — SQL genuinely unconfigured (real environment state).
+# C. Fail-open — SQL endpoint genuinely unreachable (forced,
+# deterministic — DATABASE BOOTSTRAP V1's canonical defaults mean
+# is_configured() is True out of the box now).
 # ============================================================
 
-check("C precondition: SQL layer genuinely unconfigured", sqlconn.is_configured() is False)
+with patch.dict("os.environ", {"YANDI_SQL_SOCKET": "/nonexistent/belief-shadow-test/mysql.sock"}):
+    check(
+        "C precondition: SQL layer resolves canonical defaults (is_configured()=True) "
+        "but the forced socket path is genuinely unreachable",
+        sqlconn.is_configured() is True,
+    )
 
-storage_c = Path(tempfile.mkdtemp(prefix="p5_beliefshadow_c_")) / "beliefs.json"
-bm_c = bm_mod.BeliefManager(storage_file=storage_c)
-try:
-    b_c = bm_c.add_belief(topic="t", statement="s", confidence=0.5)
-    bm_c.challenge_belief(belief_id=b_c.id, counter_evidence="e", new_confidence=0.3, reason="r")
-    no_raise = True
-except Exception as e:
-    no_raise = False
-check("C: BeliefManager's normal JSON behavior is unaffected with no SQL configured", no_raise)
+    storage_c = Path(tempfile.mkdtemp(prefix="p5_beliefshadow_c_")) / "beliefs.json"
+    bm_c = bm_mod.BeliefManager(storage_file=storage_c)
+    try:
+        b_c = bm_c.add_belief(topic="t", statement="s", confidence=0.5)
+        bm_c.challenge_belief(belief_id=b_c.id, counter_evidence="e", new_confidence=0.3, reason="r")
+        no_raise = True
+    except Exception as e:
+        no_raise = False
+    check("C: BeliefManager's normal JSON behavior is unaffected with SQL endpoint unreachable", no_raise)
 
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")

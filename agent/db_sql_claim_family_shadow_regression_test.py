@@ -248,29 +248,35 @@ check(
 
 
 # ============================================================
-# D. Fail-open — SQL genuinely unconfigured (real environment state,
-# not simulated).
+# D. Fail-open — SQL endpoint genuinely unreachable (forced,
+# deterministic — DATABASE BOOTSTRAP V1's canonical defaults mean
+# is_configured() is True out of the box now).
 # ============================================================
 
-check("D precondition: SQL layer genuinely unconfigured", sqlconn.is_configured() is False)
+with patch.dict("os.environ", {"YANDI_SQL_SOCKET": "/nonexistent/claim-family-shadow-test/mysql.sock"}):
+    check(
+        "D precondition: SQL layer resolves canonical defaults (is_configured()=True) "
+        "but the forced socket path is genuinely unreachable",
+        sqlconn.is_configured() is True,
+    )
 
-registry_d = _isolated_registry()
-claims_d = [{"claim_id": "cl_fs_d1", "claim_text": "Совершенно другое отдельное утверждение про тесты."}]
-with patch.object(lifecycle_mod, "get_claim_family_registry", lambda: registry_d):
-    try:
-        lifecycle_mod.assign_claim_family_identity(
-            claims_d, _FakeEpistemicResult(), False, {}, _noop_log, False,
-        )
-        no_raise = True
-    except Exception as e:
-        no_raise = False
+    registry_d = _isolated_registry()
+    claims_d = [{"claim_id": "cl_fs_d1", "claim_text": "Совершенно другое отдельное утверждение про тесты."}]
+    with patch.object(lifecycle_mod, "get_claim_family_registry", lambda: registry_d):
+        try:
+            lifecycle_mod.assign_claim_family_identity(
+                claims_d, _FakeEpistemicResult(), False, {}, _noop_log, False,
+            )
+            no_raise = True
+        except Exception as e:
+            no_raise = False
 
-check("D: assign_claim_family_identity() never raises with no DB configured", no_raise)
-check(
-    "D: semantic_family_id assignment (JSON path) still works with SQL unconfigured",
-    claims_d[0].get("semantic_family_id") is not None,
-    f"{claims_d[0]}",
-)
+    check("D: assign_claim_family_identity() never raises with SQL endpoint unreachable", no_raise)
+    check(
+        "D: semantic_family_id assignment (JSON path) still works with SQL endpoint unreachable",
+        claims_d[0].get("semantic_family_id") is not None,
+        f"{claims_d[0]}",
+    )
 
 
 # ============================================================

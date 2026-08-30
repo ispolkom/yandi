@@ -219,9 +219,18 @@ try:
     _reset_env()
     os.environ["YANDI_SQL_USER"] = "yandi_runtime"
     os.environ["YANDI_SQL_AUTH_MODE"] = "auth_socket"
-    # No YANDI_SQL_SOCKET set — auth_socket without a socket path is a
-    # configuration error, not a silent downgrade to password/TCP.
-    check("D: is_configured() is False for auth_socket mode with NO socket path set", not conn_mod.is_configured())
+    os.environ["YANDI_SQL_SOCKET"] = ""
+    # DATABASE BOOTSTRAP V1 (seventeenth Phase B attempt): YANDI_SQL_SOCKET
+    # now has a canonical default (/run/yandi/mysql/mysql.sock) — leaving
+    # it UNSET is no longer "no socket path", it resolves the dedicated
+    # appliance's own socket. The only way to genuinely reach "no socket
+    # path" is an EXPLICIT empty override, exercised here.
+    check(
+        "D: is_configured() is False for auth_socket mode with an EXPLICIT empty "
+        "socket override (the one way to genuinely reach 'no socket path' now that "
+        "an unset YANDI_SQL_SOCKET resolves the canonical dedicated default instead)",
+        not conn_mod.is_configured(),
+    )
 
     raised = False
     try:
@@ -229,14 +238,21 @@ try:
             pass
     except conn_mod.SqlUnavailable:
         raised = True
-    check("D: get_connection() raises SqlUnavailable (not silently trying TCP) for auth_socket with no socket path", raised)
+    check("D: get_connection() raises SqlUnavailable (not silently trying TCP) for auth_socket with an explicitly empty socket path", raised)
 
     _reset_env()
     os.environ["YANDI_SQL_USER"] = "yandi_runtime"
     os.environ["YANDI_SQL_PASSWORD"] = "some-password"
+    os.environ["YANDI_SQL_AUTH_MODE"] = "password"
     os.environ["YANDI_SQL_SOCKET"] = "/run/yandi/mysql.sock"
     # Password mode over a socket (not auth_socket) is also valid —
-    # migrator/readonly roles may use this.
+    # migrator/readonly roles may use this. AUTH_MODE must now be set
+    # EXPLICITLY to "password": since auth_socket is the canonical
+    # default, USER+PASSWORD+SOCKET alone (no AUTH_MODE) would otherwise
+    # resolve to auth_socket mode and silently blank the password —
+    # deliberate (the safer default posture requires explicit opt-in for
+    # password auth), not a regression; this test exercises the correct,
+    # explicit way to get password-over-socket.
     fake_pymysql2 = MagicMock()
     fake_pymysql2.cursors.DictCursor = object
     with patch.dict("sys.modules", {"pymysql": fake_pymysql2, "pymysql.cursors": fake_pymysql2.cursors}):
@@ -252,8 +268,13 @@ try:
     _reset_env()
     os.environ["YANDI_SQL_USER"] = "yandi_runtime"
     os.environ["YANDI_SQL_PASSWORD"] = "some-password"
-    # No socket at all -> falls back to the original TCP host/port path,
-    # UNCHANGED behavior for every existing shadow-write caller.
+    os.environ["YANDI_SQL_AUTH_MODE"] = "password"
+    # No YANDI_SQL_SOCKET set at all -> DATABASE BOOTSTRAP V1's canonical
+    # default socket is now used even in explicit password mode (this
+    # dedicated instance has NO TCP listener at all — every one of its
+    # accounts, auth_socket or password, is socket-only) — the OLD
+    # "falls back to TCP host/port" behavior is exactly what this fix
+    # replaced; see connection.py's own module docstring.
     fake_pymysql3 = MagicMock()
     fake_pymysql3.cursors.DictCursor = object
     with patch.dict("sys.modules", {"pymysql": fake_pymysql3, "pymysql.cursors": fake_pymysql3.cursors}):
@@ -261,9 +282,12 @@ try:
             pass
     _, kwargs3 = fake_pymysql3.connect.call_args
     check(
-        "D: with no YANDI_SQL_SOCKET set at all, host/port are used and unix_socket= "
-        "is NOT passed (existing TCP behavior is completely unchanged)",
-        "unix_socket" not in kwargs3 and kwargs3.get("host") == "127.0.0.1" and kwargs3.get("port") == 3306,
+        "D: with no YANDI_SQL_SOCKET set at all, the canonical dedicated default "
+        "socket is used (unix_socket=/run/yandi/mysql/mysql.sock) — host/port are "
+        "NOT used, matching the 'no TCP fallback, ever' guarantee",
+        kwargs3.get("unix_socket") == conn_mod._DEFAULT_SOCKET
+        and "host" not in kwargs3 and "port" not in kwargs3,
+        f"{kwargs3}",
     )
 finally:
     _reset_env()

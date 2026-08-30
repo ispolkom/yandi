@@ -104,10 +104,21 @@ check(
 
 import agent.db.sql.connection as sqlconn
 
+# DATABASE BOOTSTRAP V1: canonical defaults now make is_configured()
+# True out of the box — force the resolved SOCKET to something that
+# cannot exist so the SQL layer stays genuinely (and deterministically)
+# unreachable for the rest of this file, regardless of which host runs
+# the suite. Stopped at the very end of the file.
+_forced_unreachable = patch.dict(
+    "os.environ", {"YANDI_SQL_SOCKET": "/nonexistent/wiring-regression-test/mysql.sock"},
+)
+_forced_unreachable.start()
+
 check(
-    "C precondition: SQL layer genuinely unconfigured (this proves the wiring is inert "
-    "in the real current environment, not just in a mocked one)",
-    sqlconn.is_configured() is False,
+    "C precondition: SQL layer resolves canonical defaults (is_configured()=True) but "
+    "the forced socket path is genuinely unreachable — this proves the wiring is inert "
+    "when the endpoint can't be reached, not just when a mock says so",
+    sqlconn.is_configured() is True,
 )
 
 
@@ -193,6 +204,8 @@ check(
     bool(resp_d.answer),
     f"{resp_d}",
 )
+
+_forced_unreachable.stop()
 
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")

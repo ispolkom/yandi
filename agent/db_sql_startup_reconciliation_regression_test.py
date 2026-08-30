@@ -116,20 +116,29 @@ check(
 
 
 # ============================================================
-# C. Fail-open — SQL genuinely unconfigured (real environment state,
-# not simulated) — starting the app must not raise.
+# C. Fail-open — SQL endpoint genuinely unreachable (forced,
+# deterministic — DATABASE BOOTSTRAP V1's canonical defaults mean
+# is_configured() is True out of the box now, so "unconfigured" is no
+# longer the ambient state to rely on; force unreachability explicitly
+# instead so this stays true regardless of which host runs the suite)
+# — starting the app must not raise.
 # ============================================================
 
-check("C precondition: SQL layer genuinely unconfigured", sqlconn.is_configured() is False)
+with patch.dict("os.environ", {"YANDI_SQL_SOCKET": "/nonexistent/startup-reconciliation-test/mysql.sock"}):
+    check(
+        "C precondition: SQL layer resolves canonical defaults (is_configured()=True) "
+        "but the forced socket path is genuinely unreachable",
+        sqlconn.is_configured() is True,
+    )
 
-try:
-    from starlette.testclient import TestClient as _TC2
-    with _TC2(ccs.app):
-        pass
-    no_raise = True
-except Exception as e:
-    no_raise = False
-check("C: app startup does not raise with no SQL configured (real fail-open, not mocked)", no_raise)
+    try:
+        from starlette.testclient import TestClient as _TC2
+        with _TC2(ccs.app):
+            pass
+        no_raise = True
+    except Exception as e:
+        no_raise = False
+    check("C: app startup does not raise with SQL endpoint unreachable (real fail-open, not mocked)", no_raise)
 
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")
