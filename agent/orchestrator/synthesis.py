@@ -142,7 +142,23 @@ def build_frame_and_synthesize(
     # ---- СКАНИРОВАНИЕ ОПРОВЕРЖЕНИЙ (если есть) ----
     refutation_snippets = []
     _prof_refutation_t0 = time.time()
-    if "refutation_queries" in query_frame and query_frame["refutation_queries"]:
+    prefetched_refutation_result = query_frame.get("_prefetched_refutation_result")
+    if prefetched_refutation_result is not None:
+        log("[Refutation] Используем prefetched counter scrape...")
+        if getattr(prefetched_refutation_result, "snippets", None):
+            refutation_snippets = getattr(prefetched_refutation_result, "snippets", [])
+            log(f"[Refutation] Найдено опровержений: {len(refutation_snippets)}")
+            for snippet in refutation_snippets[:3]:
+                trace.add_source(
+                    url=getattr(snippet, "url", ""),
+                    domain=getattr(snippet, "url", "").split("/")[2] if "/" in getattr(snippet, "url", "") else "",
+                    domain_score=0.6,
+                    freshness=0.5,
+                    authority=0.4,
+                    used=False,
+                    rejected_reason="refutation"
+                )
+    elif "refutation_queries" in query_frame and query_frame["refutation_queries"]:
         log("[Refutation] Сканирование опровержений...")
         try:
             # P4 (web budget 3+3): stage 6 counter/refutation side now
@@ -309,6 +325,7 @@ def build_frame_and_synthesize(
     cost["profile_local_wait_ms"] = (
         time.time() - _prof_local_wait_t0
     ) * 1000
+    cost["acq_local_finish_ms"] = (time.time() - cost.get("_t_start", time.time())) * 1000
 
     query_frame["local_answer"] = local_answer
     log(f"[Local] Ответ готов (длина: {len(local_answer)})")

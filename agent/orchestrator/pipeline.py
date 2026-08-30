@@ -59,7 +59,6 @@ import concurrent.futures
 import threading
 import time
 import uuid
-from functools import partial
 from typing import Any, Dict, Optional
 
 from agent.orch_schemas import (
@@ -78,7 +77,12 @@ from agent.orch_clarifier import ClarificationSession
 from agent.orch_enricher import enrich_query
 from agent.orch_registry_search import search_registry, CONF_THRESHOLD
 from agent.orch_web_query import formulate_queries, formulate_refutation_queries
-from agent.orch_web_scraper import SharedFetchCache, scrape_budgeted_side, STAGE6_MAIN_BUDGET
+from agent.orch_web_scraper import (
+    SharedFetchCache,
+    scrape_budgeted_side,
+    STAGE6_MAIN_BUDGET,
+    STAGE6_COUNTER_BUDGET,
+)
 from agent.orch_timeout import step_timer
 from agent.orch_reputation import add_decision_event
 from agent.epistemic_router import (
@@ -176,6 +180,8 @@ def run_standard_pipeline(
     is_subjective_answer,
     enrich_result,
 ):
+    cost["_t_start"] = t_start
+
     # ── [0] Cache check ────────────────────────────────────────────────────
     log("[0] Cache check...")
     t0 = time.time()
@@ -733,31 +739,35 @@ def run_standard_pipeline(
             max_workers=4
         )
 
+        cost["acq_registry_start_ms"] = (time.time() - t_start) * 1000
         registry_future = parallel_executor.submit(
             search_registry,
             enrich_result.enriched,
         )
 
-        web_future = (
-            parallel_executor.submit(
+        wq_result = None
+        web_dt = 0.0
+        refutation_result = None
+
+        web_future = None
+        if enable_web:
+            cost["acq_web_query_start_ms"] = (time.time() - t_start) * 1000
+            web_future = parallel_executor.submit(
                 formulate_queries,
                 enrich_result,
             )
-            if enable_web
-            else None
-        )
 
-        refutation_future = (
-            parallel_executor.submit(
+        refutation_future = None
+        if enable_web:
+            cost["acq_refutation_query_start_ms"] = (time.time() - t_start) * 1000
+            refutation_future = parallel_executor.submit(
                 formulate_refutation_queries,
                 enrich_result,
             )
-            if enable_web
-            else None
-        )
 
         log("[Local] Фоновая генерация независимого ответа...")
 
+        cost["acq_local_start_ms"] = (time.time() - t_start) * 1000
         local_future = parallel_executor.submit(
             generate_local_answer,
             query_to_use,
@@ -771,6 +781,7 @@ def run_standard_pipeline(
             "local_search",
             lambda: registry_future.result(timeout=30),
         )
+        cost["acq_registry_finish_ms"] = (time.time() - t_start) * 1000
 
         # ------------------------------------------------------------
         # WEB QUERY RESULT
@@ -782,6 +793,7 @@ def run_standard_pipeline(
                 "web_query",
                 lambda: web_future.result(timeout=30),
             )
+            cost["acq_web_query_finish_ms"] = (time.time() - t_start) * 1000
 
             if wq_timed_out or wq_result is None:
                 log(
@@ -801,6 +813,7 @@ def run_standard_pipeline(
                 refutation_result = refutation_future.result(
                     timeout=30
                 )
+                cost["acq_refutation_query_finish_ms"] = (time.time() - t_start) * 1000
 
                 log(
                     f"[Refutation] Найдено опровержений: "
@@ -870,7 +883,6 @@ def run_standard_pipeline(
         web_result = None
         web_used = False
         web_skipped_reason = ""
-        wq_result = None
         rejected_sources = []
 
         should_use_web = (
@@ -891,7 +903,8 @@ def run_standard_pipeline(
         if should_use_web:
             log("[7] Web search...")
             t0 = time.time()
-            wq_result, dt, timed_out = step_timer("web_query", lambda: formulate_queries(enrich_result))
+            dt = web_dt
+            timed_out = wq_timed_out
             registry.update_latency("web_query", dt)
 
             if not timed_out and wq_result:
@@ -907,19 +920,54 @@ def run_standard_pipeline(
                 # scrape_budgeted_side() docstring for why this is a
                 # standalone call rather than sharing one function
                 # with the counter/refutation call in synthesis.py).
+                cost["acq_web_main_start_ms"] = (time.time() - t_start) * 1000
+                main_scrape_future = parallel_executor.submit(
+                    scrape_budgeted_side,
+                    wq_result.queries[:3],
+                    STAGE6_MAIN_BUDGET,
+                    fetch_cache=_request_fetch_cache,
+                    side="main",
+                    scope="initial",
+                )
+                counter_scrape_future = None
+                if query_frame.get("refutation_queries"):
+                    cost["acq_web_counter_start_ms"] = (time.time() - t_start) * 1000
+                    counter_scrape_future = parallel_executor.submit(
+                        scrape_budgeted_side,
+                        query_frame["refutation_queries"],
+                        STAGE6_COUNTER_BUDGET,
+                        fetch_cache=_request_fetch_cache,
+                        side="counter",
+                        scope="initial",
+                    )
+
                 web_result, dt, timed_out = step_timer(
                     "web_scrape",
-                    partial(
-                        scrape_budgeted_side,
-                        wq_result.queries[:3],
-                        STAGE6_MAIN_BUDGET,
-                        fetch_cache=_request_fetch_cache,
-                        side="main",
-                        scope="initial",
-                    ),
+                    lambda: main_scrape_future.result(timeout=30),
                 )
                 cost["web_ms"] = (time.time() - t0) * 1000
+                cost["acq_web_main_wait_finish_ms"] = (time.time() - t_start) * 1000
                 registry.update_latency("web_scrape", dt)
+
+                if counter_scrape_future:
+                    _counter_t0 = time.time()
+                    refutation_scrape_result, dt_ref, timed_out_ref = step_timer(
+                        "refutation_scrape",
+                        lambda: counter_scrape_future.result(timeout=30),
+                        timeout=30,
+                    )
+                    cost["profile_refutation_ms"] = (
+                        time.time() - _counter_t0
+                    ) * 1000
+                    cost["acq_web_counter_wait_finish_ms"] = (time.time() - t_start) * 1000
+                    if not timed_out_ref and refutation_scrape_result:
+                        query_frame["_prefetched_refutation_result"] = refutation_scrape_result
+                        query_frame["_prefetched_refutation_dt"] = dt_ref
+                        if getattr(refutation_scrape_result, "snippets", None):
+                            log(
+                                f"[Refutation] prefetched snippets: "
+                                f"{len(refutation_scrape_result.snippets)}"
+                            )
 
                 if web_result:
                     web_used = True

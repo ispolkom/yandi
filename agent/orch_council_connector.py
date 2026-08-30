@@ -32,7 +32,7 @@ def _ask_council_http(question: str, models: list[str] | None = None) -> str:
     s = _get_session()
     resp = s.post(
         f"{COUNCIL_SERVER}/api/council/broadcast",
-        json={"text": question},
+        json={"text": question, "models": models},
         timeout=10,
     )
     resp.raise_for_status()
@@ -69,6 +69,8 @@ def _collect_responses_redis(
                 continue
             sender = data.get("from", "")
             text   = data.get("text", "")
+            if data.get("task_id") != task_id:
+                continue
             if sender in models and sender not in collected and text:
                 collected[sender] = text
     finally:

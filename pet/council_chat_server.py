@@ -2540,6 +2540,7 @@ async def ext_result(payload: dict):
         "ts":        datetime.now().strftime("%H:%M"),
         "_ts":       datetime.now().timestamp(),
         "id":        str(uuid.uuid4()),
+        "task_id":   task_id,
         "turn_next": turn_next,
     }
     await r.lpush(MESSAGES_KEY, json.dumps(msg)); await r.ltrim(MESSAGES_KEY, 0, MAX_MESSAGES - 1)
@@ -2895,6 +2896,11 @@ async def council_broadcast(payload: dict):
     text = (payload.get("text") or "").strip()
     if not text:
         return {"ok": False}
+    requested_models = payload.get("models")
+    if requested_models is not None:
+        requested = {str(m) for m in requested_models if str(m) in _ext_queues}
+    else:
+        requested = None
     msg_id = str(uuid.uuid4())
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
     msg = {
@@ -2909,6 +2915,8 @@ async def council_broadcast(payload: dict):
     await r.aclose()
     await broadcast(msg)
     active = _active_models()
+    if requested is not None:
+        active = [m for m in active if m in requested]
     _relay_ctx[msg_id] = {"text": text, "broadcast": True, "pending": set(active)}
     for model in active:
         try:
