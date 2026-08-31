@@ -780,6 +780,7 @@ def run_standard_pipeline(
             )
 
         external_ai_future = None
+        external_ai_deadline_s = 45.0
         if enable_validation:
             cost["acq_external_ai_start_ms"] = (time.time() - t_start) * 1000
             external_ai_future = parallel_executor.submit(
@@ -788,7 +789,7 @@ def run_standard_pipeline(
                 ["gpt", "deepseek", "claude", "kimi"],
                 request_id=trace_id,
                 provider_timeout_s=90.0,
-                overall_deadline_s=45.0,
+                overall_deadline_s=external_ai_deadline_s,
             )
 
         cost["acq_node_start_ms"] = (time.time() - t_start) * 1000
@@ -881,38 +882,6 @@ def run_standard_pipeline(
                     f"[Refutation] Ошибка: "
                     f"{type(e).__name__}: {e}"
                 )
-
-        if external_ai_future:
-            try:
-                external_ai_observations, external_ai_submit = external_ai_future.result(timeout=50)
-                cost["acq_external_ai_finish_ms"] = (time.time() - t_start) * 1000
-                query_frame["external_ai_observations"] = [
-                    _serialize_acquisition_observation(obs)
-                    for obs in external_ai_observations
-                ]
-                query_frame["external_ai_submit"] = external_ai_submit
-                trace.add_observation("external_ai_observations", query_frame["external_ai_observations"])
-                for obs in external_ai_observations:
-                    if obs.provider:
-                        prefix = f"ai_{obs.provider}"
-                        cost[f"{prefix}_status"] = obs.status.value
-                        if obs.started_at:
-                            cost[f"{prefix}_start_ms"] = (obs.started_at - t_start) * 1000
-                        if obs.finished_at:
-                            cost[f"{prefix}_finish_ms"] = (obs.finished_at - t_start) * 1000
-                        if obs.started_at and obs.finished_at:
-                            cost[f"{prefix}_duration_ms"] = (obs.finished_at - obs.started_at) * 1000
-                    persist_acquisition_observation(obs, run_id=trace_id)
-                log(
-                    "[External AI] raw observations: "
-                    + ", ".join(
-                        f"{obs.provider}={obs.status.value}/len={len(obs.raw_response or '')}"
-                        for obs in external_ai_observations
-                    )
-                )
-            except Exception as e:
-                cost["acq_external_ai_finish_ms"] = (time.time() - t_start) * 1000
-                log(f"[External AI] raw acquisition unavailable: {type(e).__name__}: {e}")
 
         try:
             node_payload = node_future.result(timeout=1)
@@ -1112,6 +1081,40 @@ def run_standard_pipeline(
 
         trace.add_execution("web_search", "used" if web_used else "skipped",
                             cost.get("web_ms", 0), {"used": web_used, "reason": web_skipped_reason})
+
+        if external_ai_future:
+            try:
+                external_ai_started_at = t_start + cost["acq_external_ai_start_ms"] / 1000
+                wait_timeout = max(0.0, external_ai_started_at + external_ai_deadline_s - time.time())
+                external_ai_observations, external_ai_submit = external_ai_future.result(timeout=wait_timeout + 1.0)
+                cost["acq_external_ai_finish_ms"] = (time.time() - t_start) * 1000
+                query_frame["external_ai_observations"] = [
+                    _serialize_acquisition_observation(obs)
+                    for obs in external_ai_observations
+                ]
+                query_frame["external_ai_submit"] = external_ai_submit
+                trace.add_observation("external_ai_observations", query_frame["external_ai_observations"])
+                for obs in external_ai_observations:
+                    if obs.provider:
+                        prefix = f"ai_{obs.provider}"
+                        cost[f"{prefix}_status"] = obs.status.value
+                        if obs.started_at:
+                            cost[f"{prefix}_start_ms"] = (obs.started_at - t_start) * 1000
+                        if obs.finished_at:
+                            cost[f"{prefix}_finish_ms"] = (obs.finished_at - t_start) * 1000
+                        if obs.started_at and obs.finished_at:
+                            cost[f"{prefix}_duration_ms"] = (obs.finished_at - obs.started_at) * 1000
+                    persist_acquisition_observation(obs, run_id=trace_id)
+                log(
+                    "[External AI] raw observations: "
+                    + ", ".join(
+                        f"{obs.provider}={obs.status.value}/len={len(obs.raw_response or '')}"
+                        for obs in external_ai_observations
+                    )
+                )
+            except Exception as e:
+                cost["acq_external_ai_finish_ms"] = (time.time() - t_start) * 1000
+                log(f"[External AI] raw acquisition unavailable: {type(e).__name__}: {e}")
 
         add_decision_event(
             event_type="ExecutionStep",

@@ -7,7 +7,9 @@ AcquisitionObservation objects; no verdict/Trust/consensus is computed here.
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import time
+import uuid
 from typing import Dict, Iterable, List, Optional
 
 import requests
@@ -21,6 +23,42 @@ from agent.acquisition import (
 
 PET_URL = "http://127.0.0.1:9010"
 DEFAULT_PROVIDERS = ["gpt", "deepseek", "claude", "kimi"]
+
+
+def build_external_ai_prompt(question: str, request_id: str = "") -> str:
+    """Prompt external browser models for raw observations, not verdicts."""
+    marker = f"YANDI_REQUEST_ID: {request_id}" if request_id else ""
+    marker_block = (
+        f"В первой строке ответа ОБЯЗАТЕЛЬНО повтори ровно:\n{marker}\n\n"
+        if marker else ""
+    )
+    return f"""{marker_block}Ответь по существу вопроса.
+
+Вопрос:
+{question}
+
+Верни raw observation для YANDI, не canonical verdict.
+
+Требования:
+- Для каждого существенного утверждения отличай собственный анализ/мнение модели от утверждения, основанного на источнике.
+- Если опираешься на источники, перечисли конкретные источники.
+- По возможности дай прямые URL и укажи, какое утверждение поддерживает каждый источник.
+- Не выдумывай ссылки и не называй своё внутреннее знание источником.
+- Если точный источник неизвестен или ты не можешь его проверить, прямо скажи об этом.
+- Не делай вывод о Truth, Trust, consensus, support/contradiction или canonical answer для YANDI.
+
+Желательный формат:
+ANSWER:
+...
+
+BASIS:
+OWN_ANALYSIS | SOURCES | MIXED
+
+SOURCES:
+- title/url — supports: ...
+
+UNCERTAINTIES:
+..."""
 
 
 def _session() -> requests.Session:
@@ -37,11 +75,16 @@ def submit_raw_provider_request(
     timeout_s: float = 90.0,
     pet_url: str = PET_URL,
 ) -> Dict:
+    request_id = (request_id or str(uuid.uuid4())).strip()
+    request_marker = f"YANDI_REQUEST_ID: {request_id}"
+    raw_prompt = build_external_ai_prompt(prompt, request_id=request_id)
     s = _session()
     r = s.post(
         f"{pet_url}/api/acquisition/raw/submit",
         json={
-            "prompt": prompt,
+            "prompt": raw_prompt,
+            "prompt_identity": hashlib.sha256(raw_prompt.encode("utf-8")).hexdigest(),
+            "request_marker": request_marker,
             "providers": list(providers or DEFAULT_PROVIDERS),
             "request_id": request_id,
             "timeout_s": timeout_s,
@@ -85,6 +128,13 @@ def wait_raw_provider_result(
         r.raise_for_status()
         data = r.json()
         status = data.get("status", "")
+        if status != "PENDING":
+            if data.get("request_id") != request_id or data.get("provider") != provider:
+                time.sleep(poll_s)
+                continue
+            if task_id and data.get("task_id") != task_id:
+                time.sleep(poll_s)
+                continue
         if status in {
             "COMPLETED",
             "ERROR",

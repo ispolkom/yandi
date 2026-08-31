@@ -33,6 +33,13 @@ const MODELS = {
   "kimi":     ["kimi.com", "www.kimi.com"],
 };
 
+const MODEL_URLS = {
+  "claude":   "https://claude.ai/",
+  "gpt":      "https://chatgpt.com/",
+  "deepseek": "https://chat.deepseek.com/",
+  "kimi":     "https://www.kimi.com/",
+};
+
 // busy разделён по каналам: council и orch — но вкладка одна, поэтому deepseek_orch
 // ждёт пока deepseek освободится
 const busy = {};
@@ -52,6 +59,29 @@ async function findTab(model) {
   const domains = MODELS[model];
   const tabs = await browser.tabs.query({});
   return tabs.find(t => domains.some(d => (t.url || "").includes(d)));
+}
+
+async function waitForTabComplete(tabId, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const tab = await browser.tabs.get(tabId);
+      if (tab && tab.status === "complete") return true;
+    } catch (_) {
+      return false;
+    }
+    await sleep(250);
+  }
+  return false;
+}
+
+async function openIsolatedTab(model) {
+  const url = MODEL_URLS[model];
+  if (!url) return null;
+  const tab = await browser.tabs.create({ url, active: false });
+  await waitForTabComplete(tab.id);
+  await sleep(1200);
+  return tab;
 }
 
 // ── Канал 1: Council-чат ──────────────────────────────────────────────────────
@@ -80,14 +110,21 @@ async function pollModel(model) {
 
 async function handleTask(model, task) {
   const { task_id, text } = task;
-  const myTab = await findTab(model);
+  const rawAcquisition = task && task.raw_acquisition === true;
+  const myTab = rawAcquisition ? await openIsolatedTab(model) : await findTab(model);
   if (!myTab) {
     console.warn(`[Council Bridge] вкладка ${model} не найдена`);
     return;
   }
   let responseText;
   try {
-    const r = await browser.tabs.sendMessage(myTab.id, { action: "send", text });
+    const r = await browser.tabs.sendMessage(myTab.id, {
+      action: "send",
+      text,
+      task_id,
+      request_id: task.request_id || "",
+      raw_acquisition: rawAcquisition,
+    });
     responseText = r?.text || "[нет ответа]";
   } catch (e) {
     responseText = `[ошибка ${model}: ${e.message}]`;

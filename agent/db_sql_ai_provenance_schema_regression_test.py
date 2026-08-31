@@ -1,15 +1,7 @@
 """
-agent/db_sql_ai_provenance_schema_regression_test.py — Этап 5 (SQL
-persistence migration) regression: AI SELF-REPORTED PROVENANCE schema
-stub (agent/db/sql/schema.py's AI_OBSERVATION/AI_REPORTED_SOURCE).
-
-SCOPE OF THIS COMMIT, exactly as instructed — schema only:
-    NOT built: any AI-chat transport (no Claude/Gemini/ChatGPT/DeepSeek/
-    Qwen API calls), no browser automation, no AI_CHAT route activation,
-    no Trust changes, no independence counting, no repository/shadow-
-    write functions for these two tables. Pure static DDL analysis,
-    same technique as agent/db_sql_schema_regression_test.py — no DB
-    connection needed or used.
+agent/db_sql_ai_provenance_schema_regression_test.py — SQL persistence
+migration regression: AI SELF-REPORTED PROVENANCE schema + minimal
+reported-only repository/shadow write path.
 
 INSPECT CONCLUSION this suite encodes: the EXISTING SOURCE_RESOURCE/
 SOURCE_OBSERVATION model does NOT support this without breaking its own
@@ -37,10 +29,9 @@ Covers:
        belong to any single YANDI verification run).
     F. the required architectural comment is present verbatim: "SELF-
        REPORTED PROVENANCE IS AN OBSERVATION, NOT VERIFIED PROVENANCE."
-    G. NO implementation exists yet: zero references to either table
-       anywhere in repositories.py or shadow_write.py — proves this is
-       genuinely a schema-only architectural stub, not a silently
-       half-built subsystem.
+    G. minimal implementation exists: repository/shadow functions write
+       ai_observation/ai_reported_source only, never source_resource or
+       evidence_relation for reported sources.
     H. both tables are structurally append-only — no "current"/"latest"/
        mutable-state-shaped column on either.
 
@@ -160,20 +151,30 @@ check(
 )
 
 # ============================================================
-# G. NO implementation exists yet — schema-only stub, proven honestly.
+# G. Minimal implementation exists, still reported-only.
 # ============================================================
 
 _repo_src = inspect.getsource(repo_mod)
 _sw_src = inspect.getsource(sw_mod)
 check(
-    "G: zero references to ai_observation/ai_reported_source in repositories.py "
-    "(no write/read functions built yet — schema-only stub, as instructed)",
-    "ai_observation" not in _repo_src and "ai_reported_source" not in _repo_src,
+    "G: repositories.py has a minimal ai_observation writer",
+    "def record_ai_observation(" in _repo_src,
 )
 check(
-    "G: zero references to ai_observation/ai_reported_source in shadow_write.py "
-    "(no shadow-write wiring built yet — schema-only stub, as instructed)",
-    "ai_observation" not in _sw_src and "ai_reported_source" not in _sw_src,
+    "G: repositories.py has a minimal ai_reported_source writer",
+    "def record_ai_reported_source(" in _repo_src,
+)
+check(
+    "G: shadow_write.py exposes reported-only AI observation shadow writer",
+    "def shadow_record_ai_observation(" in _sw_src,
+)
+check(
+    "G: shadow AI writer does not create verified source_resource rows",
+    "get_or_create_resource" not in _sw_src.split("def shadow_record_ai_observation(", 1)[1],
+)
+check(
+    "G: shadow AI writer does not create evidence_relation rows",
+    "record_evidence_relation" not in _sw_src.split("def shadow_record_ai_observation(", 1)[1],
 )
 
 # ============================================================

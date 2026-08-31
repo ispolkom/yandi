@@ -7,7 +7,9 @@ truth, support/contradiction, consensus, or canonical answers.
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -205,14 +207,37 @@ def persist_acquisition_observation(
     *,
     run_id: str = "",
     answer_finalized_at: Optional[float] = None,
-) -> Path:
+) -> Optional[Path]:
     """
-    Append a raw acquisition observation for later recheck/reflection.
+    Persist a raw acquisition observation for later recheck/reflection.
 
-    This is deliberately outside answer_version/answer_assessment: a late
-    arrival must not rewrite the delivered answer or canonical Trust.
+    Production persistence goes to the existing SQL AI observation tables.
+    JSONL is an explicit debug export only, never operational state.
     """
     obs = apply_late_observation_policy(observation, answer_finalized_at)
+    try:
+        from agent.db.sql.shadow_write import shadow_record_ai_observation
+        prompt_identity = (obs.raw_payload or {}).get("prompt_identity")
+        if not prompt_identity and obs.request_id:
+            prompt_identity = hashlib.sha256(obs.request_id.encode("utf-8")).hexdigest()
+        shadow_record_ai_observation(
+            run_id=run_id or None,
+            provider=obs.provider or obs.channel,
+            model_id=obs.provider or "unknown",
+            prompt_identity=prompt_identity,
+            answer_excerpt=(obs.raw_response or "")[:2000],
+            reported_sources=obs.raw_citations_or_links,
+            observed_at=obs.finished_at or obs.started_at,
+            provenance_mode_reported="UNKNOWN",
+            live_search_used_reported="UNKNOWN",
+            provenance_parse_status="missing",
+        )
+    except Exception:
+        pass
+
+    if os.environ.get("YANDI_ACQUISITION_DEBUG_JSONL") != "1":
+        return None
+
     ACQUISITION_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
     path = ACQUISITION_EVENTS_DIR / f"{time.strftime('%Y%m%d')}.jsonl"
     row = {

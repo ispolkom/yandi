@@ -48,10 +48,44 @@ RAW_TASK_PFX = "council:raw:task:"
 RAW_RESULT_PFX = "council:raw:result:"
 RAW_RESULT_BY_REQUEST_PFX = "council:raw:result_by_request:"
 RAW_TTL = 900
+ORCH_AI_TASK_MAX_AGE = 600
 
 _HERE        = Path(__file__).parent
 CONFIG_FILE  = _HERE / "council_config.json"
 REGISTRY_DIR = _HERE.parent / "registry" / "council"
+
+
+def _is_raw_acquisition_task_id(task_id: str) -> bool:
+    parts = str(task_id or "").split(":")
+    return (
+        len(parts) >= 3
+        and parts[-2] in RELAY_CHAIN
+        and len(parts[-1]) == 8
+        and all(c in "0123456789abcdef" for c in parts[-1].lower())
+    )
+
+
+def _visible_council_messages(messages: list[dict]) -> list[dict]:
+    """Hide raw acquisition transport records from the human Council UI.
+
+    Old server versions wrote raw browser-acquisition results into
+    council:inet:messages. Do not delete that Redis history here; just
+    stop treating those transport artifacts as chat messages.
+    """
+    return [
+        msg for msg in messages
+        if not _is_raw_acquisition_task_id(str(msg.get("task_id", "")))
+    ]
+
+
+def _loads_visible_messages(raw: list[str]) -> list[dict]:
+    messages = []
+    for item in raw:
+        try:
+            messages.append(json.loads(item))
+        except Exception:
+            pass
+    return _visible_council_messages(messages)
 
 app = FastAPI()
 app.add_middleware(
@@ -150,7 +184,7 @@ _ext_queues: dict[str, asyncio.Queue] = {
 _relay_ctx: dict[str, dict] = {}
 
 
-def _raw_status_from_text(text: str) -> tuple[str, list[str]]:
+def _raw_status_from_text(text: str, request_marker: str = "") -> tuple[str, list[str]]:
     low = (text or "").lower()
     if "[timeout" in low:
         return "TIMEOUT", ["provider content script timed out"]
@@ -158,6 +192,8 @@ def _raw_status_from_text(text: str) -> tuple[str, list[str]]:
         return "AUTH_REQUIRED", ["provider input was not available; auth/session may be required"]
     if low.startswith("[ошибка") or low.startswith("[error"):
         return "ERROR", [text[:300]]
+    if request_marker and request_marker not in text:
+        return "ERROR", ["response missing request marker; possible stale provider context"]
     return "COMPLETED", []
 
 
@@ -219,12 +255,7 @@ async def _inet_collect_responses():
     responses = {}
     question = ""
     question_idx = None
-    parsed = []
-    for line in raw:
-        try:
-            parsed.append(json.loads(line))
-        except Exception:
-            parsed.append({})
+    parsed = _loads_visible_messages(raw)
 
     for i, m in enumerate(parsed):
         if m.get("from") == "human":
@@ -2176,7 +2207,7 @@ async def ws_endpoint(websocket: WebSocket, client_id: str):
 
     # send orch history on connect (default tab)
     raw   = await r.lrange(ORCH_MSGS_KEY, 0, 99)
-    hist  = [json.loads(m) for m in reversed(raw)]
+    hist  = _loads_visible_messages(list(reversed(raw)))
     turn  = await r.get(TURN_KEY) or "human"
     await websocket.send_json({"type": "history", "tab": "orch", "messages": hist, "turn": turn})
 
@@ -2395,7 +2426,7 @@ async def inet_history():
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
     raw = await r.lrange(INET_MSGS_KEY, 0, MAX_MESSAGES - 1)
     await r.aclose()
-    return {"messages": [json.loads(m) for m in reversed(raw)]}
+    return {"messages": _loads_visible_messages(list(reversed(raw)))}
 
 @app.post("/api/inet/clear")
 async def inet_clear():
@@ -2459,7 +2490,7 @@ async def api_bootstrap():
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
     raw = await r.lrange(MESSAGES_KEY, 0, 49)
     await r.aclose()
-    messages = [json.loads(m) for m in reversed(raw)]
+    messages = _loads_visible_messages(list(reversed(raw)))
     return {"bootstrap": _build_bootstrap(messages)}
 
 
@@ -2468,7 +2499,7 @@ async def api_export():
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
     raw = await r.lrange(MESSAGES_KEY, 0, MAX_MESSAGES - 1)
     await r.aclose()
-    messages = [json.loads(m) for m in reversed(raw)]
+    messages = _loads_visible_messages(list(reversed(raw)))
 
     REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
@@ -2529,35 +2560,7 @@ async def ext_result(payload: dict):
     if not text:
         return {"ok": False}
 
-    text = await _localize(text, from_who)
-
-    # Heartbeat: фиксируем время последнего отклика модели
-    if from_who in _model_last_seen:
-        _model_last_seen[from_who] = _time.time()
-
-    # Обновляем счётчики токенов
-    if from_who in _tokens:
-        _tokens[from_who]["sent"] += int(payload.get("tokens_sent", 0))
-        _tokens[from_who]["recv"] += int(payload.get("tokens_recv", 0))
-        await broadcast({"type": "tokens", "tokens": _tokens, "limits": TOKEN_LIMITS})
-
-    # Записываем сообщение — turn_next по RELAY_CHAIN, последний → human
-    try:
-        _idx = RELAY_CHAIN.index(from_who)
-        turn_next = RELAY_CHAIN[_idx + 1] if _idx + 1 < len(RELAY_CHAIN) else "human"
-    except ValueError:
-        turn_next = "human"
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
-    msg = {
-        "type":      "message",
-        "from":      from_who,
-        "text":      text,
-        "ts":        datetime.now().strftime("%H:%M"),
-        "_ts":       datetime.now().timestamp(),
-        "id":        str(uuid.uuid4()),
-        "task_id":   task_id,
-        "turn_next": turn_next,
-    }
     raw_task_raw = await r.get(f"{RAW_TASK_PFX}{task_id}") if task_id else None
     if raw_task_raw:
         try:
@@ -2565,7 +2568,7 @@ async def ext_result(payload: dict):
         except Exception:
             raw_task = {}
         if raw_task.get("provider") == from_who:
-            status, errors = _raw_status_from_text(text)
+            status, errors = _raw_status_from_text(text, raw_task.get("request_marker", ""))
             started_at = float(raw_task.get("started_at") or _time.time())
             raw_result = {
                 "request_id": raw_task.get("request_id", ""),
@@ -2574,6 +2577,8 @@ async def ext_result(payload: dict):
                 "status": status,
                 "started_at": started_at,
                 "finished_at": _time.time(),
+                "prompt_identity": raw_task.get("prompt_identity", ""),
+                "request_marker": raw_task.get("request_marker", ""),
                 "raw_response": text,
                 "reported_links": [],
                 "transport_metadata": {
@@ -2594,6 +2599,37 @@ async def ext_result(payload: dict):
                 encoded,
             )
             await r.setex(f"council:relay:result:{task_id}", RAW_TTL, text)
+            await r.aclose()
+            return {"ok": True, "raw_acquisition": True, "status": status}
+
+    text = await _localize(text, from_who)
+
+    # Heartbeat: фиксируем время последнего отклика модели
+    if from_who in _model_last_seen:
+        _model_last_seen[from_who] = _time.time()
+
+    # Обновляем счётчики токенов
+    if from_who in _tokens:
+        _tokens[from_who]["sent"] += int(payload.get("tokens_sent", 0))
+        _tokens[from_who]["recv"] += int(payload.get("tokens_recv", 0))
+        await broadcast({"type": "tokens", "tokens": _tokens, "limits": TOKEN_LIMITS})
+
+    # Записываем сообщение — turn_next по RELAY_CHAIN, последний → human
+    try:
+        _idx = RELAY_CHAIN.index(from_who)
+        turn_next = RELAY_CHAIN[_idx + 1] if _idx + 1 < len(RELAY_CHAIN) else "human"
+    except ValueError:
+        turn_next = "human"
+    msg = {
+        "type":      "message",
+        "from":      from_who,
+        "text":      text,
+        "ts":        datetime.now().strftime("%H:%M"),
+        "_ts":       datetime.now().timestamp(),
+        "id":        str(uuid.uuid4()),
+        "task_id":   task_id,
+        "turn_next": turn_next,
+    }
     await r.lpush(MESSAGES_KEY, json.dumps(msg)); await r.ltrim(MESSAGES_KEY, 0, MAX_MESSAGES - 1)
     await r.set(TURN_KEY, turn_next)
     write_log(msg)
@@ -2664,14 +2700,21 @@ async def orch_ai_poll(model: str = "deepseek"):
     if model != "deepseek":
         return {}
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
-    raws = await r.lrange("orch:ai:queue", 0, -1); raw = raws[0] if raws else None
-    await r.aclose()
-    if not raw:
-        return {}
     try:
-        return json.loads(raw)
-    except Exception:
-        return {}
+        while True:
+            raw = await r.lpop("orch:ai:queue")
+            if not raw:
+                return {}
+            try:
+                task = json.loads(raw)
+            except Exception:
+                continue
+            ts = float(task.get("ts") or 0.0)
+            if ts and (__import__("time").time() - ts) > ORCH_AI_TASK_MAX_AGE:
+                continue
+            return task
+    finally:
+        await r.aclose()
 
 
 @app.post("/api/ext/orch/result")
@@ -2767,6 +2810,8 @@ async def acquisition_raw_submit(payload: dict):
 
     request_id = (payload.get("request_id") or str(uuid.uuid4())).strip()
     timeout_s = float(payload.get("timeout_s") or 90.0)
+    prompt_identity = (payload.get("prompt_identity") or "").strip()
+    request_marker = (payload.get("request_marker") or "").strip()
     requested = payload.get("providers") or RELAY_CHAIN
     requested = [str(m) for m in requested if str(m) in _ext_queues]
     active = set(_active_models())
@@ -2792,6 +2837,8 @@ async def acquisition_raw_submit(payload: dict):
                 "status": status,
                 "started_at": now,
                 "timeout_s": timeout_s,
+                "prompt_identity": prompt_identity,
+                "request_marker": request_marker,
                 "domain": MODELS_URLS.get(model, ""),
             }
             providers[model] = task
@@ -2816,6 +2863,8 @@ async def acquisition_raw_submit(payload: dict):
                     "status": providers[model]["status"],
                     "started_at": now,
                     "finished_at": now,
+                    "prompt_identity": prompt_identity,
+                    "request_marker": request_marker,
                     "raw_response": "",
                     "reported_links": [],
                     "transport_metadata": {
@@ -3206,7 +3255,7 @@ async def save_dataset(payload: dict):
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
     raw = await r.lrange(MESSAGES_KEY, 0, MAX_MESSAGES - 1)
     await r.aclose()
-    messages = [json.loads(m) for m in reversed(raw)]
+    messages = _loads_visible_messages(list(reversed(raw)))
 
     # ── Extract Q&A pairs ──────────────────────────────────────────────────────
     human_msgs   = [m for m in messages if m.get("from") == "human"]

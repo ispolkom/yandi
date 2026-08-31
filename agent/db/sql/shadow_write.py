@@ -381,3 +381,51 @@ def shadow_record_evidence(
         )
 
     _shadow(log, verbose, "record_evidence", _do)
+
+
+def shadow_record_ai_observation(
+    *, run_id: Optional[str], provider: str, model_id: str,
+    prompt_identity: Optional[str], answer_excerpt: Optional[str],
+    reported_sources: Optional[list] = None,
+    observed_at=None,
+    provenance_mode_reported: str = "UNKNOWN",
+    live_search_used_reported: str = "UNKNOWN",
+    provenance_parse_status: str = "missing",
+    log=None, verbose: bool = False,
+) -> Optional[int]:
+    """Persist a raw external-AI utterance as reported provenance only.
+
+    This writes AI_OBSERVATION / AI_REPORTED_SOURCE, never
+    SOURCE_RESOURCE / EVIDENCE_RELATION; reported URLs are not verified
+    provenance roots until the agent resolves them later.
+    """
+    def _do(conn):
+        obs_id = repo.record_ai_observation(
+            conn,
+            provider=provider,
+            model_id=model_id,
+            run_id=run_id,
+            prompt_identity=prompt_identity,
+            answer_excerpt=answer_excerpt,
+            provenance_mode_reported=provenance_mode_reported,
+            live_search_used_reported=live_search_used_reported,
+            provenance_parse_status=provenance_parse_status,
+            observed_at=observed_at,
+        )
+        for idx, source in enumerate(reported_sources or [], 1):
+            if isinstance(source, dict):
+                reported_name = source.get("title") or source.get("name")
+                reported_uri = source.get("url") or source.get("uri")
+            else:
+                reported_name = None
+                reported_uri = str(source)
+            repo.record_ai_reported_source(
+                conn,
+                obs_id,
+                idx,
+                reported_name,
+                reported_uri,
+            )
+        return obs_id
+
+    return _shadow(log, verbose, "record_ai_observation", _do)
