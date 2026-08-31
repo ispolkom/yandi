@@ -7,8 +7,11 @@ Run:
 from __future__ import annotations
 
 import time
+import tempfile
 from pathlib import Path
 
+import agent.acquisition as acquisition
+import agent.external_ai_acquisition as external_ai
 from agent.acquisition import (
     AcquisitionCollector,
     AcquisitionRequest,
@@ -18,6 +21,7 @@ from agent.acquisition import (
     count_distinguishable_reported_roots,
     make_observation,
     network_node_stub,
+    persist_acquisition_observation,
 )
 
 
@@ -109,7 +113,7 @@ def test_raw_external_ai_result_does_not_become_canonical_trust():
 
 def test_three_models_reporting_same_url_count_as_one_reported_root():
     observations = []
-    for provider in ("gpt", "claude", "deepseek"):
+    for provider in ("gpt", "claude", "deepseek", "kimi"):
         req = AcquisitionRequest(channel="external_ai", prompt="q", provider=provider)
         observations.append(
             make_observation(
@@ -122,6 +126,153 @@ def test_three_models_reporting_same_url_count_as_one_reported_root():
         )
 
     assert count_distinguishable_reported_roots(observations) == 1
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class _FakeRawSession:
+    def __init__(self, statuses=None, delay=0.0):
+        self.statuses = statuses or {}
+        self.delay = delay
+
+    def post(self, _url, json, timeout):
+        request_id = json["request_id"] or "req"
+        providers = {}
+        for provider in json["providers"]:
+            providers[provider] = {
+                "request_id": request_id,
+                "task_id": f"{request_id}:{provider}:fake",
+                "provider": provider,
+                "status": "READY",
+                "started_at": time.time(),
+            }
+        return _FakeResponse({
+            "ok": True,
+            "request_id": request_id,
+            "providers": providers,
+            "transport": "council_bridge_extension",
+        })
+
+    def get(self, _url, params, timeout):
+        if self.delay:
+            time.sleep(self.delay)
+        provider = params["provider"]
+        status = self.statuses.get(provider, "COMPLETED")
+        raw = f"raw answer from {provider}" if status == "COMPLETED" else ""
+        return _FakeResponse({
+            "ok": status == "COMPLETED",
+            "request_id": params["request_id"],
+            "task_id": params["task_id"],
+            "provider": provider,
+            "status": status,
+            "started_at": time.time() - self.delay,
+            "finished_at": time.time(),
+            "raw_response": raw,
+            "reported_links": [],
+            "transport_metadata": {"provider": provider},
+            "errors": [] if status == "COMPLETED" else [status.lower()],
+        })
+
+
+def test_external_ai_provider_waits_are_parallel_not_serial():
+    old_session = external_ai._session
+    external_ai._session = lambda: _FakeRawSession(delay=1.0)
+    try:
+        started = time.time()
+        observations, submit = external_ai.acquire_external_ai_parallel(
+            "q",
+            ["gpt", "claude", "deepseek", "kimi"],
+            request_id="parallel_fake",
+            provider_timeout_s=5.0,
+            overall_deadline_s=5.0,
+            pet_url="http://fake",
+        )
+        elapsed = time.time() - started
+    finally:
+        external_ai._session = old_session
+
+    assert submit["request_id"] == "parallel_fake"
+    assert len(observations) == 4
+    assert elapsed < 2.2, f"elapsed={elapsed:.3f}s indicates serial provider waits"
+    assert {obs.status for obs in observations} == {AcquisitionStatus.COMPLETED}
+
+
+def test_external_ai_mixed_provider_statuses_do_not_drop_completed_result():
+    statuses = {
+        "gpt": "COMPLETED",
+        "claude": "TIMEOUT",
+        "deepseek": "AUTH_REQUIRED",
+        "kimi": "ERROR",
+    }
+    old_session = external_ai._session
+    external_ai._session = lambda: _FakeRawSession(statuses=statuses)
+    try:
+        observations, _submit = external_ai.acquire_external_ai_parallel(
+            "q",
+            ["gpt", "claude", "deepseek", "kimi"],
+            request_id="mixed_fake",
+            provider_timeout_s=5.0,
+            overall_deadline_s=5.0,
+            pet_url="http://fake",
+        )
+    finally:
+        external_ai._session = old_session
+
+    by_provider = {obs.provider: obs for obs in observations}
+    assert by_provider["gpt"].status == AcquisitionStatus.COMPLETED
+    assert by_provider["gpt"].raw_response == "raw answer from gpt"
+    assert by_provider["claude"].status == AcquisitionStatus.TIMEOUT
+    assert by_provider["deepseek"].status == AcquisitionStatus.AUTH_REQUIRED
+    assert by_provider["kimi"].status == AcquisitionStatus.ERROR
+
+
+def test_pet_raw_result_api_uses_strict_task_and_provider_correlation():
+    src = (BASE / "pet" / "council_chat_server.py").read_text(encoding="utf-8")
+
+    assert 'f"{RAW_RESULT_PFX}{task_id}:{provider}"' in src
+    assert "result.get(\"request_id\") == request_id" in src
+    assert "result.get(\"provider\") == provider" in src
+    assert "result.get(\"task_id\") == task_id" in src
+
+
+def test_late_external_ai_observation_is_persisted_without_answer_mutation():
+    old_dir = acquisition.ACQUISITION_EVENTS_DIR
+    acquisition.ACQUISITION_EVENTS_DIR = Path(tempfile.mkdtemp())
+    try:
+        req = AcquisitionRequest(
+            channel="external_ai",
+            prompt="q",
+            provider="claude",
+            request_id="late_req",
+        )
+        obs = make_observation(
+            req,
+            AcquisitionStatus.COMPLETED,
+            started_at=10.0,
+            finished_at=30.0,
+            raw_response="late answer",
+        )
+        path = persist_acquisition_observation(
+            obs,
+            run_id="run_late",
+            answer_finalized_at=20.0,
+        )
+        row = path.read_text(encoding="utf-8")
+    finally:
+        acquisition.ACQUISITION_EVENTS_DIR = old_dir
+
+    assert '"status": "LATE"' in row
+    assert '"finalized_answer_mutated": false' in row
+    assert '"run_id": "run_late"' in row
 
 
 def test_main_and_counter_channels_remain_separate_observations():
@@ -178,6 +329,8 @@ def test_pet_broadcast_is_model_scoped_and_result_messages_keep_task_id():
     assert '"task_id":   task_id' in src
     assert 'requested_models = payload.get("models")' in src
     assert "active = [m for m in active if m in requested]" in src
+    assert '@app.post("/api/acquisition/raw/submit")' in src
+    assert '@app.get("/api/acquisition/raw/result")' in src
 
 
 if __name__ == "__main__":
@@ -187,6 +340,10 @@ if __name__ == "__main__":
         test_late_observation_cannot_mutate_finalized_answer,
         test_raw_external_ai_result_does_not_become_canonical_trust,
         test_three_models_reporting_same_url_count_as_one_reported_root,
+        test_external_ai_provider_waits_are_parallel_not_serial,
+        test_external_ai_mixed_provider_statuses_do_not_drop_completed_result,
+        test_pet_raw_result_api_uses_strict_task_and_provider_correlation,
+        test_late_external_ai_observation_is_persisted_without_answer_mutation,
         test_main_and_counter_channels_remain_separate_observations,
         test_local_blind_answer_starts_before_external_result_is_available,
         test_network_node_stub_integrates_without_blocking,

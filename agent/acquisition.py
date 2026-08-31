@@ -7,11 +7,16 @@ truth, support/contradiction, consensus, or canonical answers.
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from enum import Enum
 from typing import Any, Callable, Dict, Iterable, List, Optional
+
+BASE = Path(__file__).resolve().parent.parent
+ACQUISITION_EVENTS_DIR = BASE / "registry" / "dataset" / "acquisition_observations"
 
 
 class AcquisitionStatus(str, Enum):
@@ -193,6 +198,41 @@ def apply_late_observation_policy(
         observation.status = AcquisitionStatus.LATE
         observation.finalized_answer_mutated = False
     return observation
+
+
+def persist_acquisition_observation(
+    observation: AcquisitionObservation,
+    *,
+    run_id: str = "",
+    answer_finalized_at: Optional[float] = None,
+) -> Path:
+    """
+    Append a raw acquisition observation for later recheck/reflection.
+
+    This is deliberately outside answer_version/answer_assessment: a late
+    arrival must not rewrite the delivered answer or canonical Trust.
+    """
+    obs = apply_late_observation_policy(observation, answer_finalized_at)
+    ACQUISITION_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = ACQUISITION_EVENTS_DIR / f"{time.strftime('%Y%m%d')}.jsonl"
+    row = {
+        "run_id": run_id,
+        "request_id": obs.request_id,
+        "channel": obs.channel,
+        "provider": obs.provider,
+        "status": obs.status.value,
+        "started_at": obs.started_at,
+        "finished_at": obs.finished_at,
+        "raw_response_excerpt": (obs.raw_response or "")[:2000],
+        "raw_citations_or_links": obs.raw_citations_or_links,
+        "transport_metadata": obs.transport_metadata,
+        "errors": obs.errors,
+        "answer_finalized_at": answer_finalized_at,
+        "finalized_answer_mutated": obs.finalized_answer_mutated,
+    }
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return path
 
 
 def count_distinguishable_reported_roots(observations: Iterable[AcquisitionObservation]) -> int:

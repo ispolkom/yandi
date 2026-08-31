@@ -44,6 +44,10 @@ from pet.shared import (
 
 STATUS_PFX = "council:chat:status:"
 TURN_KEY   = "council:chat:turn"
+RAW_TASK_PFX = "council:raw:task:"
+RAW_RESULT_PFX = "council:raw:result:"
+RAW_RESULT_BY_REQUEST_PFX = "council:raw:result_by_request:"
+RAW_TTL = 900
 
 _HERE        = Path(__file__).parent
 CONFIG_FILE  = _HERE / "council_config.json"
@@ -144,6 +148,17 @@ _ext_queues: dict[str, asyncio.Queue] = {
 }
 # Контекст relay-цепочки: task_id → {text, broadcast, claude_resp, gpt_resp}
 _relay_ctx: dict[str, dict] = {}
+
+
+def _raw_status_from_text(text: str) -> tuple[str, list[str]]:
+    low = (text or "").lower()
+    if "[timeout" in low:
+        return "TIMEOUT", ["provider content script timed out"]
+    if "поле ввода не найдено" in low or "input not found" in low:
+        return "AUTH_REQUIRED", ["provider input was not available; auth/session may be required"]
+    if low.startswith("[ошибка") or low.startswith("[error"):
+        return "ERROR", [text[:300]]
+    return "COMPLETED", []
 
 
 # ── relay helper ─────────────────────────────────────────────────────────────
@@ -2543,6 +2558,42 @@ async def ext_result(payload: dict):
         "task_id":   task_id,
         "turn_next": turn_next,
     }
+    raw_task_raw = await r.get(f"{RAW_TASK_PFX}{task_id}") if task_id else None
+    if raw_task_raw:
+        try:
+            raw_task = json.loads(raw_task_raw)
+        except Exception:
+            raw_task = {}
+        if raw_task.get("provider") == from_who:
+            status, errors = _raw_status_from_text(text)
+            started_at = float(raw_task.get("started_at") or _time.time())
+            raw_result = {
+                "request_id": raw_task.get("request_id", ""),
+                "task_id": task_id,
+                "provider": from_who,
+                "status": status,
+                "started_at": started_at,
+                "finished_at": _time.time(),
+                "raw_response": text,
+                "reported_links": [],
+                "transport_metadata": {
+                    "transport": "council_bridge_extension",
+                    "provider": from_who,
+                    "domain": raw_task.get("domain", ""),
+                    "completion_state": status.lower(),
+                    "tokens_sent": int(payload.get("tokens_sent", 0)),
+                    "tokens_recv": int(payload.get("tokens_recv", 0)),
+                },
+                "errors": errors,
+            }
+            encoded = json.dumps(raw_result, ensure_ascii=False)
+            await r.setex(f"{RAW_RESULT_PFX}{task_id}:{from_who}", RAW_TTL, encoded)
+            await r.setex(
+                f"{RAW_RESULT_BY_REQUEST_PFX}{raw_task.get('request_id', '')}:{from_who}",
+                RAW_TTL,
+                encoded,
+            )
+            await r.setex(f"council:relay:result:{task_id}", RAW_TTL, text)
     await r.lpush(MESSAGES_KEY, json.dumps(msg)); await r.ltrim(MESSAGES_KEY, 0, MAX_MESSAGES - 1)
     await r.set(TURN_KEY, turn_next)
     write_log(msg)
@@ -2701,6 +2752,139 @@ async def orch_ai_log(limit: int = 50):
 @app.get("/api/council/state")
 async def get_state():
     return _bridge_state.copy()
+
+
+@app.post("/api/acquisition/raw/submit")
+async def acquisition_raw_submit(payload: dict):
+    """Submit raw provider tasks to existing browser extension queues.
+
+    PET is transport only here: it returns request/task ids and provider
+    transport states, never an epistemic verdict.
+    """
+    prompt = (payload.get("prompt") or "").strip()
+    if not prompt:
+        return {"ok": False, "error": "prompt required"}
+
+    request_id = (payload.get("request_id") or str(uuid.uuid4())).strip()
+    timeout_s = float(payload.get("timeout_s") or 90.0)
+    requested = payload.get("providers") or RELAY_CHAIN
+    requested = [str(m) for m in requested if str(m) in _ext_queues]
+    active = set(_active_models())
+    now = _time.time()
+    providers = {}
+    r = aioredis.from_url(REDIS_URL, decode_responses=True)
+    try:
+        for model in requested:
+            task_id = f"{request_id}:{model}:{uuid.uuid4().hex[:8]}"
+            last = _model_last_seen.get(model, 0.0)
+            enabled = not _bridge_state.get(f"{model}_blocked")
+            if not enabled:
+                status = "DISABLED"
+            elif model not in active:
+                status = "TAB_MISSING"
+            else:
+                status = "STARTING"
+
+            task = {
+                "request_id": request_id,
+                "task_id": task_id,
+                "provider": model,
+                "status": status,
+                "started_at": now,
+                "timeout_s": timeout_s,
+                "domain": MODELS_URLS.get(model, ""),
+            }
+            providers[model] = task
+            await r.setex(f"{RAW_TASK_PFX}{task_id}", RAW_TTL, json.dumps(task, ensure_ascii=False))
+
+            if status == "STARTING":
+                try:
+                    _ext_queues[model].put_nowait({
+                        "task_id": task_id,
+                        "text": prompt,
+                        "request_id": request_id,
+                        "raw_acquisition": True,
+                    })
+                    providers[model]["status"] = "READY"
+                except asyncio.QueueFull:
+                    providers[model]["status"] = "BUSY"
+            if providers[model]["status"] != "READY":
+                result = {
+                    "request_id": request_id,
+                    "task_id": task_id,
+                    "provider": model,
+                    "status": providers[model]["status"],
+                    "started_at": now,
+                    "finished_at": now,
+                    "raw_response": "",
+                    "reported_links": [],
+                    "transport_metadata": {
+                        "transport": "council_bridge_extension",
+                        "provider": model,
+                        "domain": MODELS_URLS.get(model, ""),
+                        "last_seen_sec": round(now - last) if last else None,
+                        "enabled_by_user": enabled,
+                    },
+                    "errors": [] if enabled else ["provider disabled by user"],
+                }
+                encoded = json.dumps(result, ensure_ascii=False)
+                await r.setex(f"{RAW_RESULT_PFX}{task_id}:{model}", RAW_TTL, encoded)
+                await r.setex(f"{RAW_RESULT_BY_REQUEST_PFX}{request_id}:{model}", RAW_TTL, encoded)
+    finally:
+        await r.aclose()
+
+    return {
+        "ok": True,
+        "request_id": request_id,
+        "submitted_at": now,
+        "providers": providers,
+        "transport": "council_bridge_extension",
+    }
+
+
+@app.get("/api/acquisition/raw/result")
+async def acquisition_raw_result(request_id: str, provider: str, task_id: str = ""):
+    """Return one raw provider result by strict request/task/provider key."""
+    if provider not in _ext_queues:
+        return {"ok": False, "status": "ERROR", "errors": ["unknown provider"]}
+    if not request_id:
+        return {"ok": False, "status": "ERROR", "errors": ["request_id required"]}
+
+    r = aioredis.from_url(REDIS_URL, decode_responses=True)
+    try:
+        keys = []
+        if task_id:
+            keys.append(f"{RAW_RESULT_PFX}{task_id}:{provider}")
+        keys.append(f"{RAW_RESULT_BY_REQUEST_PFX}{request_id}:{provider}")
+        for key in keys:
+            raw = await r.get(key)
+            if not raw:
+                continue
+            try:
+                result = json.loads(raw)
+            except Exception:
+                continue
+            if (
+                result.get("request_id") == request_id
+                and result.get("provider") == provider
+                and (not task_id or result.get("task_id") == task_id)
+            ):
+                result["ok"] = result.get("status") == "COMPLETED"
+                return result
+    finally:
+        await r.aclose()
+
+    return {
+        "ok": False,
+        "request_id": request_id,
+        "task_id": task_id,
+        "provider": provider,
+        "status": "PENDING",
+        "raw_response": "",
+        "reported_links": [],
+        "transport_metadata": {"transport": "council_bridge_extension"},
+        "errors": [],
+    }
 
 
 @app.post("/api/council/state")

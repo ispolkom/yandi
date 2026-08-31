@@ -56,6 +56,7 @@ its own locals.
 """
 
 import concurrent.futures
+from dataclasses import asdict
 import threading
 import time
 import uuid
@@ -95,6 +96,19 @@ from agent.epistemic_router import (
 from agent.strategy_router import SearchStrategy
 from agent.orchestrator.epistemic.trust_gate import _apply_trust_cap
 from agent.orchestrator.response.assembly import _adapt_answer_to_style
+from agent.acquisition import (
+    AcquisitionRequest,
+    network_node_stub,
+    persist_acquisition_observation,
+)
+from agent.external_ai_acquisition import acquire_external_ai_parallel
+
+
+def _serialize_acquisition_observation(obs):
+    row = asdict(obs)
+    status = row.get("status")
+    row["status"] = getattr(status, "value", status)
+    return row
 
 
 def resolve_entity(query: str) -> Optional[Dict[str, Any]]:
@@ -736,7 +750,7 @@ def run_standard_pipeline(
         # третья ждёт свободный GPU-slot.
 
         parallel_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=4
+            max_workers=6
         )
 
         cost["acq_registry_start_ms"] = (time.time() - t_start) * 1000
@@ -764,6 +778,30 @@ def run_standard_pipeline(
                 formulate_refutation_queries,
                 enrich_result,
             )
+
+        external_ai_future = None
+        if enable_validation:
+            cost["acq_external_ai_start_ms"] = (time.time() - t_start) * 1000
+            external_ai_future = parallel_executor.submit(
+                acquire_external_ai_parallel,
+                query_to_use,
+                ["gpt", "deepseek", "claude", "kimi"],
+                request_id=trace_id,
+                provider_timeout_s=90.0,
+                overall_deadline_s=45.0,
+            )
+
+        cost["acq_node_start_ms"] = (time.time() - t_start) * 1000
+        node_future = parallel_executor.submit(
+            network_node_stub,
+            AcquisitionRequest(
+                channel="network_node",
+                prompt=query_to_use,
+                provider="stub",
+                request_id=trace_id,
+                enabled_by_user=False,
+            ),
+        )
 
         log("[Local] Фоновая генерация независимого ответа...")
 
@@ -843,6 +881,47 @@ def run_standard_pipeline(
                     f"[Refutation] Ошибка: "
                     f"{type(e).__name__}: {e}"
                 )
+
+        if external_ai_future:
+            try:
+                external_ai_observations, external_ai_submit = external_ai_future.result(timeout=50)
+                cost["acq_external_ai_finish_ms"] = (time.time() - t_start) * 1000
+                query_frame["external_ai_observations"] = [
+                    _serialize_acquisition_observation(obs)
+                    for obs in external_ai_observations
+                ]
+                query_frame["external_ai_submit"] = external_ai_submit
+                trace.add_observation("external_ai_observations", query_frame["external_ai_observations"])
+                for obs in external_ai_observations:
+                    if obs.provider:
+                        prefix = f"ai_{obs.provider}"
+                        cost[f"{prefix}_status"] = obs.status.value
+                        if obs.started_at:
+                            cost[f"{prefix}_start_ms"] = (obs.started_at - t_start) * 1000
+                        if obs.finished_at:
+                            cost[f"{prefix}_finish_ms"] = (obs.finished_at - t_start) * 1000
+                        if obs.started_at and obs.finished_at:
+                            cost[f"{prefix}_duration_ms"] = (obs.finished_at - obs.started_at) * 1000
+                    persist_acquisition_observation(obs, run_id=trace_id)
+                log(
+                    "[External AI] raw observations: "
+                    + ", ".join(
+                        f"{obs.provider}={obs.status.value}/len={len(obs.raw_response or '')}"
+                        for obs in external_ai_observations
+                    )
+                )
+            except Exception as e:
+                cost["acq_external_ai_finish_ms"] = (time.time() - t_start) * 1000
+                log(f"[External AI] raw acquisition unavailable: {type(e).__name__}: {e}")
+
+        try:
+            node_payload = node_future.result(timeout=1)
+            cost["acq_node_finish_ms"] = (time.time() - t_start) * 1000
+            query_frame["network_node_observation"] = node_payload
+            trace.add_observation("network_node_observation", node_payload)
+        except Exception as e:
+            cost["acq_node_finish_ms"] = (time.time() - t_start) * 1000
+            log(f"[Network Node] stub unavailable: {type(e).__name__}: {e}")
 
         # Старый timed_out ниже относится к registry.
         timed_out = registry_timed_out
