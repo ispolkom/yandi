@@ -367,6 +367,64 @@ def record_run_error(conn, run_id: str, failed_stage: str, error_class: str, sho
         )
 
 
+def record_ai_observation(
+    conn, provider: str, model_id: str, run_id: Optional[str],
+    prompt_identity: Optional[str], answer_excerpt: Optional[str],
+    provenance_mode_reported: str = "UNKNOWN",
+    live_search_used_reported: str = "UNKNOWN",
+    provenance_parse_status: str = "missing",
+    observed_at=None,
+) -> int:
+    observed_at = _coerce_datetime(observed_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO ai_observation "
+            "(provider, model_id, run_id, prompt_identity, answer_excerpt, "
+            " provenance_mode_reported, live_search_used_reported, provenance_parse_status, observed_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                provider, model_id, run_id, prompt_identity, answer_excerpt,
+                provenance_mode_reported, live_search_used_reported,
+                provenance_parse_status, observed_at,
+            ),
+        )
+        return cur.lastrowid
+
+
+def record_ai_reported_source(
+    conn, ai_observation_id: int, ordinal: Optional[int],
+    reported_name: Optional[str], reported_uri: Optional[str],
+) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO ai_reported_source "
+            "(ai_observation_id, ordinal, reported_name, reported_uri) "
+            "VALUES (%s,%s,%s,%s)",
+            (ai_observation_id, ordinal, reported_name, reported_uri),
+        )
+        return cur.lastrowid
+
+
+def get_ai_observations_for_run(conn, run_id: str) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT ai_observation_id, provider, model_id, run_id, prompt_identity, "
+            "answer_excerpt, provenance_mode_reported, live_search_used_reported, "
+            "provenance_parse_status, observed_at "
+            "FROM ai_observation WHERE run_id=%s ORDER BY ai_observation_id",
+            (run_id,),
+        )
+        observations = list(cur.fetchall())
+        for obs in observations:
+            cur.execute(
+                "SELECT ordinal, reported_name, reported_uri "
+                "FROM ai_reported_source WHERE ai_observation_id=%s ORDER BY ordinal, ai_reported_source_id",
+                (obs["ai_observation_id"],),
+            )
+            obs["reported_sources"] = list(cur.fetchall())
+        return observations
+
+
 def upsert_belief(
     conn, belief_id: str, topic: str, statement: str, confidence: float,
     status: str = "active", created_at=None, updated_at=None,

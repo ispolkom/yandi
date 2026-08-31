@@ -328,19 +328,9 @@ def run_optimistic_respond(
             log(f"  · Валидация пропущена для {epistemic_result.testability} утверждения")
             return
 
-        try:
-            from agent.ai_validator_redis import send_to_deepseek
-            ai_task_id = send_to_deepseek(
-                query=query_to_use,
-                answer=synthesis_result.answer,
-                frame={"epistemic": epistemic_result.__dict__},
-                sources=synthesis_result.sources,
-            )
-            query_frame["external_validation_performed"] = True
-            log(f"  · AI валидация отправлена в DeepSeek (ID: {ai_task_id})")
-        except Exception as e:
-            query_frame["external_validation_performed"] = False
-            log(f"  · Ошибка AI валидации: {e}")
+        query_frame["external_validation_performed"] = False
+        query_frame["legacy_deepseek_validation_skipped"] = True
+        log("  · Legacy DeepSeek browser validation skipped; raw external AI acquisition owns browser transport")
 
         t = threading.Thread(
             target=_background_validate,
