@@ -46,7 +46,7 @@ DESIGN NOTES (read before changing a table):
    no HTTP retry chatter. RUN_ERROR is 5 columns, not a log warehouse.
 """
 
-SCHEMA_VERSION = 2  # v2: + decision_event (append-only decision/reasoning ledger, in-DB)
+SCHEMA_VERSION = 3  # v3: + integrity_journal ("10-year bastion" Layer 4 tamper-evidence hash-chain)
 
 SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -724,6 +724,36 @@ CREATE TABLE IF NOT EXISTS decision_event (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
+# ── INTEGRITY_JOURNAL ────────────────────────────────────────────────────
+# "10-year bastion" Layer 4 (owner mandate: root can never be technically
+# excluded — SEE agent/integrity.py's own module docstring for that
+# argument in full — so the honest complement is TAMPER-EVIDENCE: any
+# out-of-band change to a chained row's content becomes cryptographically
+# detectable after the fact). A SHA-256 hash chain: each row commits to
+# the chained (table_name, row_pk)'s own content hash AND the previous
+# journal entry's entry_hash — breaking any single entry's stored value,
+# or deleting/reordering one, changes every entry_hash computed from that
+# point forward, which agent.integrity.verify_chain() recomputes and
+# compares against what is actually stored.
+#
+# Classified "B" below (not a new "E" class, despite this schema's own
+# older comment speculating about one): append-only, each row immutable
+# once written, is EXACTLY class B's definition — no new trigger/grant
+# code needed, immutability_triggers()'s existing class-A/B handling
+# covers this table for free.
+INTEGRITY_JOURNAL = """
+CREATE TABLE IF NOT EXISTS integrity_journal (
+    seq               BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+    table_name        VARCHAR(64) NOT NULL,     -- which chained table this entry covers, e.g. 'decision_event'
+    row_pk            VARCHAR(64) NOT NULL,     -- that table's own primary key value for the chained row
+    row_content_hash  CHAR(64) NOT NULL,        -- SHA-256 of the chained row's own canonical content
+    prev_hash         CHAR(64) NOT NULL,        -- entry_hash of the PREVIOUS row (agent.integrity.GENESIS_HASH for seq=1)
+    entry_hash        CHAR(64) NOT NULL UNIQUE, -- SHA-256(prev_hash|table_name|row_pk|row_content_hash|seq)
+    created_at        DATETIME NOT NULL,
+    KEY idx_ij_table_row (table_name, row_pk)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
 # ── INSTANCE_IDENTITY ────────────────────────────────────────────────────
 # DATABASE BOOTSTRAP V1, mandate §4. Classified "A" (canonical immutable
 # identity, TABLE_CLASSIFICATION's own definition: "one row per identity,
@@ -780,6 +810,7 @@ ALL_TABLES_IN_ORDER = [
     ("ai_reported_source", AI_REPORTED_SOURCE),
     ("run_error", RUN_ERROR),
     ("decision_event", DECISION_EVENT),
+    ("integrity_journal", INTEGRITY_JOURNAL),
     ("instance_identity", INSTANCE_IDENTITY),
 ]
 
@@ -811,8 +842,10 @@ _BANNED_TOKENS = ("is_true", "verified_truth", "absolute_truth", "truth_certific
 #       projection either — see verification_run's own justification in
 #       SECURITY_ARCHITECTURE.md §6 for why it stays D instead of being
 #       migrated to a class-B event log in this pass.
-#   E — security/crypto metadata (future: integrity_event, key_metadata
-#       — none exist as tables yet in this pass; reserved).
+#   E — security/crypto metadata: speculative reservation from an
+#       earlier pass, never actually needed — integrity_journal (Layer 4
+#       tamper-evidence, "10-year bastion") turned out to fit class B's
+#       own definition exactly, so it lives there instead.
 TABLE_CLASSIFICATION = {
     "schema_migrations": "A",
     "question": "A",
@@ -832,6 +865,7 @@ TABLE_CLASSIFICATION = {
     "ai_reported_source": "B",
     "run_error": "B",
     "decision_event": "B",
+    "integrity_journal": "B",
     "belief": "C",
     "semantic_edge": "C",
     "verification_run": "D",
