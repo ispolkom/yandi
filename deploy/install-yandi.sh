@@ -109,6 +109,15 @@ YANDI_VENV_PYTHON="/home/iam/venv/bin/python3"
 # to THIS name; create_os_identity() creates the account itself
 # (system account, no login shell, no password) if it doesn't exist.
 AGENT_OS_USER="yandi-agent"
+# SECURITY ("10-year bastion" Layer 3, owner mandate): the owner's own
+# personal OS login — YANDI_READONLY binds to THIS via auth_socket
+# instead of a stored password (mandate: "видеть трейсы, видеть
+# запрос" — the owner keeps read-only visibility, just never a
+# password file to leak). Deliberately the SAME account AGENT_OS_USER
+# used to be ("iam") — the point here is the OPPOSITE of AGENT_OS_USER's
+# separation: this is precisely the interactive human login, on
+# purpose, because this role is for the human.
+OWNER_OS_USER="iam"
 
 # Set by main()'s argument parsing — default OFF. See
 # reinitialize_empty_instance_guard() for the fail-closed conditions
@@ -462,15 +471,25 @@ reinitialize_empty_instance_guard() {
     [ "$SOCKET_PATH" = "/run/yandi/mysql/mysql.sock" ] || die "REFUSING --reinitialize-empty-instance: unexpected socket path '$SOCKET_PATH'."
 
     # 4. Canonical/production activation must NOT have happened yet.
-    #    live_bootstrap.py's run_bootstrap() only ever writes the
-    #    readonly/migrator secret files AFTER schema/roles/grants exist
-    #    — their presence is proof a prior Phase B run already
-    #    completed real persistence bootstrap. This flag must become
-    #    permanently unusable from that point on (mandate §8: never
-    #    leave "delete the database in one command" without a strong
-    #    guard) — no override, no --force, nothing supersedes this.
-    if [ -f "${SECRETS_DIR}/yandi_readonly.secret" ] || [ -f "${SECRETS_DIR}/yandi_migrator.secret" ]; then
-        die "REFUSING --reinitialize-empty-instance: found a readonly/migrator secret in $SECRETS_DIR — this proves a prior Phase B run already completed schema/role bootstrap (canonical activation). This flag may ONLY be used BEFORE that point. Manual, deliberate action is required from here — this installer will not do it automatically."
+    #    live_bootstrap.py's run() only ever writes phase_b_complete.
+    #    marker AFTER schema/roles/grants exist AND selfcheck passes —
+    #    its presence is proof a prior Phase B run already completed
+    #    real persistence bootstrap. This flag must become permanently
+    #    unusable from that point on (mandate §8: never leave "delete
+    #    the database in one command" without a strong guard) — no
+    #    override, no --force, nothing supersedes this.
+    #
+    #    NOTE ("10-year bastion" Layer 3): this guard used to check for
+    #    yandi_readonly.secret/yandi_migrator.secret instead — that
+    #    broke once YANDI_READONLY could bind via auth_socket (no
+    #    secret file at all) and YANDI_MIGRATOR stopped being
+    #    provisioned by default (ditto) — neither file is guaranteed to
+    #    exist anymore regardless of how thoroughly bootstrapped the
+    #    instance actually is. phase_b_complete.marker is written
+    #    unconditionally on success, independent of which auth mode any
+    #    individual role happens to use.
+    if [ -f "${SECRETS_DIR}/phase_b_complete.marker" ]; then
+        die "REFUSING --reinitialize-empty-instance: found ${SECRETS_DIR}/phase_b_complete.marker — this proves a prior Phase B run already completed schema/role bootstrap (canonical activation). This flag may ONLY be used BEFORE that point. Manual, deliberate action is required from here — this installer will not do it automatically."
     fi
 
     # 5. Storage state must be a CURRENT reading, not cached/hardcoded.
@@ -887,7 +906,8 @@ run_python_bootstrap() {
         --fresh-init-marker "$FRESH_INIT_MARKER" \
         --instance-id-file "$INSTANCE_ID_FILE" \
         --secrets-dir "$SECRETS_DIR" \
-        --agent-os-user "$AGENT_OS_USER"
+        --agent-os-user "$AGENT_OS_USER" \
+        --owner-os-user "$OWNER_OS_USER"
     log "DB-level bootstrap complete — see agent/db/sql/DEDICATED_INSTANCE_DESIGN.md §L and"
     log "SQL_DEPLOYMENT_DEFERRED.md for what still needs LIVE verification after this point"
     log "(TDE/keyring activation, full isolation proof, restart-persistence, production"

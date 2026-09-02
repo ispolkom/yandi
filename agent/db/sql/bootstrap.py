@@ -49,6 +49,7 @@ from agent.db.sql.security_grants import (
     DATABASE_NAME, revoke_all_statement,
     yandi_migrator_statements, yandi_readonly_statements, yandi_runtime_statements,
     yandi_runtime_auth_socket_statement, yandi_runtime_grant_statements,
+    yandi_readonly_auth_socket_statement, yandi_readonly_grant_statements,
 )
 from agent.db.sql.instance_identity import record_instance_identity
 from agent.db.sql.security_triggers import immutability_triggers
@@ -301,9 +302,11 @@ def revoke_bootstrap(conn, username: str, host: str) -> None:
 
 
 def run_bootstrap(
-    conn, *, readonly_password: str, migrator_password: str, runtime_password: str = "",
+    conn, *, readonly_password: str = "", migrator_password: str = "", runtime_password: str = "",
     runtime_host: str = "%", readonly_host: str = "localhost", migrator_host: str = "localhost",
     runtime_auth_socket_os_user: str = None,
+    readonly_auth_socket_os_user: str = None,
+    provision_migrator: bool = False,
     instance_uuid: str = None, instance_created_by_host: str = None,
 ) -> Dict[str, Any]:
     """The full flow, minus YANDI_BOOTSTRAP's own account creation —
@@ -327,6 +330,24 @@ def run_bootstrap(
     Leaving this None preserves the original password-only behavior
     exactly — existing callers/tests are unaffected.
 
+    `readonly_auth_socket_os_user` ("10-year bastion" Layer 3, owner
+    mandate): same idea as `runtime_auth_socket_os_user`, but for
+    YANDI_READONLY — bound to the OWNER's own personal OS login instead
+    of a stored password file. `readonly_password`/`readonly_host` are
+    then ignored entirely for that role. Leaving this None preserves
+    the original password-only behavior exactly.
+
+    `provision_migrator` ("10-year bastion" Layer 3, owner mandate: "мы
+    не root для базы" — no standing account should be able to change
+    the schema at will, not even under the owner's own login): defaults
+    to False — YANDI_MIGRATOR is NOT created. If an already-live
+    instance has one from a previous bootstrap (the old default), it is
+    DROPped instead (an account is trivially recreatable later for a
+    genuine one-time migration; leaving a stale standing schema-change
+    credential around is the actual risk). Passing True is the
+    deliberate, explicit break-glass path for that rare occasion —
+    `migrator_password` is then required.
+
     `instance_uuid` (mandate §4/§27): when given, also records the
     single instance_identity row via instance_identity.record_
     instance_identity() — idempotent (a second call with the SAME uuid
@@ -344,6 +365,17 @@ def run_bootstrap(
             "run_bootstrap() needs either runtime_password (password auth) or "
             "runtime_auth_socket_os_user (auth_socket auth) for YANDI_RUNTIME — "
             "refusing to create it with an empty password by omission."
+        )
+    if not readonly_auth_socket_os_user and not readonly_password:
+        raise ValueError(
+            "run_bootstrap() needs either readonly_password (password auth) or "
+            "readonly_auth_socket_os_user (auth_socket auth) for YANDI_READONLY — "
+            "refusing to create it with an empty password by omission."
+        )
+    if provision_migrator and not migrator_password:
+        raise ValueError(
+            "run_bootstrap() needs migrator_password when provision_migrator=True — "
+            "refusing to create YANDI_MIGRATOR with an empty password by omission."
         )
     ensure_database(conn)
     # apply_schema() MUST run before any ensure_role() call: YANDI_RUNTIME's
@@ -377,24 +409,60 @@ def run_bootstrap(
     else:
         actual_runtime_host = runtime_host
         ensure_role(conn, yandi_runtime_statements("yandi_runtime", runtime_host, runtime_password))
-    ensure_role(conn, yandi_readonly_statements("yandi_readonly", readonly_host, readonly_password))
-    ensure_role(conn, yandi_migrator_statements("yandi_migrator", migrator_host, migrator_password))
+
+    if readonly_auth_socket_os_user:
+        actual_readonly_host = "localhost"
+        # Same drift-detection reasoning as YANDI_RUNTIME above — an
+        # already-live yandi_readonly bound to a stale OS login (e.g.
+        # the owner's account was renamed) would otherwise stay
+        # mis-bound forever.
+        if user_exists(conn, "yandi_readonly", actual_readonly_host) and not auth_socket_binding_matches(
+            conn, "yandi_readonly", actual_readonly_host, readonly_auth_socket_os_user
+        ):
+            with conn.cursor() as cur:
+                cur.execute(*rebind_auth_socket_statement(
+                    "yandi_readonly", actual_readonly_host, readonly_auth_socket_os_user
+                ))
+        ensure_role(conn, [yandi_readonly_auth_socket_statement("yandi_readonly", readonly_auth_socket_os_user)]
+                    + yandi_readonly_grant_statements("yandi_readonly", actual_readonly_host))
+    else:
+        actual_readonly_host = readonly_host
+        ensure_role(conn, yandi_readonly_statements("yandi_readonly", readonly_host, readonly_password))
+
+    migrator_provisioned = False
+    if provision_migrator:
+        ensure_role(conn, yandi_migrator_statements("yandi_migrator", migrator_host, migrator_password))
+        migrator_provisioned = True
+    elif user_exists(conn, "yandi_migrator", migrator_host):
+        # "10-year bastion" Layer 3: no standing schema-change account —
+        # a previous bootstrap's yandi_migrator (the old default) is
+        # revoked here rather than left holding CREATE/ALTER/DROP
+        # forever with a password sitting in secrets_dir.
+        with conn.cursor() as cur:
+            cur.execute(*revoke_all_statement("yandi_migrator", migrator_host))
+
     triggers_created = apply_immutability_triggers(conn)
     if instance_uuid:
         record_instance_identity(conn, instance_uuid, created_by_host=instance_created_by_host)
+    role_principals = {
+        "runtime": ("yandi_runtime", actual_runtime_host),
+        "readonly": ("yandi_readonly", actual_readonly_host),
+    }
+    roles_ensured = ["yandi_runtime", "yandi_readonly"]
+    if migrator_provisioned:
+        role_principals["migrator"] = ("yandi_migrator", migrator_host)
+        roles_ensured.append("yandi_migrator")
     return {
         "database": DATABASE_NAME,
-        "roles_ensured": ["yandi_runtime", "yandi_readonly", "yandi_migrator"],
+        "roles_ensured": roles_ensured,
         "triggers_created": triggers_created,
         "runtime_auth_mode": "auth_socket" if runtime_auth_socket_os_user else "password",
+        "readonly_auth_mode": "auth_socket" if readonly_auth_socket_os_user else "password",
+        "migrator_provisioned": migrator_provisioned,
         # The EXACT (username, host) pairs just created — single source
         # of truth for any caller that needs to verify these specific
         # accounts' grants afterward (security_selfcheck.run_selfcheck()'s
         # role_principals=), rather than a caller re-deriving/hardcoding
         # the same host defaults a second time and risking drift.
-        "role_principals": {
-            "runtime": ("yandi_runtime", actual_runtime_host),
-            "readonly": ("yandi_readonly", readonly_host),
-            "migrator": ("yandi_migrator", migrator_host),
-        },
+        "role_principals": role_principals,
     }
