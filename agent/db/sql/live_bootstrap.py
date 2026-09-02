@@ -30,13 +30,26 @@ NOT work, this script fails LOUD (the exception propagates, install-
 yandi.sh's `set -e` aborts) rather than falling back to something
 unreviewed — see `_retire_temporary_root_password()`'s docstring.
 
-Auth strategy actually used (DEDICATED_INSTANCE_DESIGN.md §H):
+Auth strategy actually used (DEDICATED_INSTANCE_DESIGN.md §H, updated
+by "10-year bastion" Layer 3 — owner mandate: "мы не root для базы",
+no standing account should be able to change the schema at will, not
+even under the owner's own login):
     YANDI_RUNTIME  -> auth_socket, mapped to AGENT_OS_USER (no password
                       exists for this role at all).
-    YANDI_MIGRATOR / YANDI_READONLY -> random `secrets.token_urlsafe(32)`
-                      passwords, stored 0600 next to the KEK (same
-                      pattern as agent/db/sql/keys.py's save_kek(),
-                      generalized here since this isn't a KEK).
+    YANDI_READONLY -> auth_socket, mapped to OWNER_OS_USER when given
+                      (no password/secret file at all — the owner
+                      already authenticates as this OS user for every
+                      interactive session); falls back to the original
+                      random-password + 0600-secret-file behavior when
+                      `owner_os_user` is omitted (backward compatible).
+    YANDI_MIGRATOR -> NOT created by default at all. A previous run's
+                      account/secret file (the old default) is actively
+                      DROPped/removed, never left as a standing schema-
+                      change credential. A genuine one-time migration is
+                      a deliberate, explicit break-glass operation
+                      (agent.db.sql.bootstrap.run_bootstrap()'s own
+                      `provision_migrator=True`), not something this
+                      script's normal flow exposes.
     root@localhost -> converted to auth_socket immediately, retiring
                       the `--initialize`-generated temp password for
                       good (root becomes reachable only by the actual
@@ -532,7 +545,8 @@ def _connect_as_root_auth_socket(socket_path: str):
 
 def run(
     *, socket_path: str, fresh_init_marker: str, instance_id_file: str,
-    secrets_dir: str, agent_os_user: str, created_by_host: Optional[str] = None,
+    secrets_dir: str, agent_os_user: str, owner_os_user: Optional[str] = None,
+    created_by_host: Optional[str] = None,
 ) -> dict:
     """The full Phase B sequence. Idempotent per mandate §8: safe to
     re-run against an already-bootstrapped instance (no fresh-init
@@ -581,28 +595,61 @@ def run(
     try:
         readonly_secret_path = os.path.join(secrets_dir, "yandi_readonly.secret")
         migrator_secret_path = os.path.join(secrets_dir, "yandi_migrator.secret")
+        phase_b_complete_marker = os.path.join(secrets_dir, "phase_b_complete.marker")
 
-        readonly_password = (
-            load_protected_secret(readonly_secret_path) if os.path.exists(readonly_secret_path)
-            else secrets.token_urlsafe(32)
-        )
-        migrator_password = (
-            load_protected_secret(migrator_secret_path) if os.path.exists(migrator_secret_path)
-            else secrets.token_urlsafe(32)
-        )
+        # "10-year bastion" Layer 3: YANDI_READONLY prefers auth_socket
+        # bound to the owner's own OS login when given — no password,
+        # no secret file at all. `owner_os_user=None` preserves the
+        # original random-password + 0600-secret-file behavior exactly
+        # (backward compatible with every existing deployment/caller
+        # that doesn't pass it yet).
+        readonly_password = ""
+        if not owner_os_user:
+            readonly_password = (
+                load_protected_secret(readonly_secret_path) if os.path.exists(readonly_secret_path)
+                else secrets.token_urlsafe(32)
+            )
 
         result = run_bootstrap(
             conn,
-            readonly_password=readonly_password, migrator_password=migrator_password,
+            readonly_password=readonly_password, readonly_auth_socket_os_user=owner_os_user,
             runtime_auth_socket_os_user=agent_os_user,
+            # YANDI_MIGRATOR: NOT provisioned (owner mandate — see this
+            # module's own docstring). A previously-provisioned one (an
+            # older install, before this mandate) is dropped by run_
+            # bootstrap() itself; see the stale-secret-file cleanup
+            # right below for this side's half of that.
             instance_uuid=instance_uuid, instance_created_by_host=created_by_host or socket.gethostname(),
         )
         conn.commit()
 
-        if not os.path.exists(readonly_secret_path):
+        if owner_os_user:
+            # auth_socket now — a leftover password file from a PRIOR,
+            # password-based bootstrap of this same role would be a
+            # stale, unused-but-still-valid credential sitting on disk.
+            # Removing it is the file-system half of the same "no
+            # standing credential we don't need" mandate; run_bootstrap()
+            # already handled the DB-account half (the rebind itself).
+            if os.path.exists(readonly_secret_path):
+                os.remove(readonly_secret_path)
+        elif not os.path.exists(readonly_secret_path):
             save_protected_secret(readonly_secret_path, readonly_password)
-        if not os.path.exists(migrator_secret_path):
-            save_protected_secret(migrator_secret_path, migrator_password)
+
+        if not result["migrator_provisioned"] and os.path.exists(migrator_secret_path):
+            # Stale credential for an account run_bootstrap() just
+            # DROPped (or never created) — same reasoning as above.
+            os.remove(migrator_secret_path)
+
+        if not os.path.exists(phase_b_complete_marker):
+            # Auth-mode-independent proof that a real schema/role
+            # bootstrap has completed at least once — install-yandi.sh's
+            # --reinitialize-empty-instance guard used to check for
+            # yandi_readonly.secret/yandi_migrator.secret instead, but
+            # Layer 3 means NEITHER file is guaranteed to exist anymore
+            # (auth_socket readonly + no-standing migrator), so that
+            # guard needed a signal that doesn't depend on which auth
+            # mode any particular role happens to use.
+            save_protected_secret(phase_b_complete_marker, instance_uuid)
 
         # role_principals=result["role_principals"]: check the grants of
         # the three ACCOUNTS run_bootstrap() just created/ensured, not
@@ -636,13 +683,19 @@ def main(argv=None) -> int:
     parser.add_argument("--instance-id-file", required=True)
     parser.add_argument("--secrets-dir", required=True)
     parser.add_argument("--agent-os-user", required=True)
+    parser.add_argument(
+        "--owner-os-user", default=None,
+        help="'10-year bastion' Layer 3: bind YANDI_READONLY via auth_socket to this OS "
+             "login instead of a stored password (recommended). Omit to keep the original "
+             "random-password + 0600-secret-file behavior.",
+    )
     args = parser.parse_args(argv)
 
     try:
         result = run(
             socket_path=args.socket, fresh_init_marker=args.fresh_init_marker,
             instance_id_file=args.instance_id_file, secrets_dir=args.secrets_dir,
-            agent_os_user=args.agent_os_user,
+            agent_os_user=args.agent_os_user, owner_os_user=args.owner_os_user,
         )
     except LiveBootstrapError as e:
         print(f"[live_bootstrap] FATAL: {e}", file=sys.stderr)
@@ -652,6 +705,8 @@ def main(argv=None) -> int:
     print(f"[live_bootstrap] instance_uuid={result['instance_uuid']}")
     print(f"[live_bootstrap] roles_ensured={result['bootstrap']['roles_ensured']}")
     print(f"[live_bootstrap] runtime_auth_mode={result['bootstrap']['runtime_auth_mode']}")
+    print(f"[live_bootstrap] readonly_auth_mode={result['bootstrap']['readonly_auth_mode']}")
+    print(f"[live_bootstrap] migrator_provisioned={result['bootstrap']['migrator_provisioned']}")
     print(f"[live_bootstrap] triggers_created={len(result['bootstrap']['triggers_created'])}")
     print(f"[live_bootstrap] selfcheck_ok={result['selfcheck_ok']}")
     if not result["selfcheck_ok"]:

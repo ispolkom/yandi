@@ -348,11 +348,14 @@ check(
     '[ "$SOCKET_PATH" = "/run/yandi/mysql/mysql.sock" ] || die' in _guard_body,
 )
 check(
-    "guard check 4: presence of EITHER readonly or migrator secret file "
-    "unconditionally dies — this is the 'canonical activation already "
-    "happened' proof",
-    'yandi_readonly.secret' in _guard_body and 'yandi_migrator.secret' in _guard_body
-    and "die " in _guard_body.split("yandi_migrator.secret", 1)[1][:200],
+    "guard check 4: presence of phase_b_complete.marker unconditionally dies — this is "
+    "the 'canonical activation already happened' proof ('10-year bastion' Layer 3: "
+    "replaced the old readonly/migrator-secret-file check, which broke once "
+    "YANDI_READONLY could bind via auth_socket and YANDI_MIGRATOR stopped being "
+    "provisioned by default — neither file is guaranteed to exist anymore regardless "
+    "of real bootstrap completeness)",
+    'phase_b_complete.marker' in _guard_body
+    and "die " in _guard_body.split("phase_b_complete.marker", 1)[1][:200],
 )
 check(
     "no --force/override flag exists anywhere in the CLI argument parser "

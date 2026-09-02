@@ -189,6 +189,15 @@ def yandi_runtime_grant_statements(username: str, host: str) -> List[Tuple[str, 
     return stmts
 
 
+def yandi_readonly_grant_statements(username: str, host: str) -> List[Tuple[str, tuple]]:
+    """The GRANT half of YANDI_READONLY's privileges, factored out of
+    yandi_readonly_statements() so both the password-based CREATE USER
+    and the auth_socket-based CREATE USER (below) share the exact same
+    grant logic — never two copies of this privilege list to keep in
+    sync (same reasoning as yandi_runtime_grant_statements() above)."""
+    return [(f"GRANT SELECT ON `{DATABASE_NAME}`.* TO %s@%s", (username, host))]
+
+
 def yandi_readonly_statements(username: str, host: str, password: str) -> List[Tuple[str, tuple]]:
     """
     YANDI_READONLY — human-operator direct SQL access (mandate §10.4).
@@ -197,10 +206,24 @@ def yandi_readonly_statements(username: str, host: str, password: str) -> List[T
     outside SQL, see keys.py) — a SELECT against sensitive columns
     through this account returns ciphertext, never plaintext knowledge.
     """
-    return [
-        create_user_statement(username, host, password),
-        (f"GRANT SELECT ON `{DATABASE_NAME}`.* TO %s@%s", (username, host)),
-    ]
+    return [create_user_statement(username, host, password)] + yandi_readonly_grant_statements(username, host)
+
+
+def yandi_readonly_auth_socket_statement(username: str, os_user: str) -> Tuple[str, tuple]:
+    """"10-year bastion" Layer 3 (owner mandate): creates YANDI_READONLY
+    with NO PASSWORD AT ALL — bound via auth_socket to the OWNER's own
+    personal OS login, eliminating the stored yandi_readonly.secret file
+    under secrets_dir entirely. The owner already authenticates as this
+    OS user for every interactive session; auth_socket just recognizes
+    that instead of requiring a separate password to remember and store
+    on disk. Mirrors yandi_runtime_auth_socket_statement() exactly — see
+    that function's own docstring for why `host` is always 'localhost'
+    and not a parameter here (auth_socket has no meaning for a remote/
+    `%` host)."""
+    return (
+        "CREATE USER IF NOT EXISTS %s@'localhost' IDENTIFIED WITH auth_socket AS %s",
+        (username, os_user),
+    )
 
 
 def revoke_all_statement(username: str, host: str) -> Tuple[str, tuple]:

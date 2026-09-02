@@ -171,6 +171,7 @@ class StatefulFakeConnection:
 conn = StatefulFakeConnection()
 result_1 = run_bootstrap(
     conn, runtime_password="pw1", readonly_password="pw2", migrator_password="pw3",
+    provision_migrator=True,
 )
 
 check("M: first run_bootstrap() creates the database", conn.databases_created == 1)
@@ -196,6 +197,7 @@ create_trigger_calls_before = conn.create_trigger_calls
 
 result_2 = run_bootstrap(
     conn, runtime_password="pw1-again", readonly_password="pw2-again", migrator_password="pw3-again",
+    provision_migrator=True,
 )
 
 check(
@@ -231,6 +233,7 @@ conn_partial.triggers = {_all_trigger_names[0]}  # only the first one "survived"
 
 result_partial = run_bootstrap(
     conn_partial, runtime_password="pw1", readonly_password="pw2", migrator_password="pw3",
+    provision_migrator=True,
 )
 check(
     "M: partial-bootstrap recovery creates EXACTLY the missing triggers "
@@ -247,6 +250,7 @@ _secret_password = "sUpEr-sEcReT-pw-12345"
 conn_secret = StatefulFakeConnection()
 run_bootstrap(
     conn_secret, runtime_password=_secret_password, readonly_password="other1", migrator_password="other2",
+    provision_migrator=True,
 )
 _all_sql_text = "\n".join(sql for sql, _params in conn_secret.calls)
 check(
@@ -287,16 +291,17 @@ check(
     not hasattr(bootstrap_mod, "generate_kek"),
 )
 check(
-    "bootstrap.py never hardcodes a default password anywhere: readonly_password/"
-    "migrator_password are REQUIRED keyword arguments with no default (runtime_"
-    "password alone may default to '' — DATABASE BOOTSTRAP V1's auth_socket path, "
-    "mandate §11, means YANDI_RUNTIME sometimes needs NO password at all — but "
-    "run_bootstrap() must then refuse to proceed with an empty one silently, see "
-    "the next check)",
+    "bootstrap.py never hardcodes a default password anywhere: runtime_password/"
+    "readonly_password/migrator_password all default to '' (never a real hardcoded "
+    "credential) — DATABASE BOOTSTRAP V1's auth_socket path (mandate §11) plus "
+    "\"10-year bastion\" Layer 3 (readonly_auth_socket_os_user, provision_migrator=False "
+    "by default) mean NONE of the three roles necessarily needs a password anymore, but "
+    "run_bootstrap() must then refuse to proceed with an empty one silently for whichever "
+    "role IS being password-provisioned, see the next checks",
     all(
-        p.default is inspect.Parameter.empty
+        p.default == ""
         for name, p in inspect.signature(run_bootstrap).parameters.items()
-        if name in ("readonly_password", "migrator_password")
+        if name in ("runtime_password", "readonly_password", "migrator_password")
     ),
 )
 def _raises_value_error_on_blank_runtime_credential() -> bool:

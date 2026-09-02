@@ -347,12 +347,22 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
     readonly_secret = os.path.join(secrets_dir, "yandi_readonly.secret")
     migrator_secret = os.path.join(secrets_dir, "yandi_migrator.secret")
-    check("C1: readonly secret file was written", os.path.exists(readonly_secret))
-    check("C1: migrator secret file was written", os.path.exists(migrator_secret))
+    phase_b_marker = os.path.join(secrets_dir, "phase_b_complete.marker")
+    check("C1: readonly secret file was written (owner_os_user not requested here)", os.path.exists(readonly_secret))
+    check(
+        "C1: migrator secret file was NOT written — '10-year bastion' Layer 3, no "
+        "standing schema-change account by default anymore",
+        not os.path.exists(migrator_secret),
+    )
+    check("C1: run_bootstrap()'s migrator_provisioned is False", result1["bootstrap"]["migrator_provisioned"] is False)
     check("C1: readonly secret file is 0600", oct(os.stat(readonly_secret).st_mode)[-3:] == "600")
+    check(
+        "C1: phase_b_complete.marker was written — auth-mode-independent proof for "
+        "install-yandi.sh's --reinitialize-empty-instance guard",
+        os.path.exists(phase_b_marker),
+    )
 
     readonly_pw_1 = load_protected_secret(readonly_secret)
-    migrator_pw_1 = load_protected_secret(migrator_secret)
     instance_uuid_1 = result1["instance_uuid"]
 
     # --- C2: Case B — SECOND run(), no marker (consumed above), root
@@ -384,10 +394,53 @@ with tempfile.TemporaryDirectory() as tmpdir:
     )
     check("C2: the SAME instance_uuid is reused across runs (never regenerated)", result2["instance_uuid"] == instance_uuid_1)
     check(
-        "C2: readonly/migrator secrets are UNCHANGED after a second run (mandate §8: "
-        "never rotate credentials as a side effect of re-running)",
-        load_protected_secret(readonly_secret) == readonly_pw_1 and load_protected_secret(migrator_secret) == migrator_pw_1,
+        "C2: readonly secret is UNCHANGED after a second run (mandate §8: never "
+        "rotate credentials as a side effect of re-running)",
+        load_protected_secret(readonly_secret) == readonly_pw_1,
     )
+    check(
+        "C2: migrator secret file still does not exist after a second run (no "
+        "re-provisioning as a side effect)",
+        not os.path.exists(migrator_secret),
+    )
+
+    # --- C1b: owner_os_user given -> YANDI_READONLY binds via auth_socket
+    # instead, no password/secret file at all ("10-year bastion" Layer 3).
+    conn1b = _FakeConn()
+    _mysql_cli_calls_1b = []
+    _root_converted_1b = [False]
+    marker_path_1b = os.path.join(tmpdir, "fresh_init_marker_1b")
+    with open(marker_path_1b, "w") as f:
+        f.write("initial-temp-pw-1b\n")
+    instance_id_file_1b = os.path.join(tmpdir, "instance_1b.id")
+    secrets_dir_1b = os.path.join(tmpdir, "secrets_1b")
+    os.makedirs(secrets_dir_1b, exist_ok=True)
+    with _install_fake_pymysql(conn1b)[0], \
+         patch.object(lb_mod, "_MYSQL_CLIENT_BIN", "/usr/bin/mysql"), \
+         patch.object(lb_mod.subprocess, "run", _fake_mysql_cli_run(_mysql_cli_calls_1b, _root_converted_1b, probe_ok=True)):
+        result1b = run(
+            socket_path="/run/yandi/mysql.sock", fresh_init_marker=marker_path_1b,
+            instance_id_file=instance_id_file_1b, secrets_dir=secrets_dir_1b,
+            agent_os_user="yandi-agent", owner_os_user="iam", created_by_host="test-host",
+        )
+    check(
+        "C1b: owner_os_user given -> readonly_auth_mode is 'auth_socket'",
+        result1b["bootstrap"]["readonly_auth_mode"] == "auth_socket",
+    )
+    check(
+        "C1b: NO yandi_readonly.secret file is written at all when owner_os_user is given",
+        not os.path.exists(os.path.join(secrets_dir_1b, "yandi_readonly.secret")),
+    )
+    check(
+        "C1b: migrator still not provisioned, still no migrator secret file",
+        result1b["bootstrap"]["migrator_provisioned"] is False
+        and not os.path.exists(os.path.join(secrets_dir_1b, "yandi_migrator.secret")),
+    )
+    check(
+        "C1b: phase_b_complete.marker still written in the auth_socket-readonly path too",
+        os.path.exists(os.path.join(secrets_dir_1b, "phase_b_complete.marker")),
+    )
+    check("C1b: run() still reports selfcheck_ok True", result1b["selfcheck_ok"] is True)
 
     # --- C3: Case C — no marker AND auth_socket probe fails too ->
     # ambiguous auth state, must STOP with a precise error, never guess.
@@ -709,10 +762,14 @@ with tempfile.TemporaryDirectory() as tmpdir:
     check("D: main() exits 0 on a clean run", rc == 0, f"rc={rc} output={output}")
     check("D: the temp root password never appears in main()'s stdout", "another-temp-pw-456" not in output)
     readonly_pw_real = load_protected_secret(os.path.join(secrets_dir, "yandi_readonly.secret"))
-    migrator_pw_real = load_protected_secret(os.path.join(secrets_dir, "yandi_migrator.secret"))
     check(
-        "D: the generated readonly/migrator passwords never appear in main()'s stdout either",
-        readonly_pw_real not in output and migrator_pw_real not in output,
+        "D: the generated readonly password never appears in main()'s stdout either",
+        readonly_pw_real not in output,
+    )
+    check(
+        "D: no migrator secret file exists (not provisioned by default) — nothing to "
+        "even check for a leak of",
+        not os.path.exists(os.path.join(secrets_dir, "yandi_migrator.secret")),
     )
 
 
