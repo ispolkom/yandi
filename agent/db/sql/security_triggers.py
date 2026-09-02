@@ -66,12 +66,44 @@ def _verification_run_update_guard() -> str:
     (run_id, occurrence_id, started_at) may never change. Anything else
     — including a second transition attempt on an already-terminal row
     — is rejected.
+
+    LIVE PENTEST FINDING (owner-authorized, this pass) fixed here: the
+    original version of this trigger validated identity + the one-shot
+    transition, but nothing else about what that ONE legitimate UPDATE
+    was allowed to say. Live-confirmed exploitable by yandi_runtime
+    itself (its own ordinary, already-granted UPDATE privilege — no
+    privilege escalation involved at all):
+
+      1. final_answer_id could be pointed at ANY existing answer_version
+         row, including one belonging to a COMPLETELY DIFFERENT
+         question — the FK only proves the target answer_id exists
+         somewhere, never that it's THIS run's own question's answer.
+         A forged run then makes explain_answer()/get_current_answer()
+         present another question's claims/evidence as if they justified
+         THIS one's delivered text.
+      2. pipeline_version/web_enabled/validation_enabled/schema_version
+         were never protected at all — freely rewritable during the
+         same single legitimate transition, silently falsifying the
+         provenance fields anything downstream (Decision Ledger,
+         reputation-by-code-version analysis) would otherwise treat as
+         a trustworthy audit trail.
+
+    Both closed below without weakening the original one-shot-transition
+    guarantee: pipeline_version/web_enabled/validation_enabled/
+    schema_version join run_id/occurrence_id/started_at as write-once
+    (set only by start_run()'s own INSERT, never touched again — MySQL's
+    NULL-safe `<=>` used so a legitimate NULL->NULL "unchanged" reading
+    is never mistaken for a real change); final_answer_id, when set, is
+    verified via a fresh SELECT to belong to the SAME question as this
+    run's own occurrence_id.
     """
     return (
         "CREATE TRIGGER trg_verification_run_guard_update\n"
         "BEFORE UPDATE ON `verification_run`\n"
         "FOR EACH ROW\n"
         "BEGIN\n"
+        "  DECLARE v_run_question_id BIGINT;\n"
+        "  DECLARE v_answer_question_id BIGINT;\n"
         "  IF NEW.run_id <> OLD.run_id OR NEW.occurrence_id <> OLD.occurrence_id "
         "OR NEW.started_at <> OLD.started_at THEN\n"
         "    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = "
@@ -84,6 +116,24 @@ def _verification_run_update_guard() -> str:
         "  IF NEW.status NOT IN ('completed', 'aborted', 'failed') THEN\n"
         "    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = "
         "'verification_run: only running -> a terminal status is an allowed transition';\n"
+        "  END IF;\n"
+        "  IF NOT (NEW.pipeline_version <=> OLD.pipeline_version) "
+        "OR NOT (NEW.web_enabled <=> OLD.web_enabled) "
+        "OR NOT (NEW.validation_enabled <=> OLD.validation_enabled) "
+        "OR NOT (NEW.schema_version <=> OLD.schema_version) THEN\n"
+        "    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = "
+        "'verification_run: pipeline_version/web_enabled/validation_enabled/schema_version "
+        "are write-once, set only at start_run() time';\n"
+        "  END IF;\n"
+        "  IF NEW.final_answer_id IS NOT NULL THEN\n"
+        "    SELECT question_id INTO v_run_question_id FROM question_occurrence "
+        "WHERE occurrence_id = NEW.occurrence_id;\n"
+        "    SELECT question_id INTO v_answer_question_id FROM answer_version "
+        "WHERE answer_id = NEW.final_answer_id;\n"
+        "    IF v_answer_question_id IS NULL OR v_answer_question_id <> v_run_question_id THEN\n"
+        "      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = "
+        "'verification_run: final_answer_id must belong to THIS run''s own question';\n"
+        "    END IF;\n"
         "  END IF;\n"
         "END"
     )

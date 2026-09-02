@@ -169,6 +169,43 @@ def trigger_exists(conn, trigger_name: str) -> bool:
         return bool(row and row.get("c"))
 
 
+def _normalize_trigger_body(text: str) -> str:
+    """Whitespace-insensitive comparison key — MySQL's stored
+    ACTION_STATEMENT is not guaranteed to preserve our own DDL string's
+    exact spacing/newlines byte-for-byte."""
+    return re.sub(r"\s+", " ", text or "").strip().rstrip(";")
+
+
+def _expected_trigger_body(ddl: str) -> str:
+    """Our own generated CREATE TRIGGER text always has the shape
+    `CREATE TRIGGER name\\nBEFORE ... ON ...\\nFOR EACH ROW\\n<body>` —
+    information_schema.triggers.ACTION_STATEMENT stores ONLY <body>
+    (never the header), so that's the only part worth comparing."""
+    marker = "FOR EACH ROW\n"
+    idx = ddl.find(marker)
+    return ddl[idx + len(marker):] if idx != -1 else ddl
+
+
+def trigger_definition_matches(conn, trigger_name: str, expected_ddl: str) -> bool:
+    """True iff a trigger by this name exists AND its LIVE body matches
+    what immutability_triggers() currently generates for it. False for
+    both "doesn't exist" and "exists but stale" — apply_immutability_
+    triggers() treats them identically (both need a (re)create)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT ACTION_STATEMENT FROM information_schema.triggers "
+            "WHERE trigger_schema = DATABASE() AND trigger_name = %s",
+            (trigger_name,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return False
+    return (
+        _normalize_trigger_body(row.get("ACTION_STATEMENT"))
+        == _normalize_trigger_body(_expected_trigger_body(expected_ddl))
+    )
+
+
 def apply_immutability_triggers(conn) -> List[str]:
     """Idempotent via an EXPLICIT existence check against information_
     schema.triggers — deliberately NOT relying on `CREATE TRIGGER IF
@@ -179,12 +216,28 @@ def apply_immutability_triggers(conn) -> List[str]:
     rather than assuming untested syntax works (mandate §55: don't
     claim proof that wasn't obtained).
 
-    Returns the list of trigger names actually created by THIS call —
-    a second call against the same database returns an empty list."""
+    DRIFT DETECTION (added after a live pentest found a real gap in
+    trg_verification_run_guard_update's original logic): existence
+    alone is not enough — a trigger's DEFINITION can change in this
+    module's source (a security fix, exactly like this one) without
+    this function ever noticing on an ALREADY-bootstrapped live
+    instance, silently leaving the STALE, less-safe body active forever
+    (the same class of bug install_config()'s own drift detection
+    fixed earlier for my.cnf). Any existing trigger whose live
+    ACTION_STATEMENT no longer matches what immutability_triggers()
+    currently generates for it is DROPped and recreated — never a
+    data-destructive operation, only enforcement code being refreshed.
+
+    Returns the list of trigger names actually (re)created by THIS
+    call — a second call against an unchanged database returns an
+    empty list."""
     created: List[str] = []
     for trigger_name, ddl in immutability_triggers():
         if trigger_exists(conn, trigger_name):
-            continue
+            if trigger_definition_matches(conn, trigger_name, ddl):
+                continue
+            with conn.cursor() as cur:
+                cur.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
         with conn.cursor() as cur:
             cur.execute(ddl)
         created.append(trigger_name)

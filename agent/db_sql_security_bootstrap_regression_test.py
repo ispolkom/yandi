@@ -29,10 +29,23 @@ import inspect
 from agent.db.sql.bootstrap import (
     ensure_database, ensure_role, apply_schema, apply_immutability_triggers,
     user_exists, trigger_exists, revoke_bootstrap, run_bootstrap,
+    _expected_trigger_body,
 )
 from agent.db.sql.security_grants import yandi_runtime_statements
 import agent.db.sql.bootstrap as bootstrap_mod
 from agent.db.sql.security_triggers import immutability_triggers
+
+# Drift-detection support for StatefulFakeCursor below (trigger_
+# definition_matches() now queries ACTION_STATEMENT, not just COUNT(*))
+# — the CURRENT expected body for every trigger name, used as the fake's
+# answer when a trigger was pre-seeded directly into conn.triggers
+# rather than created via a real CREATE TRIGGER call this session (this
+# file's existing idempotency scenarios do exactly that — they are about
+# existence-based idempotency, not drift, so "assume it already matches
+# the current design" is the correct default for them).
+_EXPECTED_TRIGGER_BODY_BY_NAME = {
+    name: _expected_trigger_body(ddl) for name, ddl in immutability_triggers()
+}
 
 PASS = 0
 FAIL = 0
@@ -91,10 +104,25 @@ class StatefulFakeCursor:
             self._result = None
         elif "INFORMATION_SCHEMA.TRIGGERS" in upper:
             (trigger_name,) = params
-            self._result = {"c": 1 if trigger_name in self.conn.triggers else 0}
+            if upper.startswith("SELECT ACTION_STATEMENT"):
+                if trigger_name not in self.conn.triggers:
+                    self._result = None
+                else:
+                    body = self.conn.trigger_bodies.get(
+                        trigger_name, _EXPECTED_TRIGGER_BODY_BY_NAME.get(trigger_name, ""),
+                    )
+                    self._result = {"ACTION_STATEMENT": body}
+            else:
+                self._result = {"c": 1 if trigger_name in self.conn.triggers else 0}
+        elif upper.startswith("DROP TRIGGER"):
+            trigger_name = norm_sql.split()[-1]
+            self.conn.triggers.discard(trigger_name)
+            self.conn.trigger_bodies.pop(trigger_name, None)
+            self._result = None
         elif upper.startswith("CREATE TRIGGER"):
             trigger_name = norm_sql.split()[2]
             self.conn.triggers.add(trigger_name)
+            self.conn.trigger_bodies[trigger_name] = _expected_trigger_body(sql)
             self.conn.create_trigger_calls += 1
             self._result = None
         elif upper.startswith("DROP USER"):
@@ -116,6 +144,7 @@ class StatefulFakeConnection:
         self.calls = []
         self.users = set()
         self.triggers = set()
+        self.trigger_bodies = {}
         self.databases_created = 0
         self.tables_created = 0
         self.create_user_calls = 0
