@@ -113,6 +113,51 @@ def user_exists(conn, username: str, host: str) -> bool:
         return bool(row and row.get("c"))
 
 
+def auth_socket_binding_matches(conn, username: str, host: str, os_user: str) -> bool:
+    """True iff `username`@`host` already exists AND is bound via the
+    auth_socket plugin to EXACTLY `os_user`. False for "doesn't exist
+    yet" (ensure_role()'s own CREATE USER IF NOT EXISTS handles that
+    case) AND for "exists but bound to a DIFFERENT OS user" (needs
+    rebinding — see run_bootstrap()'s own call site).
+
+    DRIFT DETECTION ("10-year bastion" OS-identity separation, mandate:
+    yandi_runtime must be reachable ONLY from the dedicated AGENT_OS_USER
+    identity, never an interactive owner/Claude/Codex login):
+    `CREATE USER IF NOT EXISTS` is a true no-op against an
+    ALREADY-EXISTING account, INCLUDING its auth_socket binding — so
+    changing AGENT_OS_USER in deploy/install-yandi.sh alone would
+    silently leave an already-bootstrapped yandi_runtime permanently
+    bound to the OLD OS user forever. Same class of gap already fixed
+    twice this pass for my.cnf (install_config()) and trigger bodies
+    (apply_immutability_triggers()) — existence is not enough, live
+    content must be compared. `authentication_string` is where
+    auth_socket stores the mapped OS username (this plugin has no
+    password hash to check instead)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT plugin, authentication_string FROM mysql.user "
+            "WHERE User=%s AND Host=%s",
+            (username, host),
+        )
+        row = cur.fetchone()
+    if not row:
+        return False
+    return row.get("plugin") == "auth_socket" and row.get("authentication_string") == os_user
+
+
+def rebind_auth_socket_statement(username: str, host: str, os_user: str) -> Tuple[str, tuple]:
+    """ALTER USER counterpart to security_grants.
+    yandi_runtime_auth_socket_statement()'s CREATE USER — issued ONLY
+    when auth_socket_binding_matches() is False for an account
+    user_exists() confirms already exists (run_bootstrap() is the only
+    caller). Changes the auth method/binding alone — never touches any
+    GRANT, so re-running this can never widen or narrow privileges."""
+    return (
+        "ALTER USER %s@%s IDENTIFIED WITH auth_socket AS %s",
+        (username, host, os_user),
+    )
+
+
 def ensure_role(conn, statements: List[Tuple[str, tuple]]) -> None:
     """Executes a list of (sql, params) statements. `CREATE USER IF NOT
     EXISTS` makes account creation idempotent; re-issuing the SAME
@@ -314,6 +359,19 @@ def run_bootstrap(
     apply_schema(conn)
     if runtime_auth_socket_os_user:
         actual_runtime_host = "localhost"
+        # DRIFT DETECTION: CREATE USER IF NOT EXISTS below is a no-op
+        # against an already-existing yandi_runtime — if AGENT_OS_USER
+        # changed since the last bootstrap (see deploy/install-yandi.sh),
+        # the account would stay bound to the STALE OS user forever
+        # without this explicit rebind. See auth_socket_binding_matches()'s
+        # own docstring.
+        if user_exists(conn, "yandi_runtime", actual_runtime_host) and not auth_socket_binding_matches(
+            conn, "yandi_runtime", actual_runtime_host, runtime_auth_socket_os_user
+        ):
+            with conn.cursor() as cur:
+                cur.execute(*rebind_auth_socket_statement(
+                    "yandi_runtime", actual_runtime_host, runtime_auth_socket_os_user
+                ))
         ensure_role(conn, [yandi_runtime_auth_socket_statement("yandi_runtime", runtime_auth_socket_os_user)]
                     + yandi_runtime_grant_statements("yandi_runtime", actual_runtime_host))
     else:
