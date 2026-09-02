@@ -60,6 +60,7 @@ from agent.orchestrator.epistemic.trust_gate import _calculate_delta_factors
 from agent.orchestrator.epistemic.canonical_trust import compute_canonical_trust
 from agent.orchestrator.runtime.profiling import report_pipeline_profile
 from agent.db.sql.shadow_write import shadow_complete_run
+from agent.claim_history_note import build_claim_history_notes, format_history_note_block
 
 _DOMAIN_TAG: dict[str, str] = {
     "general": "general",
@@ -703,6 +704,18 @@ def run_optimistic_respond(
 
     if not optimistic.text.startswith(banner):
         optimistic.text = f"{banner}\n\n{optimistic.text}"
+
+    # "ЖИВАЯ ПАМЯТЬ" (owner request, 2026-09): reachable ONLY here — this
+    # function is never entered from orchestrator_v2.py's pre_pipeline
+    # cache-hit/short-circuit path (that branch returns before writeback.py
+    # is ever called) — so claims_data at this point is always the result
+    # of THIS request's own real, fresh evidence-checking, satisfying the
+    # owner's explicit condition ("может менять ответы на условии, что
+    # проверила источники"). Deterministic text only, never LLM-authored —
+    # see agent/claim_history_note.py's own module docstring.
+    _history_notes = build_claim_history_notes(claims_data)
+    if _history_notes:
+        optimistic.text += format_history_note_block(_history_notes)
 
     # P0 (storage audit, delivered-answer correctness): capture the
     # LITERAL delivered text — byte-identical to what OrchestratorResponse
