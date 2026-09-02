@@ -46,6 +46,7 @@ from agent.db.sql.live_bootstrap import (
     run, main, LiveBootstrapError,
 )
 import agent.db.sql.live_bootstrap as lb_mod
+from agent.db.sql.schema import SCHEMA_VERSION
 
 PASS = 0
 FAIL = 0
@@ -137,7 +138,7 @@ class _FakeCursor:
         elif norm.startswith("INSERT INTO instance_identity"):
             self._conn.instance_row = params[0]
         elif "MAX(version)" in norm:
-            self._last = {"v": 1}
+            self._last = {"v": SCHEMA_VERSION}
         elif "information_schema.tables" in norm:
             self._last = {"c": 1}
         elif "information_schema.triggers" in norm:
