@@ -263,11 +263,12 @@ check(
 # definition introduced by this fix).
 # ============================================================
 check(
-    "3a. schema.ALL_TABLES_IN_ORDER currently defines exactly 23 tables "
+    "3a. schema.ALL_TABLES_IN_ORDER currently defines exactly 25 tables "
     "(21 domain/history/projection tables + instance_identity — v2 added "
     "decision_event, the \"живая память\" decision/reasoning ledger; v3 added "
-    "integrity_journal, the \"10-year bastion\" Layer 4 tamper-evidence hash-chain)",
-    len(ALL_TABLES_IN_ORDER) == 23,
+    "integrity_journal, the \"10-year bastion\" Layer 4 tamper-evidence hash-chain; "
+    "v4 added grievance + forgiveness_capacity, SQL-backed character/relationship state)",
+    len(ALL_TABLES_IN_ORDER) == 25,
     f"actual={len(ALL_TABLES_IN_ORDER)}",
 )
 check(

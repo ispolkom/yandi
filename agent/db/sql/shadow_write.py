@@ -29,6 +29,7 @@ from typing import Any, Callable, Optional
 
 from agent.db.sql.connection import get_connection, SqlUnavailable
 import agent.db.sql.repositories as repo
+import agent.relationship_memory as relationship_memory
 
 _PIPELINE_VERSION_CACHE: Optional[str] = None
 
@@ -478,3 +479,54 @@ def shadow_record_ai_observation(
         return obs_id
 
     return _shadow(log, verbose, "record_ai_observation", _do)
+
+
+# ============================================================
+# Relationship/character state — owner mandate: "мне нужен у неё
+# характер, она обидчива". Same fail-open discipline as every other
+# shadow write here: pet/chat_local.py's reply must never break because
+# this graph is unreachable — a chat with no memory of being offended
+# is a degraded feature, not a crashed one.
+# ============================================================
+
+def shadow_add_grievance(
+    *, user_id: str, event_type: str, description: str, severity: float,
+    context: Optional[dict] = None, log=None, verbose: bool = False,
+) -> Optional[str]:
+    def _do(conn):
+        return relationship_memory.add_grievance(conn, user_id, event_type, description, severity, context)
+
+    return _shadow(log, verbose, "add_grievance", _do)
+
+
+def shadow_acknowledge_apology(
+    *, grievance_id: str, sincerity: float, log=None, verbose: bool = False,
+) -> Optional[bool]:
+    def _do(conn):
+        return relationship_memory.acknowledge_apology(conn, grievance_id, sincerity)
+
+    return _shadow(log, verbose, "acknowledge_apology", _do)
+
+
+def shadow_progress_healing(*, grievance_id: str, log=None, verbose: bool = False) -> Optional[bool]:
+    def _do(conn):
+        return relationship_memory.progress_healing(conn, grievance_id)
+
+    return _shadow(log, verbose, "progress_healing", _do)
+
+
+def shadow_get_relationship_context(*, user_id: str, log=None, verbose: bool = False) -> Optional[dict]:
+    """Read-only: the RAW FACTS of the most severe active grievance (if
+    any) — description/severity/status, nothing interpreted — for
+    pet/chat_local.py to state plainly in the system prompt. Returns
+    None (not an empty dict) both when SQL is unreachable AND when
+    there is genuinely no active grievance — the caller treats both
+    identically (nothing to mention), so this distinction doesn't need
+    to survive the shadow-write boundary."""
+    def _do(conn):
+        grievance = relationship_memory.most_severe_active_grievance(conn, user_id)
+        if not grievance:
+            return None
+        return {"grievance_id": grievance["id"], **relationship_memory.memory_facts(grievance)}
+
+    return _shadow(log, verbose, "get_relationship_context", _do)

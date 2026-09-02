@@ -719,3 +719,156 @@ def compare_runs(conn, run_id_a: str, run_id_b: str) -> Dict[str, Any]:
                 changed.append({"resource_id": resource_id, "before": sorted(rel_a), "after": sorted(rel_b)})
 
     return {"added": added, "lost": lost, "changed": changed}
+
+
+# ============================================================
+# GRIEVANCE / FORGIVENESS_CAPACITY — SQL-backed character/relationship
+# state (see schema.py's own docstring for these two tables). Low-level
+# CRUD only; the actual state-machine logic (when a grievance advances
+# from "acknowledged" to "understood", the minimum healing time, etc.)
+# lives in agent/relationship_memory.py, the one intended caller of
+# these functions — kept separate the same way every other repository
+# function here is a thin SQL layer under agent/orchestrator*'s own
+# business logic.
+# ============================================================
+
+def record_grievance(
+    conn, grievance_id: str, user_id: str, event_type: str, description: str,
+    severity: float, context: Optional[Dict[str, Any]] = None, created_at=None,
+) -> None:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO grievance "
+            "(id, user_id, event_type, description, severity, status, context, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, 'registered', %s, %s, %s)",
+            (grievance_id, user_id, event_type, description, severity,
+             json.dumps(context) if context is not None else None, created_at, created_at),
+        )
+
+
+def get_grievance(conn, grievance_id: str) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM grievance WHERE id=%s", (grievance_id,))
+        row = cur.fetchone()
+    if row and row.get("context") is not None and isinstance(row["context"], str):
+        row["context"] = json.loads(row["context"])
+    return row
+
+
+def find_similar_open_grievance(conn, user_id: str, description: str) -> Optional[Dict[str, Any]]:
+    """Mirrors the old forgiveness_model.py's own `_find_similar()`
+    exactly: same-first-20-characters match, excluding grievances
+    already fully "forgiven" (a repeat of a long-forgiven offense is a
+    NEW grievance, not a reopening of the old one) — "unforgiven" ones
+    ARE still matched, same as the original."""
+    prefix = description[:20]
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM grievance WHERE user_id=%s AND status != 'forgiven' "
+            "AND LEFT(description, 20) = %s ORDER BY created_at DESC LIMIT 1",
+            (user_id, prefix),
+        )
+        return cur.fetchone()
+
+
+def bump_grievance(conn, grievance_id: str, new_severity: float, timestamp=None) -> None:
+    """Existing-grievance-recurred path: severity rises, status resets
+    to 'registered' (a fresh instance of the same old grievance is not
+    automatically still 'healing')."""
+    timestamp = _coerce_datetime(timestamp) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE grievance SET severity=%s, status='registered', updated_at=%s WHERE id=%s",
+            (new_severity, timestamp, grievance_id),
+        )
+
+
+def update_grievance_status(
+    conn, grievance_id: str, status: str, *, apology_sincerity: Optional[float] = None,
+    apology_at=None, understood_at=None, forgiven_at=None, timestamp=None,
+) -> None:
+    """Generic status/timestamp update — agent/relationship_memory.py
+    decides WHICH fields to set for a given transition; this function
+    just writes whatever it's given. A NULL parameter for any of the
+    COALESCE'd columns below leaves that column's existing value alone
+    (a transition that doesn't reach "understood" this call must never
+    accidentally clear an already-set understood_at from an earlier
+    call) — a fixed, static SQL string with COALESCE achieves the same
+    "only set what was given" behavior as building the SET clause
+    dynamically, without ever interpolating anything into the query
+    text itself (mandate §15 / T1: no f-string/concat/format passed
+    directly as an execute() argument anywhere in this package,
+    statically greppable — see agent/db_sql_security_injection_
+    regression_test.py)."""
+    timestamp = _coerce_datetime(timestamp) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE grievance SET "
+            "status=%s, updated_at=%s, "
+            "apology_sincerity=COALESCE(%s, apology_sincerity), "
+            "apology_at=COALESCE(%s, apology_at), "
+            "understood_at=COALESCE(%s, understood_at), "
+            "forgiven_at=COALESCE(%s, forgiven_at) "
+            "WHERE id=%s",
+            (
+                status, timestamp, apology_sincerity,
+                _coerce_datetime(apology_at), _coerce_datetime(understood_at), _coerce_datetime(forgiven_at),
+                grievance_id,
+            ),
+        )
+
+
+def list_active_grievances(conn, user_id: str) -> List[Dict[str, Any]]:
+    """Active = not yet resolved either way ('forgiven'/'unforgiven' are
+    the two terminal states) — same definition as the original
+    ForgivenessModel.get_active_grievances()."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM grievance WHERE user_id=%s AND status NOT IN ('forgiven', 'unforgiven') "
+            "ORDER BY created_at ASC",
+            (user_id,),
+        )
+        rows = cur.fetchall()
+    for row in rows:
+        if row.get("context") is not None and isinstance(row["context"], str):
+            row["context"] = json.loads(row["context"])
+    return rows
+
+
+def count_grievances_by_status(conn, user_id: str, status: str) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM grievance WHERE user_id=%s AND status=%s",
+            (user_id, status),
+        )
+        row = cur.fetchone()
+    return int(row["c"]) if row else 0
+
+
+def get_forgiveness_capacity(conn, user_id: str) -> Dict[str, Any]:
+    """Find-or-default (NOT find-or-create — see set_forgiveness_capacity()
+    for why the actual INSERT is deferred to the first real write)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM forgiveness_capacity WHERE user_id=%s", (user_id,))
+        row = cur.fetchone()
+    return row or {"user_id": user_id, "capacity": 50.0, "last_forgiveness": None, "updated_at": None}
+
+
+def set_forgiveness_capacity(conn, user_id: str, capacity: float, last_forgiveness=None, timestamp=None) -> None:
+    """INSERT ... ON DUPLICATE KEY UPDATE — this table has no
+    find-or-create helper of its own because the very first grievance
+    a user ever registers should be able to lazily create their capacity
+    row at 50.0 (schema's own DEFAULT) without a separate round-trip;
+    this single statement handles both the never-existed and the
+    already-exists case identically."""
+    timestamp = _coerce_datetime(timestamp) or _now()
+    last_forgiveness = _coerce_datetime(last_forgiveness) if last_forgiveness is not None else None
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO forgiveness_capacity (user_id, capacity, last_forgiveness, updated_at) "
+            "VALUES (%s, %s, %s, %s) "
+            "ON DUPLICATE KEY UPDATE capacity=VALUES(capacity), "
+            "last_forgiveness=COALESCE(VALUES(last_forgiveness), last_forgiveness), updated_at=VALUES(updated_at)",
+            (user_id, capacity, last_forgiveness, timestamp),
+        )

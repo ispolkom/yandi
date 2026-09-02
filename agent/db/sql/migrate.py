@@ -24,7 +24,7 @@ from agent.db.sql.schema import (
     SCHEMA_VERSION,
 )
 
-SCHEMA_VERSION_DESCRIPTION = "v3: + integrity_journal (\"10-year bastion\" Layer 4 tamper-evidence hash-chain)"
+SCHEMA_VERSION_DESCRIPTION = "v4: + grievance, forgiveness_capacity (SQL-backed character/relationship state)"
 
 
 def record_schema_version(
