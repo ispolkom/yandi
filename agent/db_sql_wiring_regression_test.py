@@ -66,10 +66,13 @@ _pos_decision_started = _src_v2.find('event_type="DecisionStarted"')
 _pos_pre_pipeline = _src_v2.find("run_pre_pipeline(")
 
 check(
-    "A: shadow_record_question_and_run is called AFTER DecisionStarted event "
-    "AND BEFORE run_pre_pipeline (earliest point query+trace_id both exist, "
-    "before any of pre_pipeline's ~11 early-return short-circuits)",
-    -1 < _pos_decision_started < _pos_shadow_start < _pos_pre_pipeline,
+    "A: shadow_record_question_and_run is called BEFORE the DecisionStarted event "
+    "AND BEFORE run_pre_pipeline ('живая память' ordering fix: decision_event.run_id "
+    "carries a real FK to the verification_run row shadow_record_question_and_run() "
+    "creates — recording DecisionStarted first would silently lose every request's "
+    "own first, most important event to a swallowed FK violation; still runs before "
+    "any of pre_pipeline's ~11 early-return short-circuits)",
+    -1 < _pos_shadow_start < _pos_decision_started < _pos_pre_pipeline,
     f"decision_started={_pos_decision_started} shadow={_pos_shadow_start} pre_pipeline={_pos_pre_pipeline}",
 )
 

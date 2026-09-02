@@ -85,7 +85,10 @@ from agent.orch_web_scraper import (
     STAGE6_COUNTER_BUDGET,
 )
 from agent.orch_timeout import step_timer
-from agent.orch_reputation import add_decision_event
+# "живая память" (owner request): decision events persist to the
+# hardened dedicated SQL instance, not agent.orch_reputation's dead
+# stub — see agent/db/sql/shadow_write.py's shadow_record_decision_event.
+from agent.db.sql.shadow_write import shadow_record_decision_event as add_decision_event
 from agent.epistemic_router import (
     classify_claim,
     get_trust_label_for_epistemic,

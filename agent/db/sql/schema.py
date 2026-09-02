@@ -46,7 +46,7 @@ DESIGN NOTES (read before changing a table):
    no HTTP retry chatter. RUN_ERROR is 5 columns, not a log warehouse.
 """
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # v2: + decision_event (append-only decision/reasoning ledger, in-DB)
 
 SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -666,6 +666,64 @@ CREATE TABLE IF NOT EXISTS run_error (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
+# ── DECISION_EVENT ───────────────────────────────────────────────────────
+# Owner request ("живая память трейсов... почему YANDI так решила... ни
+# я, ни ты, ни следующие поколения не имеют прав для изменения"): the
+# WHY behind a decision, not just its outcome — mirrors agent/orch_
+# ledger.py's own DecisionEvent shape exactly (event_type, entity_type/
+# entity_id, verdict, confidence, delta, delta_factors, reason,
+# parent_event_id, duration_ms, policy_snapshot, orchestrator_version)
+# so existing production call sites (orchestrator_v2.py, pipeline.py,
+# writeback.py — currently pointed at a dead stub, see agent/orch_
+# reputation.py's own "Заглушка для совместимости" functions) can be
+# rewired with NO signature changes.
+#
+# Deliberately NOT the pre-existing registry/ledger/decision_ledger.db
+# SQLite file: a bare SQLite file has no access-control model at all —
+# any process with filesystem read/write on it (a future Claude/Codex
+# session, a buggy script, hand-editing) can rewrite or delete any row,
+# with nothing to stop it. This table gets the SAME defense this whole
+# schema already has: yandi_runtime holds INSERT-only (class B, no
+# UPDATE grant whatsoever — see security_grants.py), reinforced by a
+# BEFORE UPDATE/DELETE immutability trigger — a real, DB-enforced
+# boundary, not a filesystem permission any sufficiently-privileged
+# process can just open and edit.
+#
+# APPEND-ONLY (mandate's own "трейсы — это память сети, важнее ответов"
+# framing, mandate §16/§3): a decision, once recorded, is never
+# corrected in place — a later re-evaluation is always a NEW row
+# (optionally linked via parent_event_id), the same "history is not
+# disposable" rule already applied to belief_assessment_history/
+# claim_occurrence/evidence_relation.
+DECISION_EVENT = """
+CREATE TABLE IF NOT EXISTS decision_event (
+    event_id             CHAR(32) PRIMARY KEY,     -- uuid4().hex, matches orch_ledger.py's own id shape
+    run_id               VARCHAR(40) NOT NULL,
+    event_type           VARCHAR(40) NOT NULL,     -- DecisionStarted, ExecutionStep, ReputationUpdated, DecisionFinished, ...
+    entity_type          VARCHAR(30) NOT NULL,     -- decision, orchestrator, route, model, source, verifier, ...
+    entity_id            VARCHAR(120) NOT NULL,
+    verdict              VARCHAR(60) NULL,
+    domain               VARCHAR(60) NULL,
+    confidence           FLOAT NULL,
+    delta                FLOAT NULL,
+    delta_factors        JSON NULL,
+    reason               TEXT NULL,
+    meta                 JSON NULL,
+    parent_event_id      CHAR(32) NULL,            -- self-FK: the decision GRAPH, not a flat log
+    duration_ms          INT NULL,
+    policy_snapshot      JSON NULL,
+    policy_version       VARCHAR(60) NULL,
+    orchestrator_version VARCHAR(20) NULL,
+    created_at           DATETIME NOT NULL,
+    CONSTRAINT fk_de_run FOREIGN KEY (run_id)
+        REFERENCES verification_run(run_id),
+    CONSTRAINT fk_de_parent FOREIGN KEY (parent_event_id)
+        REFERENCES decision_event(event_id),
+    KEY idx_de_run (run_id, created_at),
+    KEY idx_de_entity (entity_type, entity_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
 # ── INSTANCE_IDENTITY ────────────────────────────────────────────────────
 # DATABASE BOOTSTRAP V1, mandate §4. Classified "A" (canonical immutable
 # identity, TABLE_CLASSIFICATION's own definition: "one row per identity,
@@ -721,6 +779,7 @@ ALL_TABLES_IN_ORDER = [
     ("ai_observation", AI_OBSERVATION),
     ("ai_reported_source", AI_REPORTED_SOURCE),
     ("run_error", RUN_ERROR),
+    ("decision_event", DECISION_EVENT),
     ("instance_identity", INSTANCE_IDENTITY),
 ]
 
@@ -772,6 +831,7 @@ TABLE_CLASSIFICATION = {
     "ai_observation": "B",
     "ai_reported_source": "B",
     "run_error": "B",
+    "decision_event": "B",
     "belief": "C",
     "semantic_edge": "C",
     "verification_run": "D",

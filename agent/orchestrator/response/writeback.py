@@ -51,7 +51,10 @@ from agent.orch_validator import validate_parallel
 from agent.orch_arbiter import arbitrate
 from agent.orch_knowledge_writer import write_from_arbiter
 from agent.orch_monitoring import record as mon_record
-from agent.orch_reputation import add_decision_event
+# "живая память" (owner request): decision events persist to the
+# hardened dedicated SQL instance, not agent.orch_reputation's dead
+# stub — see agent/db/sql/shadow_write.py's shadow_record_decision_event.
+from agent.db.sql.shadow_write import shadow_record_decision_event as add_decision_event
 from agent.orch_query_archive import record_query as archive_query
 from agent.orch_schemas import OrchestratorResponse, OutcomeRecord
 from agent.experience_memory import get_experience_memory

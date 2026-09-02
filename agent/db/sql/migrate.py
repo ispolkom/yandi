@@ -24,7 +24,7 @@ from agent.db.sql.schema import (
     SCHEMA_VERSION,
 )
 
-SCHEMA_VERSION_DESCRIPTION = "Этап 5 canonical epistemic memory, initial schema"
+SCHEMA_VERSION_DESCRIPTION = "v2: + decision_event (append-only decision/reasoning ledger)"
 
 
 def record_schema_version(

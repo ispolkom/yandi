@@ -46,6 +46,7 @@ from agent.db.sql.instance_identity import (
 from agent.db.sql import connection as conn_mod
 from agent.db.sql.security_grants import yandi_runtime_auth_socket_statement, yandi_runtime_grant_statements
 from agent.db.sql.security_selfcheck import run_selfcheck
+from agent.db.sql.schema import SCHEMA_VERSION
 
 PASS = 0
 FAIL = 0
@@ -355,7 +356,7 @@ class _SelfcheckFakeCursor:
 
 
 class _SelfcheckFakeConn:
-    def __init__(self, schema_version=1, instance_uuid=None):
+    def __init__(self, schema_version=SCHEMA_VERSION, instance_uuid=None):
         self.schema_version = schema_version
         self.instance_uuid = instance_uuid
 

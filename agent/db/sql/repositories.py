@@ -22,6 +22,7 @@ Names match the mandate's own suggested names where given.
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -365,6 +366,72 @@ def record_run_error(conn, run_id: str, failed_stage: str, error_class: str, sho
             "VALUES (%s,%s,%s,%s,%s)",
             (run_id, failed_stage, error_class, (short_message or "")[:500], created_at),
         )
+
+
+def record_decision_event(
+    conn, event_id: str, run_id: str, event_type: str, entity_type: str, entity_id: str,
+    verdict: Optional[str] = None, domain: Optional[str] = None,
+    confidence: Optional[float] = None, delta: Optional[float] = None,
+    delta_factors: Optional[Dict[str, Any]] = None, reason: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None, parent_event_id: Optional[str] = None,
+    duration_ms: Optional[int] = None, policy_snapshot: Optional[Dict[str, Any]] = None,
+    policy_version: Optional[str] = None, orchestrator_version: Optional[str] = None,
+    created_at=None,
+) -> None:
+    """Owner request ("живая память... почему YANDI так решила"):
+    APPEND-ONLY decision/reasoning ledger, in the same dedicated
+    instance as everything else — never updated after the fact (mandate
+    §16/§3: history is not disposable), and protected by the SAME
+    GRANT+trigger wall as every other history table here (yandi_runtime
+    has INSERT only, no UPDATE at all — see security_grants.py), unlike
+    the pre-existing SQLite-based agent/orch_ledger.py, which has no
+    access-control model beyond OS file permissions.
+
+    `event_id` is the caller's own uuid4().hex (agent/orch_ledger.py's
+    DecisionEvent already generates one per event) — passed in, never
+    generated here, so a caller that wires parent_event_id can do so
+    with a value it already knows, no round-trip needed.
+
+    delta_factors/meta/policy_snapshot are JSON-serialized here (plain
+    dict in, JSON text out) — this is the first JSON column in this
+    schema; pymysql does not auto-serialize a dict for one, so this
+    function owns that conversion rather than pushing it onto every
+    caller."""
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO decision_event "
+            "(event_id, run_id, event_type, entity_type, entity_id, verdict, domain, confidence, "
+            " delta, delta_factors, reason, meta, parent_event_id, duration_ms, policy_snapshot, "
+            " policy_version, orchestrator_version, created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                event_id, run_id, event_type, entity_type, entity_id, verdict, domain, confidence, delta,
+                json.dumps(delta_factors) if delta_factors is not None else None,
+                reason,
+                json.dumps(meta) if meta is not None else None,
+                parent_event_id, duration_ms,
+                json.dumps(policy_snapshot) if policy_snapshot is not None else None,
+                policy_version, orchestrator_version, created_at,
+            ),
+        )
+
+
+def get_decision_trace(conn, run_id: str) -> List[Dict[str, Any]]:
+    """Read path for get_decision_trace()/show_trace()'s SQL-backed
+    replacement — every decision_event for one run, oldest first,
+    JSON columns decoded back into plain dicts."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM decision_event WHERE run_id=%s ORDER BY created_at ASC, event_id ASC",
+            (run_id,),
+        )
+        rows = cur.fetchall()
+    for row in rows:
+        for _json_col in ("delta_factors", "meta", "policy_snapshot"):
+            if row.get(_json_col) is not None and isinstance(row[_json_col], str):
+                row[_json_col] = json.loads(row[_json_col])
+    return rows
 
 
 def record_ai_observation(

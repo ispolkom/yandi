@@ -24,6 +24,7 @@ final report's "READY / NOT READY" section.
 from __future__ import annotations
 
 import subprocess
+import uuid
 from typing import Any, Callable, Optional
 
 from agent.db.sql.connection import get_connection, SqlUnavailable
@@ -125,6 +126,54 @@ def shadow_fail_run(*, run_id: str, failed_stage: str, error_class: str, log=Non
         repo.record_run_error(conn, run_id, failed_stage, error_class)
 
     _shadow(log, verbose, "fail_run", _do)
+
+
+def shadow_record_decision_event(
+    event_type: str, trace_id: str, entity_type: str, entity_id: str,
+    verdict: str = "", reason: str = "", domain: str = "general",
+    confidence: float = 0.0, delta: float = 0.0,
+    delta_factors: Optional[dict] = None, meta: Optional[dict] = None,
+    parent_event_id: Optional[str] = None, duration_ms: Optional[int] = None,
+    policy_snapshot: Optional[dict] = None, policy_version: Optional[str] = None,
+    orchestrator_version: Optional[str] = None, log=None, verbose: bool = False,
+) -> None:
+    """The production entry point for the "живая память" decision
+    ledger (owner request: "почему YANDI так решила... ни я, ни ты, ни
+    следующие поколения не имеют прав для изменения").
+
+    Signature-compatible with agent.orch_reputation.add_decision_event()'s
+    dead stub — SAME parameter names, SAME positional/keyword shape,
+    confirmed against every real call site in orchestrator_v2.py/
+    pipeline.py/writeback.py (grepped: only event_type, trace_id,
+    entity_type, entity_id, verdict, reason, domain, meta, confidence,
+    delta, delta_factors are ever actually passed) — so reconnecting
+    production call sites only requires changing their IMPORT line
+    (`from agent.orch_reputation import add_decision_event` ->
+    `from agent.db.sql.shadow_write import shadow_record_decision_event
+    as add_decision_event`), never the call sites themselves.
+
+    event_id is generated HERE (uuid4 hex, same shape agent/orch_ledger.
+    py's own DecisionEvent already used) — no existing caller ever
+    supplied one, since the stub never accepted or needed it.
+
+    Requires trace_id to already exist as a verification_run.run_id row
+    — callers MUST record the question/run (shadow_record_question_and_
+    run) before their FIRST decision event of a request, never after
+    (an FK violation here fails open exactly like every other shadow
+    write, but silently losing the FIRST event of every run — the one
+    literally named "DecisionStarted" — would defeat the whole point;
+    see orchestrator_v2.py's own reordering fix for this)."""
+    event_id = uuid.uuid4().hex
+
+    def _do(conn):
+        repo.record_decision_event(
+            conn, event_id, trace_id, event_type, entity_type, entity_id, verdict, domain,
+            confidence, delta, delta_factors, reason, meta, parent_event_id, duration_ms,
+            policy_snapshot, policy_version, orchestrator_version,
+        )
+
+    _shadow(log, verbose, "record_decision_event", _do)
+    return event_id
 
 
 def shadow_record_claim(

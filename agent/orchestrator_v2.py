@@ -38,7 +38,13 @@ from agent.orch_synthesizer import synthesize
 from agent.orch_tool_registry import get_registry
 from agent.orch_session import get_context, add_message, new_session_id
 from agent.orch_tracer import DecisionTracer, Trace
-from agent.orch_reputation import add_decision_event, get_trace, get_ledger
+from agent.orch_reputation import get_trace, get_ledger
+# "живая память" (owner request): decision events now persist to the
+# hardened, GRANT+trigger-protected dedicated SQL instance (agent/db/sql/
+# shadow_write.py) instead of agent.orch_reputation's dead stub —
+# see that stub's own "Заглушка для совместимости с Decision Ledger"
+# docstring. Import alias keeps every call site below unchanged.
+from agent.db.sql.shadow_write import shadow_record_decision_event as add_decision_event
 from agent.orch_tag_tree import update_tree as tag_tree_update
 from agent.orch_unanswered import record_unanswered, start_listener_daemon as _start_unanswered_listener
 
@@ -266,17 +272,6 @@ def process(
     )
     cost = {}
 
-    add_decision_event(
-        event_type="DecisionStarted",
-        trace_id=trace_id,
-        entity_type="decision",
-        entity_id=decision_id,
-        verdict="STARTED",
-        reason=f"Query: {query[:100]}",
-        domain="general",
-        meta={"query": query[:200]}
-    )
-
     # Этап 5 (SQL persistence migration): shadow-only question+run
     # identity, ahead of the JSON canonical write path (unaffected
     # either way — see agent/db/sql/shadow_write.py's fail-open
@@ -289,6 +284,16 @@ def process(
     # that exits early stays "running" in SQL until agent.db.sql.
     # repositories.reconcile_stale_running_runs() is invoked (not yet
     # wired into any daemon startup path — see the final report).
+    #
+    # MUST run BEFORE the first add_decision_event() call below ("живая
+    # память" fix, live-confirmed ordering trap): decision_event.run_id
+    # carries a real FK to verification_run.run_id — this is the ONLY
+    # statement that creates that row. Calling add_decision_event()
+    # first (the ORIGINAL order) would have made the very first, most
+    # important event of every single request — "DecisionStarted" —
+    # silently fail its FK and never persist (shadow writes fail open),
+    # exactly the same class of ordering bug already fixed twice this
+    # mandate for the SQL bootstrap's own GRANT/USE sequencing.
     _sql_question = shadow_record_question_and_run(
         raw_text=query, run_id=trace_id, started_at=trace.timestamp,
         web_enabled=enable_web, validation_enabled=enable_validation,
@@ -296,6 +301,17 @@ def process(
         log=log, verbose=verbose,
     )
     _sql_question_id = _sql_question["question_id"] if _sql_question else None
+
+    add_decision_event(
+        event_type="DecisionStarted",
+        trace_id=trace_id,
+        entity_type="decision",
+        entity_id=decision_id,
+        verdict="STARTED",
+        reason=f"Query: {query[:100]}",
+        domain="general",
+        meta={"query": query[:200]}
+    )
 
     # Pre-pipeline — extracted to agent/orchestrator/pre_pipeline.py
     # (structural extraction; behavior unchanged). 11 short-circuit
