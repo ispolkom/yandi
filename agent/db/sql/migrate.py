@@ -24,7 +24,7 @@ from agent.db.sql.schema import (
     SCHEMA_VERSION,
 )
 
-SCHEMA_VERSION_DESCRIPTION = "v2: + decision_event (append-only decision/reasoning ledger)"
+SCHEMA_VERSION_DESCRIPTION = "v3: + integrity_journal (\"10-year bastion\" Layer 4 tamper-evidence hash-chain)"
 
 
 def record_schema_version(
