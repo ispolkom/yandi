@@ -1,0 +1,116 @@
+# deploy/yandi-orchestrator.service — "10-year bastion" OS-identity
+# separation (owner mandate): the real YANDI process (pet/council_
+# chat_server.py — confirmed via `if __name__ == "__main__": ...
+# uvicorn.run(...)`, the real production FastAPI/uvicorn entrypoint,
+# not agent/orchestrator_v2.py's bare CLI script) must run under its
+# OWN dedicated OS identity (yandi-agent), never the operator's own
+# interactive login ("iam") that any human, Claude Code session, or
+# other coding-assistant (Codex) ALSO uses. auth_socket authenticates
+# by OS peer UID alone — it cannot distinguish "the real daemon" from
+# "a human/assistant logged in as the same account", so this identity
+# separation IS the actual security boundary, not a formality.
+#
+# NOT INSTALLED. Not copied to /etc/systemd/system/. Not enabled. Not
+# started. This file is a DESIGN ARTIFACT, same convention as deploy/
+# yandi-db.service — reviewed here, applied only by a future,
+# owner-authorized `sudo ./install-yandi.sh` run (see that script's own
+# create_os_identity(), which creates the yandi-agent system account
+# and adds it to the yandi-db group so it can reach the dedicated
+# MySQL socket at all).
+#
+# Every sandboxing directive below is commented with WHY / WHAT IT
+# BLOCKS / RISK, per this project's own established discipline (see
+# yandi-db.service) of not copying a hardening checklist blindly.
+# Several are marked "REQUIRES LIVE VERIFICATION" — this file does not
+# claim they are proven to work with this application; that can only
+# be checked once this unit is actually started for real.
+
+[Unit]
+Description=YANDI orchestrator / council chat server (dedicated agent identity)
+After=network.target yandi-db.service
+Wants=yandi-db.service
+# WHY "Wants=" not "Requires=": this process degrades gracefully with
+# SQL unreachable (SqlShadow SKIPPED, live-confirmed behavior this
+# session) rather than needing a hard dependency — a transient
+# yandi-db outage should not also take the whole council server down.
+
+[Service]
+Type=simple
+User=yandi-agent
+Group=yandi-agent
+# WHY: the entire point of this unit — a process identity distinct
+# from every interactive login (owner, Claude Code, Codex, or any
+# other assistant session), so yandi_runtime's auth_socket binding
+# (agent/db/sql/bootstrap.py's auth_socket_binding_matches()/
+# rebind_auth_socket_statement()) actually excludes them all. WHAT IT
+# BLOCKS: nothing the application itself needs — it never requires
+# root or setuid. RISK: low. Supplementary group membership in
+# yandi-db (added by install-yandi.sh's create_os_identity(), NOT by
+# this unit) is what lets this identity traverse RUNTIME_MYSQL_DIR to
+# reach the dedicated socket at all — systemd preserves a User='s
+# supplementary groups by default, so no extra directive is needed
+# here for that.
+
+WorkingDirectory=/home/iam/yandi
+# REQUIRES LIVE VERIFICATION: this path is this session's actual
+# checkout location — must match wherever install-yandi.sh's own
+# deployment target actually places the repository.
+
+ExecStart=/home/iam/venv/bin/python3 -m pet.council_chat_server
+# REQUIRES LIVE VERIFICATION: confirms this venv actually has every
+# package pet/council_chat_server.py imports (fastapi, uvicorn, redis,
+# etc.) installed — not independently re-verified in this design pass.
+# Deliberately no --allow-shell-full / --allow-net flags: this unit
+# runs with this script's OWN default (most restrictive) tool-sandbox
+# posture unless a future, explicit owner decision widens it.
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# ── Filesystem sandboxing ────────────────────────────────────────────
+# NOT ProtectSystem=strict here (unlike yandi-db.service): this
+# process's actual write set (trace files under registry/dataset/
+# orch_traces/, agent/dataset/episodes_*.jsonl, application logs) was
+# not exhaustively enumerated in this design pass the way the DB
+# instance's fixed datadir/keyring/log paths were — declaring
+# ReadWritePaths= for an incomplete list would silently BREAK the
+# service (a missing path fails a write, not a clean permission
+# error most users would recognize) rather than just be less strict
+# than ideal. Documented here as a concrete follow-up for whoever
+# performs the live install: run this unit once under `ProtectSystem=
+# strict` + `ReadOnlyPaths=/home/iam/yandi` + a best-guess
+# ReadWritePaths list, watch for permission-denied entries in `journalctl
+# -u yandi-orchestrator`, and iterate — the same "REQUIRES LIVE
+# VERIFICATION, do not guess a complete list blind" discipline already
+# used throughout yandi-db.service.
+
+ProtectHome=read-only
+# WHY: this process has no legitimate reason to WRITE into any user's
+# home directory (it reads its own code from /home/iam/yandi, which is
+# still reachable under read-only home protection). WHAT IT BLOCKS:
+# writes to /home/**, /root/**, /run/user/** — RISK: none expected;
+# every real write path this process needs is under the repo tree
+# itself or /run/yandi (the DB socket, read-only from this side).
+
+NoNewPrivileges=true
+# WHY: closes privilege-escalation via a setuid/setgid binary or file
+# capability, the same reasoning as yandi-db.service's own directive.
+# WHAT IT BLOCKS: any syscall that would INCREASE this process's
+# privilege. RISK: none — this application never needs to gain
+# privilege after starting.
+
+# ── Not included, and why ────────────────────────────────────────────
+# RestrictAddressFamilies=AF_UNIX (unlike yandi-db.service)
+#   — this unit MUST make outbound network calls (web search/fetch,
+#   external LLM APIs) and serves inbound HTTP on --host/--port, unlike
+#   the network-isolated dedicated DB instance. No address-family
+#   restriction is meaningful here without breaking the application's
+#   actual purpose.
+# ProtectSystem=strict / SystemCallFilter=
+#   — see the filesystem-sandboxing note above: deferred to the live
+#   install phase, where the process's actual behavior can be observed
+#   (journalctl) rather than guessed at in a design-only pass.
+
+[Install]
+WantedBy=multi-user.target

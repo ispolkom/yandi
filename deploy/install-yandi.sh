@@ -99,13 +99,16 @@ INSTANCE_ID_FILE="${CONFIG_DIR}/instance.id"
 FRESH_INIT_MARKER="${RUNTIME_BOOTSTRAP_DIR}/fresh_init_temp_password"
 YANDI_REPO="/home/iam/yandi"
 YANDI_VENV_PYTHON="/home/iam/venv/bin/python3"
-# The real OS user the AGENT process runs as today (confirmed during
-# the 5E-S2 audit — DEDICATED_INSTANCE_DESIGN.md §H) — YANDI_RUNTIME is
-# created with auth_socket mapped to THIS name, not a YANDI-internal
-# label. If the agent's OS identity ever changes (e.g. a future
-# dedicated `yandi-agent` system account), update this ONE line as
-# part of that same change.
-AGENT_OS_USER="iam"
+# SECURITY ("10-year bastion" hardening, owner mandate): a DEDICATED
+# system account for the real YANDI process — never the operator's own
+# interactive login. This used to be "iam", the SAME account any
+# interactive shell, Claude Code session, or other coding-assistant
+# session runs as — auth_socket authenticates by OS peer UID alone, so
+# it could never tell "the real daemon" apart from "a human/assistant
+# logged in as iam." YANDI_RUNTIME is created with auth_socket mapped
+# to THIS name; create_os_identity() creates the account itself
+# (system account, no login shell, no password) if it doesn't exist.
+AGENT_OS_USER="yandi-agent"
 
 # Set by main()'s argument parsing — default OFF. See
 # reinitialize_empty_instance_guard() for the fail-closed conditions
@@ -226,6 +229,25 @@ create_os_identity() {
             --home-dir "$YANDI_DB_HOME" "$YANDI_DB_USER"
         log "created system user $YANDI_DB_USER"
     fi
+
+    # SECURITY ("10-year bastion"): the dedicated identity the real
+    # YANDI agent process runs as — see AGENT_OS_USER's own comment at
+    # the top of this script for why this must never be an interactive
+    # operator/assistant login. No shell, no home directory, no
+    # password — this account exists ONLY to be peer-UID-matched by
+    # auth_socket and to run the orchestrator's own systemd service
+    # (see deploy/yandi-orchestrator.service).
+    if id "$AGENT_OS_USER" >/dev/null 2>&1; then
+        log "OS user $AGENT_OS_USER already exists — skipping useradd"
+    else
+        useradd --system --no-create-home --shell /usr/sbin/nologin "$AGENT_OS_USER"
+        log "created system user $AGENT_OS_USER (dedicated YANDI agent identity)"
+    fi
+    # Group membership is what actually lets this identity traverse
+    # RUNTIME_MYSQL_DIR (0750, owned $YANDI_DB_USER:$YANDI_DB_USER) to
+    # reach the dedicated socket at all — idempotent, usermod -aG is a
+    # safe no-op when the membership already exists.
+    usermod -aG "$YANDI_DB_USER" "$AGENT_OS_USER"
 }
 
 # ============================================================
