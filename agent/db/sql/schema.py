@@ -46,7 +46,7 @@ DESIGN NOTES (read before changing a table):
    no HTTP retry chatter. RUN_ERROR is 5 columns, not a log warehouse.
 """
 
-SCHEMA_VERSION = 3  # v3: + integrity_journal ("10-year bastion" Layer 4 tamper-evidence hash-chain)
+SCHEMA_VERSION = 4  # v4: + grievance, forgiveness_capacity (SQL-backed character/relationship state)
 
 SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -754,6 +754,59 @@ CREATE TABLE IF NOT EXISTS integrity_journal (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
+# ── GRIEVANCE / FORGIVENESS_CAPACITY ─────────────────────────────────────
+# SQL-backed replacement for the OLD JSON-file-based agent/forgiveness_
+# model.py (registry/forgiveness_{user_id}.json) — owner mandate: YANDI
+# should have real character (she can be offended; a plain apology
+# doesn't automatically fix things), and this state must live under the
+# SAME access-control model as everything else in this database (Layers
+# 1-4 "10-year bastion") rather than a plain JSON file any OS user with
+# filesystem access — including the owner's own login and Claude/Codex
+# sessions — could edit directly, which would make the whole bastion
+# meaningless for exactly this piece of memory.
+#
+# agent/relationship_memory.py is the ONLY intended caller — it ports
+# ForgivenessModel's full state-machine logic (registered->acknowledged
+# ->understood->healing->forgiven/unforgiven, forgiveness_capacity
+# gating, minimum healing time) against these tables instead of a JSON
+# file. agent/forgiveness_model.py and agent/inner_state.py are left
+# untouched (dead code, still not wired into production) — see this
+# session's own investigation for why two incompatible JSON-based
+# models existed before this SQL one.
+#
+# Classified "C" (not "D"): UPDATE is legitimate (a grievance's status
+# progresses over its own lifetime, same as belief/semantic_edge being
+# recomputed) and there is no legitimate DELETE case — no bespoke guard
+# trigger needed, immutability_triggers()'s existing class-C handling
+# (UPDATE allowed, DELETE blocked) covers both tables for free.
+GRIEVANCE = """
+CREATE TABLE IF NOT EXISTS grievance (
+    id                VARCHAR(64) PRIMARY KEY,
+    user_id           VARCHAR(64) NOT NULL,
+    event_type        VARCHAR(40) NOT NULL,     -- insult, dishonesty, manipulation, disrespect, ...
+    description       TEXT NOT NULL,
+    severity          FLOAT NOT NULL,           -- 0-1
+    status            VARCHAR(20) NOT NULL DEFAULT 'registered',
+    apology_sincerity FLOAT NOT NULL DEFAULT 0.0,
+    context           JSON NULL,
+    created_at        DATETIME NOT NULL,
+    apology_at        DATETIME NULL,
+    understood_at     DATETIME NULL,
+    forgiven_at       DATETIME NULL,
+    updated_at        DATETIME NOT NULL,
+    KEY idx_grievance_user_status (user_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+FORGIVENESS_CAPACITY = """
+CREATE TABLE IF NOT EXISTS forgiveness_capacity (
+    user_id          VARCHAR(64) PRIMARY KEY,
+    capacity         FLOAT NOT NULL DEFAULT 50.0,  -- 0-100
+    last_forgiveness DATETIME NULL,
+    updated_at       DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
 # ── INSTANCE_IDENTITY ────────────────────────────────────────────────────
 # DATABASE BOOTSTRAP V1, mandate §4. Classified "A" (canonical immutable
 # identity, TABLE_CLASSIFICATION's own definition: "one row per identity,
@@ -811,6 +864,8 @@ ALL_TABLES_IN_ORDER = [
     ("run_error", RUN_ERROR),
     ("decision_event", DECISION_EVENT),
     ("integrity_journal", INTEGRITY_JOURNAL),
+    ("grievance", GRIEVANCE),
+    ("forgiveness_capacity", FORGIVENESS_CAPACITY),
     ("instance_identity", INSTANCE_IDENTITY),
 ]
 
@@ -868,6 +923,8 @@ TABLE_CLASSIFICATION = {
     "integrity_journal": "B",
     "belief": "C",
     "semantic_edge": "C",
+    "grievance": "C",
+    "forgiveness_capacity": "C",
     "verification_run": "D",
     "instance_identity": "A",
 }
