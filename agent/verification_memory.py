@@ -736,3 +736,74 @@ def get_family_historical_evidence(
         )
 
     return results
+
+
+def get_family_historical_claims(
+    family_id: str,
+    log=None,
+    verbose: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    "Живая память" (owner request): CLAIM-LEVEL historical summary for
+    this semantic family — one row per distinct historical claim
+    occurrence ever linked into it, newest first (same ORDER BY
+    observed_at DESC as _query_index_by_family already provides).
+    Sibling to get_family_historical_evidence() above, which returns
+    EVIDENCE-relation-level detail instead — this one exists because a
+    caller that wants to say "here's what I concluded last time" needs
+    the historical claim's own text/status/confidence and the ORIGINAL
+    question that produced it, none of which the evidence-relation shape
+    carries.
+
+    Returns raw historical facts only, never a verdict about whether
+    anything "changed" — that comparison is the caller's job (see
+    agent/claim_history_note.py::build_claim_history_notes(), the one
+    current consumer). Each dict:
+        semantic_family_id, claim_id, trace_id, query (the ORIGINAL
+        question text that produced this historical claim, truncated to
+        500 chars same as orch_tracer.Trace's own serialization),
+        claim_text, verification_status, claim_confidence, observed_at.
+
+    Deduplicated by claim_id (a claim occurrence is per-request; the
+    underlying locator table can only ever have one index row per
+    claim_id, but this stays defensive rather than assuming that)."""
+    rows = _query_index_by_family(family_id)
+
+    results: List[Dict[str, Any]] = []
+    seen_claim_ids: set = set()
+
+    for row in rows:
+        claim_id = row["claim_id"]
+        if claim_id in seen_claim_ids:
+            continue
+        seen_claim_ids.add(claim_id)
+
+        trace_dict = _read_trace_line(row["jsonl_file"], row["byte_offset"])
+        if not trace_dict:
+            continue
+
+        historical_claim = next(
+            (c for c in trace_dict.get("claims", []) if c.get("claim_id") == claim_id),
+            None,
+        )
+        if not historical_claim:
+            continue
+
+        results.append({
+            "semantic_family_id": family_id,
+            "claim_id": claim_id,
+            "trace_id": row["trace_id"],
+            "query": trace_dict.get("query"),
+            "claim_text": historical_claim.get("claim_text"),
+            "verification_status": historical_claim.get("verification_status"),
+            "claim_confidence": historical_claim.get("claim_confidence"),
+            "observed_at": row["observed_at"],
+        })
+
+    if verbose and log:
+        log(
+            f"[VerificationMemory] family_historical_claims family_id={family_id} "
+            f"occurrences={len(rows)} claims={len(results)}"
+        )
+
+    return results
