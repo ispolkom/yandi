@@ -270,8 +270,8 @@ impl Line {
         LineStats {
             line_id: self.id,
             pending_trains: depot.train_count(),
-            queue_size: ordering.queue_size(),
-            next_sequence: ordering.next_sequence(),
+            queue_size: ordering.queue_size().await,
+            next_sequence: ordering.next_sequence().await,
             stored_trains: sent_wagons.len(),
         }
     }
