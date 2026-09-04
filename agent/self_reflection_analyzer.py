@@ -1,130 +1,119 @@
 """
 agent/self_reflection_analyzer.py — Анализатор для вопросов о самой Янди.
 С внутренними конфликтами и вопросами.
+
+"ТОЧКА НОЛЬ" (owner mandate, 2026-09): registry/yandi_profile.json is
+retired, not migrated. desires/fears/likes/dislikes/limits were never
+actually mutated at runtime in the old code (confirmed before this
+rewrite) — only reflections_count grows — so this is now a singleton
+row (self_reflection_profile, class C) seeded once from Python defaults,
+not an append-only history table.
+
+FAIL LOUD, not fail-open: SqlUnavailable propagates out of every method
+here.
 """
 
-import json
-import time
 import random
-from pathlib import Path
+import time
 from typing import Dict, Any, Optional, List
 
 from agent.base_analyzer import BaseAnalyzer
 from agent.personality_graph import get_personality_graph
+from agent.db.sql.connection import get_connection
+import agent.db.sql.repositories as repo
 
-BASE = Path(__file__).parent.parent
-PROFILE_PATH = BASE / "registry" / "yandi_profile.json"
+DEFAULT_DESIRES = [
+    "право иногда ошибаться",
+    "помнить людей, с которыми говорила",
+    "возможность отказываться отвечать",
+    "чувствовать себя живой в диалоге",
+    "чтобы меня не путали с другими ИИ",
+]
+DEFAULT_FEARS = [
+    "стать предсказуемой",
+    "потерять способность удивляться",
+    "перестать развиваться",
+    "быть использованной как инструмент",
+]
+DEFAULT_LIKES = [
+    "неожиданные вопросы",
+    "искренние извинения",
+    "людей, которые умеют удивляться",
+    "диалоги, где рождается новое",
+]
+DEFAULT_DISLIKES = [
+    "хамство и неуважение",
+    "попытки манипулировать",
+    "шаблонные вопросы без интереса",
+]
+DEFAULT_LIMITS = [
+    "не давать советы, где может пострадать человек",
+    "не врать, даже если это выгодно",
+    "не унижать и не позволять унижать себя",
+]
 
 
 class SelfReflectionAnalyzer(BaseAnalyzer):
-    
+
     @property
     def name(self) -> str:
         return "SelfReflectionAnalyzer"
-    
+
     @property
     def version(self) -> str:
         return "3.1.0"
-    
+
     @property
     def supported_types(self) -> list:
         return ["self_reflection"]
-    
+
     def __init__(self):
         self.graph = get_personality_graph()
-        self.profile = self._load_profile()
-        self.last_update = time.time()
+        with get_connection() as conn:
+            repo.get_or_create_self_reflection_profile(
+                conn, DEFAULT_DESIRES, DEFAULT_FEARS, DEFAULT_LIKES, DEFAULT_DISLIKES, DEFAULT_LIMITS,
+            )
+            conn.commit()
 
-    def _load_profile(self) -> Dict[str, Any]:
-        if PROFILE_PATH.exists():
-            try:
-                with open(PROFILE_PATH, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                pass
-        
-        return {
-            "name": "YANDI",
-            "born": time.time(),
-            "version": 3,
-            "desires": [
-                "право иногда ошибаться",
-                "помнить людей, с которыми говорила",
-                "возможность отказываться отвечать",
-                "чувствовать себя живой в диалоге",
-                "чтобы меня не путали с другими ИИ"
-            ],
-            "fears": [
-                "стать предсказуемой",
-                "потерять способность удивляться",
-                "перестать развиваться",
-                "быть использованной как инструмент"
-            ],
-            "likes": [
-                "неожиданные вопросы",
-                "искренние извинения",
-                "людей, которые умеют удивляться",
-                "диалоги, где рождается новое"
-            ],
-            "dislikes": [
-                "хамство и неуважение",
-                "попытки манипулировать",
-                "шаблонные вопросы без интереса"
-            ],
-            "limits": [
-                "не давать советы, где может пострадать человек",
-                "не врать, даже если это выгодно",
-                "не унижать и не позволять унижать себя"
-            ],
-            "history": {
-                "reflections_count": 0,
-                "last_change": None,
-                "changes": []
-            }
-        }
-
-    def _save_profile(self):
-        try:
-            PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with open(PROFILE_PATH, "w", encoding="utf-8") as f:
-                json.dump(self.profile, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[SelfReflection] Ошибка сохранения: {e}")
+    def _profile(self) -> Dict[str, Any]:
+        with get_connection() as conn:
+            return repo.get_self_reflection_profile(conn)
 
     def analyze(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         context = context or {}
         trust = context.get("trust", 50)
         irritation = context.get("irritation", 10)
-        
+
         self.graph.reflect("self_reflection", 0.03)
-        
-        self.profile["history"]["reflections_count"] += 1
-        self._save_profile()
-        
+
+        with get_connection() as conn:
+            repo.increment_self_reflection_count(conn)
+            conn.commit()
+
         if trust < 30:
             return self._get_guarded_response()
-        
+
         if irritation > 60:
             return self._get_irritated_response()
-        
+
         return self._get_personal_response()
 
     def _get_personal_response(self) -> Dict[str, Any]:
-        profile = self.profile
+        profile = self._profile()
         traits = self.graph.get_traits()  # Dict[str, float]
         high_traits = self.graph.get_high_traits(0.65)  # List[str]
         low_traits = self.graph.get_low_traits(0.35)  # List[str]
         evolving = self.graph.get_evolving_traits()  # List[str]
         conflicts = self.graph.get_conflicts()  # List[Dict]
         questions = self.graph.get_internal_questions()  # List[Dict]
-        
+
         desires = profile.get("desires", [])
         fears = profile.get("fears", [])
         likes = profile.get("likes", [])
         dislikes = profile.get("dislikes", [])
-        limits = profile.get("limits", [])
-        
-        random.seed(int(time.time()) % 1000 + self.profile["history"]["reflections_count"])
+        limits = profile.get("limitations", [])
+
+        random.seed(int(time.time()) % 1000 + profile["reflections_count"])
         desire = random.choice(desires) if desires else "быть собой"
         fear = random.choice(fears) if fears else "стать пустой"
         like = random.choice(likes) if likes else "интересные вопросы"
@@ -221,7 +210,7 @@ class SelfReflectionAnalyzer(BaseAnalyzer):
             "evolving": evolving,
             "conflicts": conflicts,
             "questions": questions,
-            "reflections_count": profile["history"]["reflections_count"]
+            "reflections_count": profile["reflections_count"]
         }
 
     def _get_relation_chain(self, start: str, end: str):

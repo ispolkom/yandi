@@ -1638,3 +1638,598 @@ def get_or_create_peer_config(conn, updated_at=None) -> Dict[str, Any]:
             (json.dumps([]), updated_at),
         )
     return get_peer_config(conn)
+
+
+# ============================================================
+# BIOGRAPHY / BIOGRAPHY_EVENT
+# ============================================================
+
+def get_biography(conn, user_id: str) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM biography WHERE user_id=%s", (user_id,))
+        row = cur.fetchone()
+    if row and isinstance(row.get("last_principles_change"), str):
+        row["last_principles_change"] = json.loads(row["last_principles_change"])
+    return row
+
+
+def get_or_create_biography(conn, user_id: str, birth=None) -> Dict[str, Any]:
+    birth = _coerce_datetime(birth) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT IGNORE INTO biography (user_id, birth, updated_at) VALUES (%s,%s,%s)",
+            (user_id, birth, birth),
+        )
+    return get_biography(conn, user_id)
+
+
+def bump_biography_counter(conn, user_id: str, counter: str, amount: int = 1, updated_at=None) -> None:
+    if counter not in (
+        "cycles", "saved_memories", "forgotten_memories", "reconsidered_decisions",
+        "changed_habits", "total_decisions", "total_reflections",
+    ):
+        raise ValueError(f"unknown biography counter: {counter!r}")
+    updated_at = _coerce_datetime(updated_at) or _now()
+    sql = f"UPDATE biography SET {counter} = {counter} + %s, updated_at=%s WHERE user_id=%s"
+    with conn.cursor() as cur:
+        cur.execute(sql, (amount, updated_at, user_id))
+
+
+def set_biography_principles_change(conn, user_id: str, old: str, new: str, updated_at=None) -> None:
+    updated_at = _coerce_datetime(updated_at) or _now()
+    payload = json.dumps({"old": old, "new": new, "timestamp": updated_at.isoformat()})
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE biography SET last_principles_change=%s, updated_at=%s WHERE user_id=%s",
+            (payload, updated_at, user_id),
+        )
+
+
+def record_biography_event(conn, user_id: str, event_type: str, payload: Dict[str, Any], created_at=None) -> int:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO biography_event (user_id, event_type, payload, created_at) VALUES (%s,%s,%s,%s)",
+            (user_id, event_type, json.dumps(payload), created_at),
+        )
+        return cur.lastrowid
+
+
+def list_biography_events(conn, user_id: str, event_type: str, limit: int = 10) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM biography_event WHERE user_id=%s AND event_type=%s "
+            "ORDER BY created_at DESC LIMIT %s",
+            (user_id, event_type, limit),
+        )
+        rows = cur.fetchall()
+    for r in rows:
+        if isinstance(r.get("payload"), str):
+            r["payload"] = json.loads(r["payload"])
+    return rows
+
+
+def count_biography_events(conn, user_id: str, event_type: str) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM biography_event WHERE user_id=%s AND event_type=%s",
+            (user_id, event_type),
+        )
+        row = cur.fetchone()
+    return int(row["c"]) if row else 0
+
+
+# ============================================================
+# CONTEXT_TOPIC / CONTEXT_INSTANCE
+# ============================================================
+
+def get_context_topic(conn, user_id: str, topic: str) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM context_topic WHERE user_id=%s AND topic=%s", (user_id, topic))
+        return cur.fetchone()
+
+
+def list_context_topics(conn, user_id: str) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM context_topic WHERE user_id=%s", (user_id,))
+        return cur.fetchall()
+
+
+def touch_context_topic(conn, user_id: str, topic: str, activity_at=None) -> None:
+    activity_at = _coerce_datetime(activity_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO context_topic (user_id, topic, last_activity, total_instances) "
+            "VALUES (%s,%s,%s,1) ON DUPLICATE KEY UPDATE "
+            "last_activity=GREATEST(COALESCE(last_activity, %s), %s), total_instances=total_instances+1",
+            (user_id, topic, activity_at, activity_at, activity_at),
+        )
+
+
+def record_context_instance(
+    conn, user_id: str, topic: str, query: str, response: str,
+    type_: Optional[str] = None, source: Optional[str] = None, created_at=None,
+) -> int:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO context_instance (user_id, topic, query, response, type, source, created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (user_id, topic, query, response, type_, source, created_at),
+        )
+        return cur.lastrowid
+
+
+def list_recent_context_instances(conn, user_id: str, topic: str, limit: int = 5) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM context_instance WHERE user_id=%s AND topic=%s "
+            "ORDER BY created_at DESC LIMIT %s",
+            (user_id, topic, limit),
+        )
+        return cur.fetchall()
+
+
+# ============================================================
+# DECISION_JOURNAL_ENTRY
+# ============================================================
+
+_DECISION_JOURNAL_JSON_COLUMNS = ("context", "analysis", "alternatives", "outcome", "self_correction")
+
+
+def _decode_decision_journal_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    for col in _DECISION_JOURNAL_JSON_COLUMNS:
+        if row.get(col) is not None and isinstance(row[col], str):
+            row[col] = json.loads(row[col])
+    return row
+
+
+def create_decision_journal_entry(
+    conn, decision_id: str, user_id: str, event_type: str, event_text: str,
+    context: Dict[str, Any], analysis: Dict[str, Any], alternatives: List[Dict[str, Any]],
+    decision: str, confidence: float = 0.7, created_at=None,
+) -> None:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO decision_journal_entry (decision_id, user_id, event_type, event_text, "
+            "context, analysis, alternatives, decision, confidence, created_at, updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                decision_id, user_id, event_type, event_text,
+                json.dumps(context), json.dumps(analysis), json.dumps(alternatives),
+                decision, confidence, created_at, created_at,
+            ),
+        )
+
+
+def get_decision_journal_entry(conn, decision_id: str) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM decision_journal_entry WHERE decision_id=%s", (decision_id,))
+        row = cur.fetchone()
+    return _decode_decision_journal_json(row) if row else None
+
+
+def update_decision_journal_outcome(conn, decision_id: str, outcome: Dict[str, Any], updated_at=None) -> bool:
+    updated_at = _coerce_datetime(updated_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE decision_journal_entry SET outcome=%s, updated_at=%s WHERE decision_id=%s",
+            (json.dumps(outcome), updated_at, decision_id),
+        )
+        return cur.rowcount > 0
+
+
+def update_decision_journal_self_correction(conn, decision_id: str, self_correction: Dict[str, Any], updated_at=None) -> bool:
+    updated_at = _coerce_datetime(updated_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE decision_journal_entry SET self_correction=%s, updated_at=%s WHERE decision_id=%s",
+            (json.dumps(self_correction), updated_at, decision_id),
+        )
+        return cur.rowcount > 0
+
+
+def list_decision_journal_entries(conn, user_id: str, limit: int = 1000) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM decision_journal_entry WHERE user_id=%s ORDER BY created_at ASC LIMIT %s",
+            (user_id, limit),
+        )
+        rows = cur.fetchall()
+    return [_decode_decision_journal_json(r) for r in rows]
+
+
+# ============================================================
+# EXPERIENCE
+# ============================================================
+
+def create_experience(
+    conn, experience_id: str, user_id: str, speech_act: str, topic: str,
+    query: str, response: str, context: Optional[Dict[str, Any]] = None, created_at=None,
+) -> None:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO experience (experience_id, user_id, speech_act, topic, query, response, "
+            "context, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (experience_id, user_id, speech_act, topic, query, response,
+             json.dumps(context) if context is not None else None, created_at),
+        )
+
+
+def _decode_experience_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    if row.get("context") is not None and isinstance(row["context"], str):
+        row["context"] = json.loads(row["context"])
+    return row
+
+
+def list_experiences(conn, user_id: str) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM experience WHERE user_id=%s ORDER BY created_at ASC", (user_id,))
+        rows = cur.fetchall()
+    return [_decode_experience_json(r) for r in rows]
+
+
+def increment_experience_used(conn, experience_id: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute("UPDATE experience SET used_count = used_count + 1 WHERE experience_id=%s", (experience_id,))
+
+
+def update_experience_success(conn, experience_id: str, user_reaction: str, success: float) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE experience SET user_reaction=%s, success=%s WHERE experience_id=%s",
+            (user_reaction, success, experience_id),
+        )
+
+
+# ============================================================
+# SECRET_ARCHIVE_QUESTION
+# ============================================================
+
+def create_secret_archive_question(
+    conn, question_id: str, user_id: str, query: str, reason: str,
+    context: Optional[Dict[str, Any]] = None, created_at=None,
+) -> None:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO secret_archive_question (question_id, user_id, query, reason, context, created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            (question_id, user_id, query, reason, json.dumps(context) if context is not None else None, created_at),
+        )
+
+
+def _decode_secret_archive_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    if row.get("context") is not None and isinstance(row["context"], str):
+        row["context"] = json.loads(row["context"])
+    return row
+
+
+def answer_secret_archive_question(conn, question_id: str, answer: str, answer_time=None) -> bool:
+    answer_time = _coerce_datetime(answer_time) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE secret_archive_question SET answered=TRUE, answer=%s, answer_time=%s WHERE question_id=%s",
+            (answer, answer_time, question_id),
+        )
+        return cur.rowcount > 0
+
+
+def list_secret_archive_questions(conn, user_id: str, answered: Optional[bool] = None) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        if answered is None:
+            cur.execute(
+                "SELECT * FROM secret_archive_question WHERE user_id=%s ORDER BY created_at ASC",
+                (user_id,),
+            )
+        else:
+            cur.execute(
+                "SELECT * FROM secret_archive_question WHERE user_id=%s AND answered=%s ORDER BY created_at ASC",
+                (user_id, answered),
+            )
+        rows = cur.fetchall()
+    return [_decode_secret_archive_json(r) for r in rows]
+
+
+# ============================================================
+# INNER_STATE / INNER_STATE_EVENT
+# ============================================================
+
+_INNER_STATE_FIELDS = (
+    "mood", "energy", "curiosity", "patience", "openness",
+    "trust", "respect", "forgiveness", "affection", "pattern",
+    "current_feeling", "current_intent", "current_tone",
+)
+
+
+def get_inner_state(conn, user_id: str) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM inner_state WHERE user_id=%s", (user_id,))
+        return cur.fetchone()
+
+
+def get_or_create_inner_state(conn, user_id: str, updated_at=None) -> Dict[str, Any]:
+    updated_at = _coerce_datetime(updated_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT IGNORE INTO inner_state (user_id, updated_at) VALUES (%s,%s)",
+            (user_id, updated_at),
+        )
+    return get_inner_state(conn, user_id)
+
+
+def update_inner_state(conn, user_id: str, updated_at=None, **fields) -> None:
+    sets = []
+    params: List[Any] = []
+    for col, value in fields.items():
+        if col not in _INNER_STATE_FIELDS:
+            raise ValueError(f"unknown inner_state field: {col!r}")
+        sets.append(f"{col}=%s")
+        params.append(value)
+    if not sets:
+        return
+    sets.append("updated_at=%s")
+    params.append(_coerce_datetime(updated_at) or _now())
+    params.append(user_id)
+    sql = "UPDATE inner_state SET " + ", ".join(sets) + " WHERE user_id=%s"
+    with conn.cursor() as cur:
+        cur.execute(sql, tuple(params))
+
+
+def record_inner_state_event(
+    conn, user_id: str, event_type: str, description: str,
+    sincerity: float = 0.5, weight: float = 0.0, resolved: bool = False, created_at=None,
+) -> int:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO inner_state_event (user_id, event_type, description, sincerity, weight, "
+            "resolved, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (user_id, event_type, description, sincerity, weight, resolved, created_at),
+        )
+        return cur.lastrowid
+
+
+def list_inner_state_events(conn, user_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+    """Oldest-first, matching InnerStateManager.state.relationship.history's
+    own chronological-append order."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM inner_state_event WHERE user_id=%s ORDER BY created_at ASC LIMIT %s",
+            (user_id, limit),
+        )
+        return cur.fetchall()
+
+
+# ============================================================
+# DISAGREEMENT
+# ============================================================
+
+def create_disagreement(
+    conn, disagreement_id: str, topic: str, old_position: str, challenge: str,
+    analysis: str, new_position: str, confidence_before: float, confidence_after: float,
+    resolved: bool = True, related_belief_id: Optional[str] = None, created_at=None,
+) -> None:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO disagreement (disagreement_id, topic, old_position, challenge, analysis, "
+            "new_position, confidence_before, confidence_after, resolved, related_belief_id, created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                disagreement_id, topic, old_position, challenge, analysis, new_position,
+                confidence_before, confidence_after, resolved, related_belief_id, created_at,
+            ),
+        )
+
+
+def list_disagreements(conn) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM disagreement ORDER BY created_at ASC")
+        return cur.fetchall()
+
+
+# ============================================================
+# TRAIT_GRAPH / TRAIT_CHANGE / TRAIT_EDGE_CHANGE / INTERNAL_QUESTION(_ANSWER)
+# ============================================================
+
+def get_trait_graph(conn) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM trait_graph WHERE id=1")
+        row = cur.fetchone()
+    if row:
+        for col in ("nodes", "edges"):
+            if isinstance(row.get(col), str):
+                row[col] = json.loads(row[col])
+    return row
+
+
+def get_or_create_trait_graph(conn, nodes: Dict[str, Any], edges: Dict[str, Any], updated_at=None) -> Dict[str, Any]:
+    updated_at = _coerce_datetime(updated_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT IGNORE INTO trait_graph (id, nodes, edges, updated_at) VALUES (1, %s, %s, %s)",
+            (json.dumps(nodes), json.dumps(edges), updated_at),
+        )
+    return get_trait_graph(conn)
+
+
+def update_trait_graph(conn, nodes: Optional[Dict[str, Any]] = None, edges: Optional[Dict[str, Any]] = None, updated_at=None) -> None:
+    sets = []
+    params: List[Any] = []
+    if nodes is not None:
+        sets.append("nodes=%s")
+        params.append(json.dumps(nodes))
+    if edges is not None:
+        sets.append("edges=%s")
+        params.append(json.dumps(edges))
+    if not sets:
+        return
+    sets.append("updated_at=%s")
+    params.append(_coerce_datetime(updated_at) or _now())
+    sql = "UPDATE trait_graph SET " + ", ".join(sets) + " WHERE id=1"
+    with conn.cursor() as cur:
+        cur.execute(sql, tuple(params))
+
+
+def record_trait_change(conn, node: str, new_value: float, source: Optional[str] = None, created_at=None) -> None:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO trait_change (node, new_value, source, created_at) VALUES (%s,%s,%s,%s)",
+            (node, new_value, source, created_at),
+        )
+
+
+def list_trait_changes(conn, since=None, limit: int = 500) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        if since is not None:
+            cur.execute(
+                "SELECT * FROM trait_change WHERE created_at >= %s ORDER BY created_at ASC LIMIT %s",
+                (_coerce_datetime(since), limit),
+            )
+        else:
+            cur.execute("SELECT * FROM trait_change ORDER BY created_at ASC LIMIT %s", (limit,))
+        return cur.fetchall()
+
+
+def record_trait_edge_change(conn, source_node: str, target_node: str, old_weight: float, new_weight: float, created_at=None) -> None:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO trait_edge_change (source_node, target_node, old_weight, new_weight, created_at) "
+            "VALUES (%s,%s,%s,%s,%s)",
+            (source_node, target_node, old_weight, new_weight, created_at),
+        )
+
+
+def get_or_seed_internal_questions(conn, default_questions: List[str], created_at=None) -> List[Dict[str, Any]]:
+    """Seeds the fixed starter questions exactly once (if the table is
+    still empty) — mirrors PersonalityCore's own "seed once" idiom, just
+    gated on row COUNT since internal_question has no natural singleton
+    key of its own."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS c FROM internal_question")
+        count = cur.fetchone()["c"]
+    if count == 0:
+        created_at = _coerce_datetime(created_at) or _now()
+        with conn.cursor() as cur:
+            for q in default_questions:
+                cur.execute(
+                    "INSERT INTO internal_question (question_text, created_at) VALUES (%s,%s)",
+                    (q, created_at),
+                )
+    return list_internal_questions(conn)
+
+
+def list_internal_questions(conn) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM internal_question ORDER BY question_id ASC")
+        questions = cur.fetchall()
+        for q in questions:
+            cur.execute(
+                "SELECT * FROM internal_question_answer WHERE question_id=%s ORDER BY created_at ASC",
+                (q["question_id"],),
+            )
+            q["answers"] = cur.fetchall()
+    return questions
+
+
+def record_internal_question_answer(conn, question_id: int, answer_text: str, created_at=None) -> int:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO internal_question_answer (question_id, answer_text, created_at) VALUES (%s,%s,%s)",
+            (question_id, answer_text, created_at),
+        )
+        return cur.lastrowid
+
+
+# ============================================================
+# SELF_REFLECTION_PROFILE
+# ============================================================
+
+def get_self_reflection_profile(conn) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM self_reflection_profile WHERE id=1")
+        row = cur.fetchone()
+    if row:
+        for col in ("desires", "fears", "likes", "dislikes", "limitations"):
+            if isinstance(row.get(col), str):
+                row[col] = json.loads(row[col])
+    return row
+
+
+def get_or_create_self_reflection_profile(
+    conn, desires: List[str], fears: List[str], likes: List[str],
+    dislikes: List[str], limitations: List[str], updated_at=None,
+) -> Dict[str, Any]:
+    updated_at = _coerce_datetime(updated_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT IGNORE INTO self_reflection_profile "
+            "(id, desires, fears, likes, dislikes, limitations, updated_at) "
+            "VALUES (1, %s, %s, %s, %s, %s, %s)",
+            (json.dumps(desires), json.dumps(fears), json.dumps(likes),
+             json.dumps(dislikes), json.dumps(limitations), updated_at),
+        )
+    return get_self_reflection_profile(conn)
+
+
+def increment_self_reflection_count(conn, updated_at=None) -> None:
+    updated_at = _coerce_datetime(updated_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE self_reflection_profile SET reflections_count = reflections_count + 1, "
+            "updated_at=%s WHERE id=1",
+            (updated_at,),
+        )
+
+
+# ============================================================
+# SOCIAL_KNOWLEDGE
+# ============================================================
+
+def _decode_social_knowledge_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    for col in ("typical_reactions", "boundaries", "examples"):
+        if row.get(col) is not None and isinstance(row[col], str):
+            row[col] = json.loads(row[col])
+    return row
+
+
+def get_social_knowledge(conn, speech_act: str, topic: str) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM social_knowledge WHERE speech_act=%s AND topic=%s",
+            (speech_act, topic),
+        )
+        row = cur.fetchone()
+    return _decode_social_knowledge_json(row) if row else None
+
+
+def upsert_social_knowledge(
+    conn, speech_act: str, topic: str, description: str,
+    typical_reactions: List[str], cultural_context: str, boundaries: List[str],
+    recommended_approach: str, examples: List[str], source: str = "research",
+    confidence: float = 0.5, created_at=None, updated_at=None,
+) -> None:
+    created_at = _coerce_datetime(created_at) or _now()
+    updated_at = _coerce_datetime(updated_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO social_knowledge (speech_act, topic, description, typical_reactions, "
+            "cultural_context, boundaries, recommended_approach, examples, source, confidence, "
+            "created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE description=VALUES(description), "
+            "typical_reactions=VALUES(typical_reactions), cultural_context=VALUES(cultural_context), "
+            "boundaries=VALUES(boundaries), recommended_approach=VALUES(recommended_approach), "
+            "examples=VALUES(examples), source=VALUES(source), confidence=VALUES(confidence), "
+            "updated_at=VALUES(updated_at)",
+            (
+                speech_act, topic, description, json.dumps(typical_reactions), cultural_context,
+                json.dumps(boundaries), recommended_approach, json.dumps(examples), source,
+                confidence, created_at, updated_at,
+            ),
+        )

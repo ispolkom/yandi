@@ -25,6 +25,7 @@ class CharacterEngine:
     def get_context(self) -> Dict[str, Any]:
         """Возвращает контекст для orchestrator"""
         ctx = self.inner.get_response_context()
+        history = self.inner.get_history()
         return {
             "irritation": 100 - ctx.get("patience", 50),
             "trust": ctx.get("trust", 50),
@@ -32,11 +33,11 @@ class CharacterEngine:
             "forgiveness": ctx.get("forgiveness", 50),
             "mood": ctx.get("mood", "neutral"),
             "style": self.get_response_style(),
-            "total_insults": len([e for e in self.inner.state.relationship.history if "insult" in e.event_type]),
-            "total_apologies": len([e for e in self.inner.state.relationship.history if "apology" in e.event_type]),
-            "total_help": len([e for e in self.inner.state.relationship.history if e.event_type == "help"]),
-            "total_conversations": len(self.inner.state.relationship.history),
-            "events_count": len(self.inner.state.relationship.history),
+            "total_insults": len([e for e in history if "insult" in e["event_type"]]),
+            "total_apologies": len([e for e in history if "apology" in e["event_type"]]),
+            "total_help": len([e for e in history if e["event_type"] == "help"]),
+            "total_conversations": len(history),
+            "events_count": len(history),
             "pattern": ctx.get("pattern", "unknown"),
             "feeling": ctx.get("feeling", "neutral"),
             "intent": ctx.get("intent", "listen"),
