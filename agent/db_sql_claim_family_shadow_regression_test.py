@@ -46,6 +46,7 @@ import agent.orchestrator.claims.lifecycle as lifecycle_mod
 import agent.db.sql.shadow_write as sw
 import agent.db.sql.connection as sqlconn
 from agent.claim_family_registry import ClaimFamilyRegistry
+import agent.claim_family_registry as cfr_mod
 
 PASS = 0
 FAIL = 0
@@ -69,9 +70,80 @@ class _FakeEpistemicResult:
     domain = "factual"
 
 
+class _CFFakeCursor:
+    """"Точка ноль": ClaimFamilyRegistry is SQL-only now, no storage_
+    file — a small fake claim_family/family_member backing store gives
+    each _isolated_registry() call the SAME isolation the old per-call
+    tempfile used to."""
+    def __init__(self, conn):
+        self.conn = conn
+        self._result = None
+        self._results = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        norm = " ".join(sql.split())
+        upper = norm.upper()
+        self._result = None
+        self._results = None
+        if upper.startswith("INSERT IGNORE INTO CLAIM_FAMILY"):
+            family_id, domain, canonical_text, created_at, updated_at = params
+            self.conn.families.setdefault(family_id, {
+                "family_id": family_id, "domain": domain, "canonical_text": canonical_text,
+                "created_at": created_at, "updated_at": updated_at,
+            })
+        elif upper.startswith("INSERT IGNORE INTO FAMILY_MEMBER"):
+            family_id, claim_id, linked_at = params
+            self.conn.members.setdefault((family_id, claim_id), {
+                "family_id": family_id, "claim_id": claim_id, "linked_at": linked_at,
+            })
+        elif upper.startswith("SELECT FAMILY_ID, CANONICAL_TEXT FROM CLAIM_FAMILY WHERE DOMAIN=%S"):
+            (domain,) = params
+            matches = [f for f in self.conn.families.values() if f["domain"] == domain]
+            matches.sort(key=lambda f: f["created_at"])
+            self._results = [{"family_id": f["family_id"], "canonical_text": f["canonical_text"]} for f in matches]
+        elif upper.startswith("SELECT * FROM CLAIM_FAMILY WHERE FAMILY_ID=%S"):
+            (family_id,) = params
+            self._result = dict(self.conn.families[family_id]) if family_id in self.conn.families else None
+        elif upper.startswith("SELECT CLAIM_ID, LINKED_AT FROM FAMILY_MEMBER WHERE FAMILY_ID=%S"):
+            (family_id,) = params
+            matches = [m for m in self.conn.members.values() if m["family_id"] == family_id]
+            matches.sort(key=lambda m: m["linked_at"])
+            self._results = [{"claim_id": m["claim_id"], "linked_at": m["linked_at"]} for m in matches]
+
+    def fetchone(self):
+        return self._result
+
+    def fetchall(self):
+        return self._results or []
+
+
+class _CFFakeConnection:
+    def __init__(self):
+        self.families = {}
+        self.members = {}
+
+    def cursor(self):
+        return _CFFakeCursor(self)
+
+    def commit(self):
+        pass
+
+
 def _isolated_registry():
-    path = Path(tempfile.mkdtemp(prefix="p5_famshadow_")) / "families.json"
-    return ClaimFamilyRegistry(storage_file=path)
+    conn = _CFFakeConnection()
+
+    @contextlib.contextmanager
+    def _fake_get_connection(autocommit=False):
+        yield conn
+
+    cfr_mod.get_connection = _fake_get_connection
+    return ClaimFamilyRegistry()
 
 
 # ============================================================
