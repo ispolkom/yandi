@@ -64,6 +64,7 @@ from agent.orchestrator.epistemic.canonical_trust import compute_canonical_trust
 from agent.orchestrator.runtime.profiling import report_pipeline_profile
 from agent.db.sql.shadow_write import shadow_complete_run
 from agent.claim_history_note import build_claim_history_notes, format_history_note_block
+from agent.contrarian_check import check_for_alternative_theory, format_alternative_note
 
 _DOMAIN_TAG: dict[str, str] = {
     "general": "general",
@@ -719,6 +720,21 @@ def run_optimistic_respond(
     _history_notes = build_claim_history_notes(claims_data)
     if _history_notes:
         optimistic.text += format_history_note_block(_history_notes)
+
+    # CONTRARIAN CHECK (owner mandate: "янди должна не верить, искать
+    # теорию заговора") — only for genuinely web-researched, non-
+    # subjective answers (skip_rag=True means no real retrieval ran this
+    # request at all; a subjective/opinion banner already told the user
+    # this isn't a sourced factual claim in the first place, an
+    # alternative-theory check would be a non-sequitur there). Same
+    # fail-open discipline as every other best-effort step here — see
+    # agent/contrarian_check.py's own docstring for the cost/latency
+    # tradeoff this accepts in exchange for only checking topics the
+    # gate actually flags.
+    if not is_subjective_answer and not skip_rag and web_used:
+        _contrarian_result = check_for_alternative_theory(query_to_use)
+        if _contrarian_result:
+            optimistic.text += format_alternative_note(_contrarian_result)
 
     # P0 (storage audit, delivered-answer correctness): capture the
     # LITERAL delivered text — byte-identical to what OrchestratorResponse
