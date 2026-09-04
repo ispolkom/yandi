@@ -24,7 +24,7 @@ from agent.db.sql.schema import (
     SCHEMA_VERSION,
 )
 
-SCHEMA_VERSION_DESCRIPTION = "v4: + grievance, forgiveness_capacity (SQL-backed character/relationship state)"
+SCHEMA_VERSION_DESCRIPTION = "v5: belief gets full Bayesian/evidence columns (\"точка ноль\" — belief_manager.py's JSON store retired)"
 
 
 def record_schema_version(

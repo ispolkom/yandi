@@ -494,24 +494,146 @@ def get_ai_observations_for_run(conn, run_id: str) -> List[Dict[str, Any]]:
 
 def upsert_belief(
     conn, belief_id: str, topic: str, statement: str, confidence: float,
-    status: str = "active", created_at=None, updated_at=None,
+    status: str = "active", evidence_for: Optional[List[str]] = None,
+    evidence_against: Optional[List[str]] = None, claim_ids: Optional[List[str]] = None,
+    prior: float = 0.5, likelihood: float = 0.5, contradiction_score: float = 0.0,
+    decay_factor: float = 0.95, superseded_by: Optional[str] = None,
+    created_at=None, updated_at=None,
 ) -> None:
     """belief is MUTABLE current-derived-state (mandate §17: BELIEF !=
     truth table, matches agent.belief_manager.Belief's own semantics
-    exactly — confidence/status/updated_at overwritten in place on
-    every call, same as the JSON beliefs.json record they mirror).
+    exactly — every column overwritten in place on every call, same as
+    the retired JSON beliefs.json record they used to mirror before
+    "точка ноль" (owner mandate: no JSON file holds durable state that
+    belongs under the bastion).
     created_at is write-once (first INSERT only); every subsequent call
     for the same belief_id only updates the mutable columns."""
     created_at = _coerce_datetime(created_at) or _now()
     updated_at = _coerce_datetime(updated_at) or _now()
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO belief (belief_id, topic, statement, confidence, status, created_at, updated_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s) "
+            "INSERT INTO belief (belief_id, topic, statement, confidence, status, "
+            "evidence_for, evidence_against, claim_ids, prior, likelihood, "
+            "contradiction_score, decay_factor, superseded_by, created_at, updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
             "ON DUPLICATE KEY UPDATE statement=VALUES(statement), confidence=VALUES(confidence), "
-            "status=VALUES(status), updated_at=VALUES(updated_at)",
-            (belief_id, topic, statement, confidence, status, created_at, updated_at),
+            "status=VALUES(status), evidence_for=VALUES(evidence_for), "
+            "evidence_against=VALUES(evidence_against), claim_ids=VALUES(claim_ids), "
+            "prior=VALUES(prior), likelihood=VALUES(likelihood), "
+            "contradiction_score=VALUES(contradiction_score), decay_factor=VALUES(decay_factor), "
+            "superseded_by=VALUES(superseded_by), updated_at=VALUES(updated_at)",
+            (
+                belief_id, topic, statement, confidence, status,
+                json.dumps(evidence_for) if evidence_for is not None else None,
+                json.dumps(evidence_against) if evidence_against is not None else None,
+                json.dumps(claim_ids) if claim_ids is not None else None,
+                prior, likelihood, contradiction_score, decay_factor, superseded_by,
+                created_at, updated_at,
+            ),
         )
+
+
+def get_belief(conn, belief_id: str) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM belief WHERE belief_id=%s", (belief_id,))
+        row = cur.fetchone()
+    return _decode_belief_json(row) if row else None
+
+
+def list_beliefs_by_topic(conn, topic: str, statuses: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """statuses defaults to ('active','revised') — matches agent.belief_
+    manager.BeliefManager._find_similar()'s own candidate filter exactly
+    (superseded/rejected beliefs are never merge candidates)."""
+    statuses = statuses or ["active", "revised"]
+    # Built as a separate variable, never inline in .execute() — same
+    # discipline already applied to update_grievance_status() earlier
+    # this pass (mandate §15/T1: no f-string/concat/format passed
+    # directly as an execute() argument, statically greppable). The
+    # placeholder count is bounded by len(statuses), never externally
+    # controlled text.
+    sql = "SELECT * FROM belief WHERE topic=%s AND status IN (" + ", ".join(["%s"] * len(statuses)) + ") ORDER BY created_at ASC"
+    with conn.cursor() as cur:
+        cur.execute(sql, (topic, *statuses))
+        rows = cur.fetchall()
+    return [_decode_belief_json(r) for r in rows]
+
+
+def list_belief_history(conn, belief_id: str) -> List[Dict[str, Any]]:
+    """The REAL append-only history for one belief — belief_assessment_
+    history, ordered oldest-first (matches the old JSON Belief.history[]
+    list's own append order exactly)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM belief_assessment_history WHERE belief_id=%s "
+            "ORDER BY created_at ASC, history_id ASC",
+            (belief_id,),
+        )
+        return cur.fetchall()
+
+
+def list_all_beliefs(conn) -> List[Dict[str, Any]]:
+    """Every belief regardless of status — for the rare, genuinely
+    cross-status lookup (agent.dependency_recheck._belief_for_family()
+    matches on claim_ids across ANY status, not just active ones; a
+    family can legitimately point at a belief that was later revised or
+    superseded)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM belief")
+        rows = cur.fetchall()
+    return [_decode_belief_json(r) for r in rows]
+
+
+def list_active_beliefs(conn) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM belief WHERE status='active' ORDER BY created_at ASC")
+        rows = cur.fetchall()
+    return [_decode_belief_json(r) for r in rows]
+
+
+def list_contradictory_beliefs(conn, min_score: float = 0.5) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM belief WHERE contradiction_score >= %s ORDER BY contradiction_score DESC", (min_score,))
+        rows = cur.fetchall()
+    return [_decode_belief_json(r) for r in rows]
+
+
+def get_belief_stats(conn) -> Dict[str, Any]:
+    """Single aggregate query — same shape as agent.belief_manager.
+    BeliefManager.get_stats(), computed in SQL instead of iterating an
+    in-memory list loaded from JSON."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT "
+            "COUNT(*) AS total, "
+            "SUM(status='active') AS active, "
+            "SUM(status='revised') AS revised, "
+            "SUM(status='superseded') AS superseded, "
+            "AVG(confidence) AS avg_confidence, "
+            "AVG(contradiction_score) AS avg_contradiction "
+            "FROM belief"
+        )
+        totals = cur.fetchone()
+        cur.execute("SELECT topic, COUNT(*) AS c FROM belief GROUP BY topic")
+        topic_rows = cur.fetchall()
+        cur.execute("SELECT COUNT(*) AS c FROM belief WHERE contradiction_score >= 0.5")
+        contradictory = cur.fetchone()
+    return {
+        "total": totals["total"] or 0,
+        "active": totals["active"] or 0,
+        "revised": totals["revised"] or 0,
+        "superseded": totals["superseded"] or 0,
+        "contradictory": contradictory["c"] or 0,
+        "topics": {r["topic"]: r["c"] for r in topic_rows},
+        "avg_confidence": round(float(totals["avg_confidence"] or 0), 2),
+        "avg_contradiction": round(float(totals["avg_contradiction"] or 0), 2),
+    }
+
+
+def _decode_belief_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    for col in ("evidence_for", "evidence_against", "claim_ids"):
+        if row.get(col) is not None and isinstance(row[col], str):
+            row[col] = json.loads(row[col])
+    return row
 
 
 def record_belief_assessment(
