@@ -12,9 +12,10 @@ bound names) since those are real-network/real-embedding calls;
 agent.dependency_recheck itself does not reimplement either, so mocking
 them here tests exactly this module's own orchestration logic.
 
-"ТОЧКА НОЛЬ" UPDATE (owner mandate, 2026-09): BeliefManager is SQL-only
-now, no storage_file. Two real behavioral consequences for this file,
-both handled below, not glossed over:
+"ТОЧКА НОЛЬ" UPDATE (owner mandate, 2026-09): BeliefManager AND
+FamilyDependencyGraph are both SQL-only now, no storage_file. Real
+behavioral consequences for this file, all handled below, not glossed
+over:
     1. Belief.history is now ALWAYS [] (real history lives in a
        separate belief_assessment_history table) — checks that used to
        inspect belief.history now call bm.get_belief_history(belief_id)
@@ -25,18 +26,22 @@ both handled below, not glossed over:
        mutation used to be visible through any held reference "for
        free"). Checks that need CURRENT state after apply_dependency_
        recheck() now explicitly re-fetch via bm.get_belief(belief_id).
+    3. FamilyDependencyGraph no longer has a `.recheck_log` in-memory
+       dict — checks that used to read graphN.recheck_log[...] now
+       inspect the fake connection's own `.rechecks` list directly (via
+       _last_outcome() below) or call graph.can_recheck(), which is the
+       real public API this behavior is exercised through in production.
 
 Run: /home/iam/venv/bin/python3 -m agent.epistemic_dependency_recheck_regression_test
 """
 
 import contextlib
-import tempfile
-from pathlib import Path
 from unittest.mock import patch
 
 import agent.dependency_recheck as dr_mod
 from agent.dependency_recheck import apply_dependency_recheck, MAX_RECHECKS_PER_CALL
 from agent.family_dependency_graph import FamilyDependencyGraph
+import agent.family_dependency_graph as fdg_mod
 from agent.belief_manager import BeliefManager
 import agent.belief_manager as bm_mod
 
@@ -68,10 +73,77 @@ class FakeRegistry:
         return None
 
 
+class _FDFakeCursor:
+    lastrowid = 1
+
+    def __init__(self, conn):
+        self.conn = conn
+        self._result = None
+        self._results = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        upper = " ".join(sql.split()).upper()
+        self._result = None
+        self._results = None
+        conn = self.conn
+        if upper.startswith("INSERT IGNORE INTO CLAIM_FAMILY"):
+            family_id, domain, canonical_text, created_at, updated_at = params
+            conn.families.setdefault(family_id, {"family_id": family_id, "domain": domain, "canonical_text": canonical_text})
+        elif upper.startswith("SELECT * FROM RECHECK_EVENT WHERE FAMILY_ID=%S ORDER BY STARTED_AT DESC LIMIT 1"):
+            (family_id,) = params
+            rows = [r for r in conn.rechecks if r["family_id"] == family_id]
+            rows.sort(key=lambda r: r["started_at"])
+            self._result = dict(rows[-1]) if rows else None
+        elif upper.startswith("INSERT INTO RECHECK_EVENT"):
+            family_id, run_id, trigger_reason, started_at, outcome, reason = params
+            conn.rechecks.append({
+                "family_id": family_id, "run_id": run_id, "trigger_reason": trigger_reason,
+                "started_at": started_at, "outcome": outcome, "reason": reason,
+            })
+
+    def fetchone(self):
+        return self._result
+
+    def fetchall(self):
+        return self._results or []
+
+
+class _FDFakeConnection:
+    def __init__(self):
+        self.families = {}
+        self.rechecks = []
+
+    def cursor(self):
+        return _FDFakeCursor(self)
+
+    def commit(self):
+        pass
+
+
 def _tmp_graph():
-    tmp = Path(tempfile.mkstemp(suffix=".json")[1])
-    tmp.unlink()
-    return FamilyDependencyGraph(storage_file=tmp)
+    """Returns (graph, conn) — a fresh, isolated fake claim_family/
+    recheck_event store and a real FamilyDependencyGraph wired to it."""
+    conn = _FDFakeConnection()
+
+    @contextlib.contextmanager
+    def _fake_get_connection(autocommit=False):
+        yield conn
+
+    fdg_mod.get_connection = _fake_get_connection
+    return FamilyDependencyGraph(), conn
+
+
+def _last_outcome(conn, family_id):
+    """Replaces the retired graph.recheck_log[family_id]["last_outcome"]
+    — reads the fake connection's own recheck_event rows directly."""
+    rows = [r for r in conn.rechecks if r["family_id"] == family_id]
+    return rows[-1]["outcome"] if rows else None
 
 
 # ============================================================
@@ -235,7 +307,7 @@ def _restore():
 
 # ── 1. Simple dependency: A contradicted -> B depends_on A -> B rechecked, SUPPORTS outcome ──
 
-graph1 = _tmp_graph()
+graph1, conn1 = _tmp_graph()
 bm1 = _tmp_belief_manager()
 belief1 = bm1.add_belief(topic="t", statement="B statement", confidence=0.5, claim_ids=["cl_b1"])
 history_len_before = len(bm1.get_belief_history(belief1.id))
@@ -273,13 +345,13 @@ check(
 
 check(
     "a family never listed as a candidate (e.g. unrelated fam_C) is never recorded in recheck_log",
-    "fam_C" not in graph1.recheck_log,
-    f"{graph1.recheck_log}",
+    _last_outcome(conn1, "fam_C") is None,
+    f"{conn1.rechecks}",
 )
 
 # ── 3. CONTRADICTS outcome: confidence moves, history preserved, old evidence not destroyed ──
 
-graph3 = _tmp_graph()
+graph3, conn3 = _tmp_graph()
 bm3 = _tmp_belief_manager()
 belief3 = bm3.add_belief(topic="t", statement="C statement", confidence=0.6, evidence_for=["ev_old"], claim_ids=["cl_c1"])
 old_conf = belief3.confidence
@@ -312,7 +384,7 @@ check(
 
 # ── 4. INCONCLUSIVE recheck (all relations unrelated/uncertain) -> belief untouched, NOT false ──
 
-graph4 = _tmp_graph()
+graph4, conn4 = _tmp_graph()
 bm4 = _tmp_belief_manager()
 belief4 = bm4.add_belief(topic="t", statement="D statement", confidence=0.5, claim_ids=["cl_d1"])
 conf_before = belief4.confidence
@@ -342,13 +414,13 @@ check(
 )
 check(
     "inconclusive outcome recorded in recheck_log (not silently dropped, not 'false')",
-    graph4.recheck_log.get("fam_D", {}).get("last_outcome") == "inconclusive",
-    f"{graph4.recheck_log}",
+    _last_outcome(conn4, "fam_D") == "inconclusive",
+    f"{conn4.rechecks}",
 )
 
 # ── 5. Retrieval error -> belief untouched, error recorded, NOT treated as contradiction ──
 
-graph5 = _tmp_graph()
+graph5, conn5 = _tmp_graph()
 bm5 = _tmp_belief_manager()
 belief5 = bm5.add_belief(topic="t", statement="E statement", confidence=0.5, claim_ids=["cl_e1"])
 conf_before5 = belief5.confidence
@@ -376,13 +448,13 @@ check(
     and stats5["belief_updates"] == 0
     and belief5_after.confidence == conf_before5
     and hist5_after == hist_before5
-    and graph5.recheck_log.get("fam_E", {}).get("last_outcome") == "error",
-    f"{stats5} conf={belief5_after.confidence} hist={hist5_after} {graph5.recheck_log}",
+    and _last_outcome(conn5, "fam_E") == "error",
+    f"{stats5} conf={belief5_after.confidence} hist={hist5_after} {conn5.rechecks}",
 )
 
 # ── 6. Repeated trigger -> cooldown/duplicate suppression, second call makes no network calls ──
 
-graph6 = _tmp_graph()
+graph6, conn6 = _tmp_graph()
 bm6 = _tmp_belief_manager()
 belief6 = bm6.add_belief(topic="t", statement="F statement", confidence=0.5, claim_ids=["cl_f1"])
 registry6 = FakeRegistry([_family("fam_F", "F statement", "cl_f1")])
@@ -417,7 +489,7 @@ check(
 
 # ── 7. Depth != 1 candidates are never rechecked synchronously (cascade bound) ──
 
-graph7 = _tmp_graph()
+graph7, conn7 = _tmp_graph()
 bm7 = _tmp_belief_manager()
 bm7.add_belief(topic="t", statement="G statement", confidence=0.5, claim_ids=["cl_g1"])
 registry7 = FakeRegistry([_family("fam_G", "G statement", "cl_g1")])
@@ -431,13 +503,13 @@ _restore()
 
 check(
     "a depth=2 candidate is never rechecked synchronously (cascade bound = 1 hop per request)",
-    stats7["rechecks_performed"] == 0 and stats7["skipped_depth"] == 1 and "fam_G" not in graph7.recheck_log,
-    f"{stats7} {graph7.recheck_log}",
+    stats7["rechecks_performed"] == 0 and stats7["skipped_depth"] == 1 and _last_outcome(conn7, "fam_G") is None,
+    f"{stats7} {conn7.rechecks}",
 )
 
 # ── 8. Hard cap: more depth-1 candidates than MAX_RECHECKS_PER_CALL -> extras skipped, not chased ──
 
-graph8 = _tmp_graph()
+graph8, conn8 = _tmp_graph()
 bm8 = _tmp_belief_manager()
 many_families = []
 for i in range(MAX_RECHECKS_PER_CALL + 2):
@@ -464,7 +536,7 @@ check(
 
 # ── 9. No belief associated with the family -> gathering skipped, no crash, no fabricated belief ──
 
-graph9 = _tmp_graph()
+graph9, conn9 = _tmp_graph()
 bm9 = _tmp_belief_manager()  # no beliefs added at all
 registry9 = FakeRegistry([_family("fam_I", "I statement", "cl_i1")])
 
@@ -483,7 +555,7 @@ check(
 
 # ── 10. Empty/None family_dependency_stats -> no crash, all zeros ──
 
-graph10 = _tmp_graph()
+graph10, conn10 = _tmp_graph()
 bm10 = _tmp_belief_manager()
 stats10a = apply_dependency_recheck(None, bm10, cost={}, log=lambda m: None, verbose=False, graph=graph10)
 stats10b = apply_dependency_recheck({}, bm10, cost={}, log=lambda m: None, verbose=False, graph=graph10)

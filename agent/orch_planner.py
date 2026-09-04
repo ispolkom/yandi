@@ -149,16 +149,16 @@ def _get_reflection_policies(query: str = "", domain: str = "") -> List[Dict[str
         try:
             reflection = get_reflection()
             if reflection is not None:
-                # Foundation Repair P0-1: get_policies() returns
-                # ReflectionLoop.active_policies BY REFERENCE, not a copy.
-                # The code below appends ad-hoc, per-call, lesson-derived
-                # entries to `policies` for local use by this function's
-                # callers only — it must never mutate the live policy list,
-                # or those ephemeral entries silently leak into
-                # registry/reflection_policies.json on the next
-                # ReflectionLoop._save_policies() call (proven live: this
-                # aliasing bug was the actual source of 379/382 malformed,
-                # unbounded entries found in that file during the audit).
+                # Foundation Repair P0-1 (historical): get_policies() used
+                # to return ReflectionLoop.active_policies BY REFERENCE —
+                # an aliasing bug that was the real source of 379/382
+                # malformed, unbounded entries found in registry/
+                # reflection_policies.json during the audit. "точка ноль"
+                # (owner mandate, 2026-09) retired that JSON file entirely;
+                # get_policies() now runs a fresh SQL query per call, so
+                # this aliasing hazard is structurally impossible — the
+                # list(...) below is now a defensive no-op, kept rather
+                # than removed since it costs nothing and needs no test.
                 policies = list(reflection.get_policies())
         except Exception:
             pass

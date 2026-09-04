@@ -8,20 +8,29 @@ agent/memory_episodic.py — Эпизодическая память для YAND
 - рефлексии
 
 Не просто факты, а жизненный опыт системы.
+
+"ТОЧКА НОЛЬ" (owner mandate, 2026-09): registry/episodic_memory.json is
+retired, not migrated — old JSON was disposable test-era cruft. State
+now lives exclusively in episode (class B, append-only) — agent/db/sql/
+schema.py. trim()/clear() are RETIRED entirely (neither had a real
+production caller, confirmed via grep before this rewrite) — this
+system's own life experience is never pruned, only ever added to, same
+discipline already applied to belief_assessment_history/claim_
+occurrence/decision_event/grievance.
+
+FAIL LOUD, not fail-open: SqlUnavailable propagates out of every method
+here. There is no JSON fallback left to quietly succeed against.
 """
 
 from __future__ import annotations
 
-import json
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
-from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional
 
-BASE = Path(__file__).parent.parent
-EPISODIC_FILE = BASE / "registry" / "episodic_memory.json"
+from agent.db.sql.connection import get_connection
+import agent.db.sql.repositories as repo
 
 
 @dataclass
@@ -37,51 +46,43 @@ class Episode:
     related_episodes: List[str] = field(default_factory=list)
 
 
+def _dt_to_unix(value) -> float:
+    if value is None:
+        return time.time()
+    if isinstance(value, (int, float)):
+        return float(value)
+    return value.timestamp()
+
+
+def _row_to_episode(row: Dict[str, Any]) -> Episode:
+    return Episode(
+        id=row["episode_id"],
+        timestamp=_dt_to_unix(row.get("created_at")),
+        event_type=row["event_type"],
+        summary=row["summary"],
+        details=row.get("details") or {},
+        importance=row.get("importance", 0.5),
+        tags=row.get("tags") or [],
+        related_episodes=row.get("related_episodes") or [],
+    )
+
+
 class EpisodicMemory:
     """Эпизодическая память — хранение событий жизни системы."""
-    
-    def __init__(self, memory_file: Optional[Path] = None):
-        self.memory_file = memory_file or EPISODIC_FILE
-        self.episodes: List[Episode] = self._load()
-    
-    def _load(self) -> List[Episode]:
-        """Загрузить эпизоды из файла."""
-        if self.memory_file.exists():
-            try:
-                with open(self.memory_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                return [Episode(**e) for e in data]
-            except Exception as e:
-                print(f"[episodic_memory] Ошибка загрузки: {e}")
-                return []
-        return []
-    
-    def _save(self):
-        """Сохранить эпизоды в файл."""
-        try:
-            data = [e.__dict__ for e in self.episodes]
-            with open(self.memory_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[episodic_memory] Ошибка сохранения: {e}")
-    
-    def add(self, event_type: str, summary: str, details: Dict[str, Any], 
+
+    def add(self, event_type: str, summary: str, details: Dict[str, Any],
             importance: float = 0.5, tags: Optional[List[str]] = None) -> str:
         """Добавить новый эпизод."""
-        episode = Episode(
-            id=f"ep_{uuid.uuid4().hex[:12]}",
-            timestamp=time.time(),
-            event_type=event_type,
-            summary=summary,
-            details=details,
-            importance=min(1.0, max(0.0, importance)),
-            tags=tags or []
-        )
-        self.episodes.append(episode)
-        self._save()
-        return episode.id
-    
-    def add_query(self, query: str, domain: str, answer_mode: str, 
+        episode_id = f"ep_{uuid.uuid4().hex[:12]}"
+        with get_connection() as conn:
+            repo.record_episode(
+                conn, episode_id, event_type, summary, details=details,
+                importance=min(1.0, max(0.0, importance)), tags=tags or [],
+            )
+            conn.commit()
+        return episode_id
+
+    def add_query(self, query: str, domain: str, answer_mode: str,
                   trust: str, confidence: float) -> str:
         """Добавить эпизод запроса."""
         return self.add(
@@ -97,8 +98,8 @@ class EpisodicMemory:
             importance=confidence,
             tags=[domain, answer_mode]
         )
-    
-    def add_decision(self, decision_type: str, reason: str, 
+
+    def add_decision(self, decision_type: str, reason: str,
                      details: Dict[str, Any], importance: float = 0.5) -> str:
         """Добавить эпизод решения."""
         return self.add(
@@ -108,8 +109,8 @@ class EpisodicMemory:
             importance=importance,
             tags=["decision", decision_type]
         )
-    
-    def add_error(self, error: str, context: Dict[str, Any], 
+
+    def add_error(self, error: str, context: Dict[str, Any],
                   severity: float = 0.7) -> str:
         """Добавить эпизод ошибки."""
         return self.add(
@@ -119,7 +120,7 @@ class EpisodicMemory:
             importance=severity,
             tags=["error"]
         )
-    
+
     def add_reflection(self, reflection: Dict[str, Any]) -> str:
         """Добавить эпизод рефлексии."""
         return self.add(
@@ -129,8 +130,8 @@ class EpisodicMemory:
             importance=0.8,
             tags=["reflection"]
         )
-    
-    def add_learning(self, lesson: str, context: Dict[str, Any], 
+
+    def add_learning(self, lesson: str, context: Dict[str, Any],
                      importance: float = 0.6) -> str:
         """Добавить эпизод обучения."""
         return self.add(
@@ -140,28 +141,36 @@ class EpisodicMemory:
             importance=importance,
             tags=["learning"]
         )
-    
+
     # ---- ПОИСК И АНАЛИЗ ----
-    
+
     def get_by_type(self, event_type: str, limit: int = 20) -> List[Episode]:
-        """Получить эпизоды по типу."""
-        return [e for e in self.episodes[-limit:] if e.event_type == event_type]
-    
+        """Получить последние `limit` эпизодов данного типа."""
+        with get_connection() as conn:
+            rows = repo.get_episodes_by_type(conn, event_type, limit=limit)
+        return [_row_to_episode(r) for r in rows]
+
     def get_by_tag(self, tag: str, limit: int = 20) -> List[Episode]:
         """Получить эпизоды по тегу."""
-        return [e for e in self.episodes[-limit:] if tag in e.tags]
-    
+        with get_connection() as conn:
+            rows = repo.get_episodes_by_tag(conn, tag, limit=limit)
+        return [_row_to_episode(r) for r in rows]
+
     def get_by_importance(self, min_importance: float = 0.7, limit: int = 20) -> List[Episode]:
         """Получить самые важные эпизоды."""
-        sorted_eps = sorted(self.episodes, key=lambda e: e.importance, reverse=True)
-        return sorted_eps[:limit]
-    
+        with get_connection() as conn:
+            rows = repo.get_episodes_by_importance(conn, min_importance=min_importance, limit=limit)
+        return [_row_to_episode(r) for r in rows]
+
     def get_recent(self, limit: int = 20) -> List[Episode]:
         """Получить последние эпизоды."""
-        return self.episodes[-limit:]
-    
+        with get_connection() as conn:
+            rows = repo.get_recent_episodes(conn, limit=limit)
+        return [_row_to_episode(r) for r in rows]
+
     def get_timeline(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Получить временную линию событий."""
+        from datetime import datetime
         return [
             {
                 "id": e.id,
@@ -170,41 +179,14 @@ class EpisodicMemory:
                 "summary": e.summary,
                 "importance": e.importance
             }
-            for e in self.episodes[-limit:]
+            for e in self.get_recent(limit)
         ]
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """Получить статистику памяти."""
-        types = {}
-        for e in self.episodes:
-            types[e.event_type] = types.get(e.event_type, 0) + 1
-        
-        total_importance = sum(e.importance for e in self.episodes)
-        avg_importance = total_importance / len(self.episodes) if self.episodes else 0
-        
-        return {
-            "total_episodes": len(self.episodes),
-            "by_type": types,
-            "avg_importance": round(avg_importance, 2),
-            "last_episode": self.episodes[-1].timestamp if self.episodes else None,
-            "oldest_episode": self.episodes[0].timestamp if self.episodes else None,
-        }
-    
-    def clear(self):
-        """Очистить память."""
-        self.episodes = []
-        self._save()
-    
-    def trim(self, max_episodes: int = 1000):
-        """Обрезать память до указанного размера."""
-        if len(self.episodes) > max_episodes:
-            # Сохраняем самые важные и последние
-            important = sorted(self.episodes, key=lambda e: e.importance, reverse=True)[:max_episodes // 2]
-            recent = self.episodes[-max_episodes // 2:]
-            merged = {e.id: e for e in important + recent}
-            self.episodes = list(merged.values())
-            self._save()
-    
+        with get_connection() as conn:
+            return repo.get_episode_stats(conn)
+
     def summary(self) -> str:
         """Краткое текстовое представление."""
         stats = self.get_stats()
@@ -233,19 +215,19 @@ if __name__ == "__main__":
     # Тестирование
     mem = get_memory()
     print(mem.summary())
-    
+
     # Добавляем тестовые эпизоды
     mem.add_query("Что такое сознание?", "philosophical", "pluralistic_contextual", "VALUE_FRAMEWORK", 0.4)
     mem.add_query("Как полететь на Марс?", "factual", "factual", "EMPIRICALLY_SUPPORTED", 0.7)
     mem.add_decision("epistemic_route", "Выбран pluralistic_contextual", {"domain": "philosophical"}, 0.6)
     mem.add_error("web search timeout", {"query": "Yandi"}, 0.5)
     mem.add_learning("Интерпретативные вопросы не должны ходить в web", {"domain": "philosophical"}, 0.8)
-    
+
     print("\n=== ПОСЛЕ ДОБАВЛЕНИЯ ===")
     print(mem.summary())
     print("\n=== ВРЕМЕННАЯ ЛИНИЯ ===")
     for item in mem.get_timeline(5):
         print(f"  {item['time']} | {item['event_type']} | {item['summary'][:40]}")
-    
+
     print("\n=== СТАТИСТИКА ===")
     print(mem.get_stats())

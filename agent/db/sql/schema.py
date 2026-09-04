@@ -46,7 +46,7 @@ DESIGN NOTES (read before changing a table):
    no HTTP retry chatter. RUN_ERROR is 5 columns, not a log warehouse.
 """
 
-SCHEMA_VERSION = 5  # v5: belief gets its full Bayesian/evidence columns ("точка ноль" — belief_manager.py's JSON store retired, not migrated)
+SCHEMA_VERSION = 11  # v11: knowledge_record + peer_config ("точка ноль" — orch_knowledge_writer.py's registry/knowledge/*.jsonl + registry/peers.json retired, not migrated)
 
 SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -418,6 +418,12 @@ CREATE TABLE IF NOT EXISTS semantic_edge (
     edge_type            ENUM('contradicts','supports','depends_on') NOT NULL,
     reason                VARCHAR(120) NULL,
     observation_count    INT NOT NULL DEFAULT 1,
+    -- "Точка ноль" (owner mandate, 2026-09): agent/family_dependency_
+    -- graph.py's ENTIRE edge dict now lives here — this column did not
+    -- exist in the original 5-design (dormant, never written to before
+    -- this rewrite actually connected it). Same "JSON column for a
+    -- small id list" pattern already used for belief.claim_ids.
+    triggering_claim_ids JSON NULL,
     created_at           DATETIME NOT NULL,
     last_seen_at         DATETIME NOT NULL,
     CONSTRAINT fk_se_family_a FOREIGN KEY (family_a)
@@ -425,6 +431,20 @@ CREATE TABLE IF NOT EXISTS semantic_edge (
     CONSTRAINT fk_se_family_b FOREIGN KEY (family_b)
         REFERENCES claim_family(family_id),
     KEY idx_se_pair (family_a, family_b, edge_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# family_state's whole job in the old JSON design was "was this family's
+# observed verification_status different from last time" — a single
+# current-value-per-family projection, structurally identical to
+# forgiveness_capacity's own one-row-per-key shape.
+FAMILY_STATUS_STATE = """
+CREATE TABLE IF NOT EXISTS family_status_state (
+    family_id    VARCHAR(20) PRIMARY KEY,
+    last_status  VARCHAR(20) NULL,
+    updated_at   DATETIME NOT NULL,
+    CONSTRAINT fk_fss_family FOREIGN KEY (family_id)
+        REFERENCES claim_family(family_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
@@ -825,6 +845,212 @@ CREATE TABLE IF NOT EXISTS forgiveness_capacity (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
+# ── PERSONALITY / PERSONALITY_CHANGE ─────────────────────────────────────
+# SQL-backed replacement for agent/personality_core.py's OLD registry/
+# personality.json ("точка ноль" — old file is disposable test-era
+# cruft, not migrated, owner mandate). Exactly one system-wide row
+# (singleton, same `id` CHECK-enforced pattern as INSTANCE_IDENTITY
+# below) — unlike instance_identity this row is legitimately MUTABLE
+# (traits/goals/counters change over the system's life), so it is
+# class C (current-state projection, UPDATE allowed) not class A.
+#
+# PERSONALITY_CHANGE is APPEND-ONLY (class B) — the old JSON's
+# change_history[] array, extracted to its own table so a change record
+# can never be silently dropped/rewritten the way an in-place JSON
+# array mutation could.
+PERSONALITY = """
+CREATE TABLE IF NOT EXISTS personality (
+    id               TINYINT NOT NULL PRIMARY KEY DEFAULT 1,
+    name             VARCHAR(60) NOT NULL DEFAULT 'YANDI',
+    version          VARCHAR(20) NOT NULL DEFAULT 'v6.0',
+    traits           JSON NOT NULL,
+    goals            JSON NOT NULL,
+    principles       JSON NOT NULL,
+    limitations      JSON NOT NULL,
+    preferences      JSON NOT NULL,
+    total_cycles     INT NOT NULL DEFAULT 0,
+    total_decisions  INT NOT NULL DEFAULT 0,
+    total_learnings  INT NOT NULL DEFAULT 0,
+    created_at       DATETIME NOT NULL,
+    updated_at       DATETIME NOT NULL,
+    CONSTRAINT chk_personality_singleton CHECK (id = 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+PERSONALITY_CHANGE = """
+CREATE TABLE IF NOT EXISTS personality_change (
+    change_id     BIGINT AUTO_INCREMENT PRIMARY KEY,
+    what_changed  VARCHAR(255) NOT NULL,
+    reason        TEXT NULL,
+    created_at    DATETIME NOT NULL,
+    KEY idx_pc_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# ── EPISODE ───────────────────────────────────────────────────────────────
+# SQL-backed replacement for agent/memory_episodic.py's OLD registry/
+# episodic_memory.json ("точка ноль" — old file is disposable test-era
+# cruft, not migrated, owner mandate). APPEND-ONLY (class B) — the old
+# JSON's own trim()/clear() destructive-pruning methods are RETIRED
+# entirely, not ported: neither is called anywhere in production
+# (confirmed via grep before this rewrite), and this schema's whole
+# "история не может быть удалена" discipline (already applied to
+# belief_assessment_history/claim_occurrence/decision_event/grievance)
+# means the system's own life experience is never pruned, only ever
+# added to.
+EPISODE = """
+CREATE TABLE IF NOT EXISTS episode (
+    episode_id        VARCHAR(20) PRIMARY KEY,  -- reuses existing ep_ ids
+    event_type        VARCHAR(20) NOT NULL,     -- query | decision | error | reflection | learning | action
+    summary           VARCHAR(500) NOT NULL,
+    details           JSON NULL,
+    importance        FLOAT NOT NULL DEFAULT 0.5,
+    tags              JSON NULL,
+    related_episodes  JSON NULL,
+    created_at        DATETIME NOT NULL,
+    KEY idx_episode_type (event_type, created_at),
+    KEY idx_episode_importance (importance)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# ── SELF_STATE / SELF_EVENT ───────────────────────────────────────────────
+# SQL-backed replacement for agent/self_model.py's OLD registry/
+# self_state.json + self_events.json ("точка ноль" — old files are
+# disposable test-era cruft, not migrated, owner mandate). SELF_STATE is
+# a system-wide singleton (same `id` CHECK-enforced pattern as
+# PERSONALITY above) — class C, legitimately mutable. SELF_EVENT is
+# APPEND-ONLY (class B).
+#
+# The old SelfState dataclass also embedded FOUR separate, redundant,
+# LOSSY sub-histories directly on the state row (recent_decisions —
+# hard-capped at the last 50, silently dropping anything older;
+# lessons_learned; belief_history; change_history) even though every
+# single one of those four calls (add_decision/add_learning/add_belief_
+# update/add_change) ALSO wrote an equivalent SELF_EVENT row right next
+# to it — the exact same information, twice, with one copy silently
+# truncated. "точка ноль" collapses all four into SELF_EVENT alone
+# (filtered by event_type — decision/learning/belief_update/change),
+# same pattern already used for EPISODE above: no data loss, no second
+# copy to keep in sync, no arbitrary 50-row cap on the system's own
+# decision history (mandate: "удалять НЕ может").
+SELF_STATE = """
+CREATE TABLE IF NOT EXISTS self_state (
+    id                     TINYINT NOT NULL PRIMARY KEY DEFAULT 1,
+    identity               VARCHAR(60) NOT NULL DEFAULT 'YANDI',
+    version                VARCHAR(20) NOT NULL DEFAULT 'v5.0',
+    total_cycles           INT NOT NULL DEFAULT 0,
+    total_decisions        INT NOT NULL DEFAULT 0,
+    total_learnings        INT NOT NULL DEFAULT 0,
+    total_reflections      INT NOT NULL DEFAULT 0,
+    total_errors           INT NOT NULL DEFAULT 0,
+    total_queries          INT NOT NULL DEFAULT 0,
+    total_belief_updates   INT NOT NULL DEFAULT 0,
+    capabilities           JSON NOT NULL,
+    limitations            JSON NOT NULL,
+    current_uncertainties  JSON NOT NULL,
+    metadata               JSON NOT NULL,  -- free-form (goals[], motivation{}, ...) — mirrors old state.metadata's own catch-all role
+    is_alive               BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at             DATETIME NOT NULL,
+    updated_at             DATETIME NOT NULL,
+    CONSTRAINT chk_self_state_singleton CHECK (id = 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+SELF_EVENT = """
+CREATE TABLE IF NOT EXISTS self_event (
+    event_id      VARCHAR(20) PRIMARY KEY,  -- reuses existing ev_ ids
+    event_type    VARCHAR(20) NOT NULL,     -- decision | learning | reflection | error | change | belief_update | cycle
+    description   VARCHAR(500) NOT NULL,
+    details       JSON NULL,
+    importance    FLOAT NOT NULL DEFAULT 0.5,
+    created_at    DATETIME NOT NULL,
+    KEY idx_self_event_type (event_type, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# ── REFLECTION_POLICY ─────────────────────────────────────────────────────
+# SQL-backed replacement for agent/reflection_loop.py's OLD registry/
+# reflection_policies.json ("точка ноль" — old file is disposable
+# test-era cruft, not migrated, owner mandate). Class C (mutable
+# current-state projection): a policy's observed_count/status/
+# activated_at genuinely mutate in place over its life (Foundation
+# Repair P0-1's own "observed -> active after N independent repeats"
+# gate), same shape as belief/semantic_edge's own upsert-in-place
+# semantics.
+#
+# rule_hash (not a direct UNIQUE key on `rule` itself) follows the SAME
+# established pattern as source_resource.uri_hash above — identity
+# enforced on a fixed-width hash, not a long TEXT column, for the same
+# InnoDB/utf8mb4 key-prefix reason documented there.
+REFLECTION_POLICY = """
+CREATE TABLE IF NOT EXISTS reflection_policy (
+    policy_id       VARCHAR(20) PRIMARY KEY,  -- pol_ + uuid4 hex[:8]
+    policy_type     VARCHAR(40) NOT NULL,
+    rule            TEXT NOT NULL,
+    rule_hash       CHAR(64) NOT NULL,        -- sha256(rule) — the real uniqueness key
+    confidence      FLOAT NOT NULL,
+    status          ENUM('observed','active') NOT NULL DEFAULT 'observed',
+    observed_count  INT NOT NULL DEFAULT 1,
+    applied_count   INT NOT NULL DEFAULT 0,
+    created_at      DATETIME NOT NULL,
+    activated_at    DATETIME NULL,
+    UNIQUE KEY uq_reflection_policy_rule_hash (rule_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# ── KNOWLEDGE_RECORD / PEER_CONFIG ────────────────────────────────────────
+# SQL-backed replacement for agent/orch_knowledge_writer.py's OLD
+# registry/knowledge/{id}.jsonl (one file per record, despite the .jsonl
+# extension) + registry/knowledge/index.db (a SEPARATE SQLite index) +
+# registry/peers.json ("точка ноль" — old files are disposable test-era
+# cruft, not migrated, owner mandate). This module has ZERO production
+# callers (confirmed via grep before this rewrite — nothing imports
+# agent.orch_knowledge_writer anywhere else in this codebase, same
+# "dormant" status as agent/forgiveness_model.py before its own SQL
+# rewrite), so this is a from-scratch, clean design rather than a
+# faithful port of every old field: the old record's `**(meta or {})`
+# merge-into-top-level-dict pattern is replaced by a proper `meta JSON`
+# column instead of dynamic columns. migrate_old() (a one-time importer
+# from an even older monolith knowledge.jsonl) is DROPPED entirely, not
+# ported — owner mandate: "переносить ничего не нужно, мы будем
+# начинать с точки НОЛЬ."
+#
+# KNOWLEDGE_RECORD is class C (mutable — update_trust_level() legitimately
+# revises trust_level/verdict/updated_at in place after a recheck, same
+# shape as belief's own mutable-projection precedent).
+#
+# PEER_CONFIG is a system-wide singleton (same `id` CHECK-enforced
+# pattern as PERSONALITY/SELF_STATE above), class C — the peer list and
+# sync_enabled flag are operator-set config, not history.
+KNOWLEDGE_RECORD = """
+CREATE TABLE IF NOT EXISTS knowledge_record (
+    record_id     VARCHAR(20) PRIMARY KEY,  -- reuses existing 8-hex-char ids
+    question      TEXT NOT NULL,
+    answer        MEDIUMTEXT NOT NULL,
+    trust_level   VARCHAR(20) NOT NULL,
+    verdict       VARCHAR(30) NULL,
+    topic         VARCHAR(120) NOT NULL DEFAULT 'general',
+    tags          JSON NULL,
+    sources       JSON NULL,
+    meta          JSON NULL,
+    created_at    DATETIME NOT NULL,
+    updated_at    DATETIME NOT NULL,
+    KEY idx_kr_trust (trust_level, created_at),
+    KEY idx_kr_topic (topic)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+PEER_CONFIG = """
+CREATE TABLE IF NOT EXISTS peer_config (
+    id            TINYINT NOT NULL PRIMARY KEY DEFAULT 1,
+    peers         JSON NOT NULL,
+    sync_token    VARCHAR(255) NULL,
+    sync_enabled  BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at    DATETIME NOT NULL,
+    CONSTRAINT chk_peer_config_singleton CHECK (id = 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
 # ── INSTANCE_IDENTITY ────────────────────────────────────────────────────
 # DATABASE BOOTSTRAP V1, mandate §4. Classified "A" (canonical immutable
 # identity, TABLE_CLASSIFICATION's own definition: "one row per identity,
@@ -884,6 +1110,15 @@ ALL_TABLES_IN_ORDER = [
     ("integrity_journal", INTEGRITY_JOURNAL),
     ("grievance", GRIEVANCE),
     ("forgiveness_capacity", FORGIVENESS_CAPACITY),
+    ("personality", PERSONALITY),
+    ("personality_change", PERSONALITY_CHANGE),
+    ("episode", EPISODE),
+    ("self_state", SELF_STATE),
+    ("self_event", SELF_EVENT),
+    ("reflection_policy", REFLECTION_POLICY),
+    ("family_status_state", FAMILY_STATUS_STATE),
+    ("knowledge_record", KNOWLEDGE_RECORD),
+    ("peer_config", PEER_CONFIG),
     ("instance_identity", INSTANCE_IDENTITY),
 ]
 
@@ -943,6 +1178,15 @@ TABLE_CLASSIFICATION = {
     "semantic_edge": "C",
     "grievance": "C",
     "forgiveness_capacity": "C",
+    "personality": "C",
+    "personality_change": "B",
+    "episode": "B",
+    "self_state": "C",
+    "self_event": "B",
+    "reflection_policy": "C",
+    "family_status_state": "C",
+    "knowledge_record": "C",
+    "peer_config": "C",
     "verification_run": "D",
     "instance_identity": "A",
 }

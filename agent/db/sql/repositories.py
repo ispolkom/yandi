@@ -1032,3 +1032,609 @@ def set_forgiveness_capacity(conn, user_id: str, capacity: float, last_forgivene
             "last_forgiveness=COALESCE(VALUES(last_forgiveness), last_forgiveness), updated_at=VALUES(updated_at)",
             (user_id, capacity, last_forgiveness, timestamp),
         )
+
+
+_PERSONALITY_JSON_COLUMNS = ("traits", "goals", "principles", "limitations", "preferences")
+
+
+def _decode_personality_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    for col in _PERSONALITY_JSON_COLUMNS:
+        if row.get(col) is not None and isinstance(row[col], str):
+            row[col] = json.loads(row[col])
+    return row
+
+
+def get_personality(conn) -> Optional[Dict[str, Any]]:
+    """The one personality row (id=1), or None if get_or_create_
+    personality() has never been called yet on this database."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM personality WHERE id=1")
+        row = cur.fetchone()
+    return _decode_personality_json(row) if row else None
+
+
+def get_or_create_personality(
+    conn, name: str, version: str, traits: List[str], goals: List[str],
+    principles: List[str], limitations: List[str], preferences: Dict[str, Any],
+    created_at=None,
+) -> Dict[str, Any]:
+    """INSERT IGNORE — the singleton row is seeded with its defaults
+    exactly once; every subsequent call is a no-op that just returns the
+    (possibly since-mutated) live row, mirroring agent.personality_core.
+    PersonalityCore._load_or_create()'s own "load if present, else
+    create with defaults" semantics without a JSON file underneath."""
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT IGNORE INTO personality "
+            "(id, name, version, traits, goals, principles, limitations, preferences, created_at, updated_at) "
+            "VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                name, version, json.dumps(traits), json.dumps(goals),
+                json.dumps(principles), json.dumps(limitations), json.dumps(preferences),
+                created_at, created_at,
+            ),
+        )
+    return get_personality(conn)
+
+
+def update_personality_lists(
+    conn, traits=None, goals=None, principles=None, limitations=None, updated_at=None,
+) -> None:
+    """Overwrites only the JSON list columns explicitly passed (each is
+    the CALLER's already-updated full list — this is a plain projection
+    UPDATE, not an append; matches PersonalityCore.add_trait()/add_goal()/
+    add_principle()/add_limitation()'s own "load, append if absent,
+    save whole" logic, just without a JSON file round-trip)."""
+    sets = []
+    params: List[Any] = []
+    for col, value in (
+        ("traits", traits), ("goals", goals), ("principles", principles), ("limitations", limitations),
+    ):
+        if value is not None:
+            sets.append(f"{col}=%s")
+            params.append(json.dumps(value))
+    if not sets:
+        return
+    sets.append("updated_at=%s")
+    params.append(_coerce_datetime(updated_at) or _now())
+    sql = "UPDATE personality SET " + ", ".join(sets) + " WHERE id=1"
+    with conn.cursor() as cur:
+        cur.execute(sql, tuple(params))
+
+
+def increment_personality_counter(conn, counter: str, updated_at=None) -> None:
+    """counter is one of total_cycles/total_decisions/total_learnings —
+    a fixed, small, internally-controlled set (never externally-supplied
+    text), so building the column name into the SQL string here is safe
+    the same way security_grants.py's own identifier interpolation is."""
+    if counter not in ("total_cycles", "total_decisions", "total_learnings"):
+        raise ValueError(f"unknown personality counter: {counter!r}")
+    updated_at = _coerce_datetime(updated_at) or _now()
+    sql = f"UPDATE personality SET {counter} = {counter} + 1, updated_at=%s WHERE id=1"
+    with conn.cursor() as cur:
+        cur.execute(sql, (updated_at,))
+
+
+def record_personality_change(conn, what_changed: str, reason: Optional[str], created_at=None) -> int:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO personality_change (what_changed, reason, created_at) VALUES (%s, %s, %s)",
+            (what_changed, reason, created_at),
+        )
+        return cur.lastrowid
+
+
+def count_personality_changes(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS c FROM personality_change")
+        row = cur.fetchone()
+    return int(row["c"]) if row else 0
+
+
+_EPISODE_JSON_COLUMNS = ("details", "tags", "related_episodes")
+
+
+def _decode_episode_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    for col in _EPISODE_JSON_COLUMNS:
+        if row.get(col) is not None and isinstance(row[col], str):
+            row[col] = json.loads(row[col])
+    return row
+
+
+def record_episode(
+    conn, episode_id: str, event_type: str, summary: str,
+    details: Optional[Dict[str, Any]] = None, importance: float = 0.5,
+    tags: Optional[List[str]] = None, related_episodes: Optional[List[str]] = None,
+    created_at=None,
+) -> None:
+    """episode is APPEND-ONLY (class B) — matches agent.memory_episodic.
+    EpisodicMemory.add()'s own semantics exactly, minus the retired
+    trim()/clear() destructive-pruning methods (neither had a real
+    caller; "точка ноль" — history here is never pruned, only added
+    to)."""
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episode (episode_id, event_type, summary, details, importance, "
+            "tags, related_episodes, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                episode_id, event_type, summary,
+                json.dumps(details) if details is not None else None,
+                importance,
+                json.dumps(tags) if tags is not None else None,
+                json.dumps(related_episodes) if related_episodes is not None else None,
+                created_at,
+            ),
+        )
+
+
+def get_episodes_by_type(conn, event_type: str, limit: int = 20) -> List[Dict[str, Any]]:
+    """The most recent `limit` episodes of this type, oldest-first
+    (matches EpisodicMemory.get_recent()'s own chronological-window
+    ordering) — a real "last N of this type" query, not the old JSON
+    version's own accidental "last N overall, THEN filter by type"
+    behavior (which no production caller ever depended on, confirmed
+    via grep before this rewrite)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM episode WHERE event_type=%s ORDER BY created_at DESC LIMIT %s",
+            (event_type, limit),
+        )
+        rows = cur.fetchall()
+    rows.reverse()
+    return [_decode_episode_json(r) for r in rows]
+
+
+def get_episodes_by_tag(conn, tag: str, limit: int = 20) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM episode WHERE JSON_CONTAINS(tags, JSON_QUOTE(%s)) "
+            "ORDER BY created_at DESC LIMIT %s",
+            (tag, limit),
+        )
+        rows = cur.fetchall()
+    rows.reverse()
+    return [_decode_episode_json(r) for r in rows]
+
+
+def get_episodes_by_importance(conn, min_importance: float = 0.7, limit: int = 20) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM episode WHERE importance >= %s ORDER BY importance DESC LIMIT %s",
+            (min_importance, limit),
+        )
+        rows = cur.fetchall()
+    return [_decode_episode_json(r) for r in rows]
+
+
+def get_recent_episodes(conn, limit: int = 20) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM episode ORDER BY created_at DESC LIMIT %s", (limit,))
+        rows = cur.fetchall()
+    rows.reverse()
+    return [_decode_episode_json(r) for r in rows]
+
+
+def get_episode_stats(conn) -> Dict[str, Any]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS c, AVG(importance) AS avg_imp FROM episode")
+        totals = cur.fetchone()
+        cur.execute("SELECT event_type, COUNT(*) AS c FROM episode GROUP BY event_type")
+        by_type = {r["event_type"]: r["c"] for r in cur.fetchall()}
+        cur.execute("SELECT MIN(created_at) AS oldest, MAX(created_at) AS newest FROM episode")
+        span = cur.fetchone()
+    total = int(totals["c"]) if totals else 0
+    return {
+        "total_episodes": total,
+        "by_type": by_type,
+        "avg_importance": round(float(totals["avg_imp"]), 2) if total and totals["avg_imp"] is not None else 0,
+        "oldest_episode": span["oldest"] if span else None,
+        "last_episode": span["newest"] if span else None,
+    }
+
+
+_SELF_STATE_JSON_COLUMNS = ("capabilities", "limitations", "current_uncertainties", "metadata")
+_SELF_STATE_COUNTERS = (
+    "total_cycles", "total_decisions", "total_learnings", "total_reflections",
+    "total_errors", "total_queries", "total_belief_updates",
+)
+
+
+def _decode_self_state_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    for col in _SELF_STATE_JSON_COLUMNS:
+        if row.get(col) is not None and isinstance(row[col], str):
+            row[col] = json.loads(row[col])
+    return row
+
+
+def get_self_state(conn) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM self_state WHERE id=1")
+        row = cur.fetchone()
+    return _decode_self_state_json(row) if row else None
+
+
+def get_or_create_self_state(
+    conn, identity: str, version: str, capabilities: List[str], limitations: List[str],
+    current_uncertainties: List[str], metadata: Dict[str, Any], created_at=None,
+) -> Dict[str, Any]:
+    """INSERT IGNORE singleton, mirrors get_or_create_personality()'s own
+    "seed once, every later call is a no-op read" semantics."""
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT IGNORE INTO self_state "
+            "(id, identity, version, capabilities, limitations, current_uncertainties, metadata, created_at, updated_at) "
+            "VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                identity, version, json.dumps(capabilities), json.dumps(limitations),
+                json.dumps(current_uncertainties), json.dumps(metadata), created_at, created_at,
+            ),
+        )
+    return get_self_state(conn)
+
+
+def update_self_state_lists(
+    conn, capabilities=None, limitations=None, current_uncertainties=None, metadata=None, updated_at=None,
+) -> None:
+    """Overwrites only the JSON columns explicitly passed — same plain-
+    projection-UPDATE pattern as update_personality_lists()."""
+    sets = []
+    params: List[Any] = []
+    for col, value in (
+        ("capabilities", capabilities), ("limitations", limitations),
+        ("current_uncertainties", current_uncertainties), ("metadata", metadata),
+    ):
+        if value is not None:
+            sets.append(f"{col}=%s")
+            params.append(json.dumps(value))
+    if not sets:
+        return
+    sets.append("updated_at=%s")
+    params.append(_coerce_datetime(updated_at) or _now())
+    sql = "UPDATE self_state SET " + ", ".join(sets) + " WHERE id=1"
+    with conn.cursor() as cur:
+        cur.execute(sql, tuple(params))
+
+
+def increment_self_state_counter(conn, counter: str, updated_at=None) -> None:
+    """counter is one of the 7 fixed, internally-controlled total_*
+    columns (never externally-supplied text) — same safe-identifier
+    reasoning as increment_personality_counter()."""
+    if counter not in _SELF_STATE_COUNTERS:
+        raise ValueError(f"unknown self_state counter: {counter!r}")
+    updated_at = _coerce_datetime(updated_at) or _now()
+    sql = f"UPDATE self_state SET {counter} = {counter} + 1, updated_at=%s WHERE id=1"
+    with conn.cursor() as cur:
+        cur.execute(sql, (updated_at,))
+
+
+_SELF_EVENT_JSON_COLUMNS = ("details",)
+
+
+def _decode_self_event_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    for col in _SELF_EVENT_JSON_COLUMNS:
+        if row.get(col) is not None and isinstance(row[col], str):
+            row[col] = json.loads(row[col])
+    return row
+
+
+def record_self_event(
+    conn, event_id: str, event_type: str, description: str,
+    details: Optional[Dict[str, Any]] = None, importance: float = 0.5, created_at=None,
+) -> None:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO self_event (event_id, event_type, description, details, importance, created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            (
+                event_id, event_type, description,
+                json.dumps(details) if details is not None else None,
+                importance, created_at,
+            ),
+        )
+
+
+def get_self_events_by_type(conn, event_type: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Most recent `limit` events of this type, NEWEST-first — matches
+    agent.self_model.SelfModel.get_recent_decisions()/get_lessons()/
+    get_belief_history()'s own "most recent N" contract (unlike
+    get_episodes_by_type(), these three callers want newest-first, not
+    a chronological window)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM self_event WHERE event_type=%s ORDER BY created_at DESC LIMIT %s",
+            (event_type, limit),
+        )
+        rows = cur.fetchall()
+    return [_decode_self_event_json(r) for r in rows]
+
+
+def get_recent_self_events(conn, limit: int = 20) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM self_event ORDER BY created_at DESC LIMIT %s", (limit,))
+        rows = cur.fetchall()
+    return [_decode_self_event_json(r) for r in rows]
+
+
+def count_self_events(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS c FROM self_event")
+        row = cur.fetchone()
+    return int(row["c"]) if row else 0
+
+
+def find_reflection_policy_by_rule(conn, rule: str) -> Optional[Dict[str, Any]]:
+    rule_hash = _text_hash(rule)
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM reflection_policy WHERE rule_hash=%s", (rule_hash,))
+        return cur.fetchone()
+
+
+def create_reflection_policy(
+    conn, policy_id: str, policy_type: str, rule: str, confidence: float, created_at=None,
+) -> None:
+    created_at = _coerce_datetime(created_at) or _now()
+    rule_hash = _text_hash(rule)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO reflection_policy "
+            "(policy_id, policy_type, rule, rule_hash, confidence, status, observed_count, applied_count, created_at) "
+            "VALUES (%s,%s,%s,%s,%s,'observed',1,0,%s)",
+            (policy_id, policy_type, rule, rule_hash, confidence, created_at),
+        )
+
+
+def bump_reflection_policy_observed(conn, policy_id: str, activate: bool, activated_at=None) -> None:
+    """observed_count always increments by one; status flips to 'active'
+    (and activated_at is stamped) ONLY on the call where the caller has
+    already decided the activation threshold was just crossed — mirrors
+    ReflectionLoop._apply_policy_to_planner()'s own Foundation Repair
+    P0-1 gate exactly (confidence is fixed at creation, never
+    re-inflated by repetition)."""
+    if activate:
+        activated_at = _coerce_datetime(activated_at) or _now()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE reflection_policy SET observed_count = observed_count + 1, "
+                "status='active', activated_at=%s WHERE policy_id=%s",
+                (activated_at, policy_id),
+            )
+    else:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE reflection_policy SET observed_count = observed_count + 1 WHERE policy_id=%s",
+                (policy_id,),
+            )
+
+
+def list_all_reflection_policies(conn) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM reflection_policy ORDER BY created_at ASC")
+        return cur.fetchall()
+
+
+def _decode_semantic_edge_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    if row.get("triggering_claim_ids") is not None and isinstance(row["triggering_claim_ids"], str):
+        row["triggering_claim_ids"] = json.loads(row["triggering_claim_ids"])
+    return row
+
+
+def find_semantic_edge(conn, family_a: str, family_b: str, edge_type: str) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM semantic_edge WHERE family_a=%s AND family_b=%s AND edge_type=%s",
+            (family_a, family_b, edge_type),
+        )
+        row = cur.fetchone()
+    return _decode_semantic_edge_json(row) if row else None
+
+
+def upsert_semantic_edge(
+    conn, edge_id: str, family_a: str, family_b: str, edge_type: str, reason: str,
+    triggering_claim_ids: Optional[List[str]] = None, created_at=None,
+) -> Dict[str, Any]:
+    """Additive, idempotent edge upsert — mirrors agent.family_
+    dependency_graph.FamilyDependencyGraph.record_edge()'s own semantics
+    exactly (observation_count++ and triggering_claim_ids union on a
+    repeat observation of the SAME (family_a, family_b, edge_type)
+    triple; a fresh row otherwise). Both endpoint families are
+    defensively ensured to exist first (INSERT IGNORE, same established
+    pattern as shadow_record_recheck_event()'s own domain/canonical_text
+    pre-creation) since this module only ever sees semantic_family_id
+    strings, never a family's real domain/canonical_text — a genuinely
+    missing family gets a placeholder shell row rather than silently
+    dropping the edge to an FK violation."""
+    now = _coerce_datetime(created_at) or _now()
+    for fam in (family_a, family_b):
+        get_or_create_claim_family(conn, fam, "unknown", fam, created_at=now)
+
+    existing = find_semantic_edge(conn, family_a, family_b, edge_type)
+    if existing:
+        known = set(existing.get("triggering_claim_ids") or [])
+        merged = list(existing.get("triggering_claim_ids") or [])
+        for cid in (triggering_claim_ids or []):
+            if cid and cid not in known:
+                merged.append(cid)
+                known.add(cid)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE semantic_edge SET observation_count = observation_count + 1, "
+                "last_seen_at=%s, triggering_claim_ids=%s WHERE edge_id=%s",
+                (now, json.dumps(merged), existing["edge_id"]),
+            )
+        return find_semantic_edge(conn, family_a, family_b, edge_type)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO semantic_edge "
+            "(edge_id, family_a, family_b, edge_type, reason, observation_count, "
+            "triggering_claim_ids, created_at, last_seen_at) "
+            "VALUES (%s,%s,%s,%s,%s,1,%s,%s,%s)",
+            (
+                edge_id, family_a, family_b, edge_type, reason,
+                json.dumps([cid for cid in (triggering_claim_ids or []) if cid]),
+                now, now,
+            ),
+        )
+    return find_semantic_edge(conn, family_a, family_b, edge_type)
+
+
+def list_dependents(conn, family_id: str) -> List[Dict[str, Any]]:
+    """Families Y such that Y depends_on family_id — edges recorded as
+    (family_a=Y, family_b=family_id, edge_type='depends_on')."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM semantic_edge WHERE family_b=%s AND edge_type='depends_on'",
+            (family_id,),
+        )
+        rows = cur.fetchall()
+    return [_decode_semantic_edge_json(r) for r in rows]
+
+
+def list_contradicts_edges(conn) -> List[Dict[str, Any]]:
+    """Every semantic_edge row of type 'contradicts' — the SQL-backed
+    replacement for agent.epistemic_contradiction_shadow.py's own
+    `getattr(graph, "edges", [])` scan (that in-memory list no longer
+    exists after "точка ноль"; see agent.family_dependency_graph.
+    FamilyDependencyGraph.all_contradicts_edges())."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM semantic_edge WHERE edge_type='contradicts'")
+        rows = cur.fetchall()
+    return [_decode_semantic_edge_json(r) for r in rows]
+
+
+def get_family_status(conn, family_id: str) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM family_status_state WHERE family_id=%s", (family_id,))
+        return cur.fetchone()
+
+
+def upsert_family_status(conn, family_id: str, last_status: Optional[str], updated_at=None) -> None:
+    updated_at = _coerce_datetime(updated_at) or _now()
+    get_or_create_claim_family(conn, family_id, "unknown", family_id, created_at=updated_at)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO family_status_state (family_id, last_status, updated_at) VALUES (%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE last_status=VALUES(last_status), updated_at=VALUES(updated_at)",
+            (family_id, last_status, updated_at),
+        )
+
+
+def get_last_recheck(conn, family_id: str) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM recheck_event WHERE family_id=%s ORDER BY started_at DESC LIMIT 1",
+            (family_id,),
+        )
+        return cur.fetchone()
+
+
+_KNOWLEDGE_RECORD_JSON_COLUMNS = ("tags", "sources", "meta")
+
+
+def _decode_knowledge_record_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    for col in _KNOWLEDGE_RECORD_JSON_COLUMNS:
+        if row.get(col) is not None and isinstance(row[col], str):
+            row[col] = json.loads(row[col])
+    return row
+
+
+def upsert_knowledge_record(
+    conn, record_id: str, question: str, answer: str, trust_level: str,
+    verdict: Optional[str] = None, topic: str = "general",
+    tags: Optional[List[str]] = None, sources: Optional[List[str]] = None,
+    meta: Optional[Dict[str, Any]] = None, created_at=None, updated_at=None,
+) -> None:
+    """knowledge_record is MUTABLE current-state (class C) — write_
+    knowledge() creates it, update_trust_level() later revises trust_
+    level/verdict/updated_at in place, same shape as belief's own
+    upsert-in-place semantics."""
+    created_at = _coerce_datetime(created_at) or _now()
+    updated_at = _coerce_datetime(updated_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO knowledge_record (record_id, question, answer, trust_level, verdict, "
+            "topic, tags, sources, meta, created_at, updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE question=VALUES(question), answer=VALUES(answer), "
+            "trust_level=VALUES(trust_level), verdict=VALUES(verdict), topic=VALUES(topic), "
+            "tags=VALUES(tags), sources=VALUES(sources), meta=VALUES(meta), updated_at=VALUES(updated_at)",
+            (
+                record_id, question, answer, trust_level, verdict, topic,
+                json.dumps(tags) if tags is not None else None,
+                json.dumps(sources) if sources is not None else None,
+                json.dumps(meta) if meta is not None else None,
+                created_at, updated_at,
+            ),
+        )
+
+
+def get_knowledge_record(conn, record_id: str) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM knowledge_record WHERE record_id=%s", (record_id,))
+        row = cur.fetchone()
+    return _decode_knowledge_record_json(row) if row else None
+
+
+def update_knowledge_record_trust(
+    conn, record_id: str, trust_level: str, verdict: Optional[str] = None, updated_at=None,
+) -> bool:
+    updated_at = _coerce_datetime(updated_at) or _now()
+    with conn.cursor() as cur:
+        if verdict:
+            cur.execute(
+                "UPDATE knowledge_record SET trust_level=%s, verdict=%s, updated_at=%s WHERE record_id=%s",
+                (trust_level, verdict, updated_at, record_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE knowledge_record SET trust_level=%s, updated_at=%s WHERE record_id=%s",
+                (trust_level, updated_at, record_id),
+            )
+        return cur.rowcount > 0
+
+
+def list_knowledge_by_trust(conn, trust_level: str, limit: int = 100) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT record_id, question, topic, created_at FROM knowledge_record "
+            "WHERE trust_level=%s ORDER BY created_at DESC LIMIT %s",
+            (trust_level, limit),
+        )
+        return cur.fetchall()
+
+
+def get_knowledge_stats(conn) -> Dict[str, Any]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS c FROM knowledge_record")
+        total = cur.fetchone()
+        cur.execute("SELECT trust_level, COUNT(*) AS c FROM knowledge_record GROUP BY trust_level")
+        by_trust = {r["trust_level"]: r["c"] for r in cur.fetchall()}
+    return {"total": int(total["c"]) if total else 0, "by_trust": by_trust}
+
+
+def get_peer_config(conn) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM peer_config WHERE id=1")
+        row = cur.fetchone()
+    if row and isinstance(row.get("peers"), str):
+        row["peers"] = json.loads(row["peers"])
+    return row
+
+
+def get_or_create_peer_config(conn, updated_at=None) -> Dict[str, Any]:
+    """INSERT IGNORE singleton, seeded empty/disabled — mirrors get_or_
+    create_personality()'s own "seed once, every later call is a no-op
+    read" semantics."""
+    updated_at = _coerce_datetime(updated_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT IGNORE INTO peer_config (id, peers, sync_token, sync_enabled, updated_at) "
+            "VALUES (1, %s, NULL, FALSE, %s)",
+            (json.dumps([]), updated_at),
+        )
+    return get_peer_config(conn)

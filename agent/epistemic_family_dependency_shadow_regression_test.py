@@ -3,21 +3,26 @@ agent/epistemic_family_dependency_shadow_regression_test.py — Epistemic
 Core v1 Phase 11 regression: cross-request semantic-family dependency
 graph, SHADOW MODE (agent/family_dependency_graph.py).
 
-Uses a fresh in-memory-backed FamilyDependencyGraph per check group (a
-tempfile storage path) — never touches the real
-registry/claim_family_graph.json.
+"ТОЧКА НОЛЬ" (owner mandate, 2026-09): FamilyDependencyGraph is SQL-only
+now (semantic_edge + family_status_state + recheck_event), no
+storage_file, no `.edges`/`.family_state`/`.recheck_log` in-memory
+attributes to inspect directly from tests. A small fake claim_family/
+semantic_edge/family_status_state/recheck_event connection stands in
+for the real bastion-protected tables, patched fresh per graph via
+_fresh_graph() below.
 
 Run: /home/iam/venv/bin/python3 -m agent.epistemic_family_dependency_shadow_regression_test
 """
 
+import contextlib
 import inspect
-import tempfile
-from pathlib import Path
+import json
 
 from agent.family_dependency_graph import (
     FamilyDependencyGraph,
     apply_family_dependency_shadow,
 )
+import agent.family_dependency_graph as fdg_mod
 
 PASS = 0
 FAIL = 0
@@ -33,10 +38,103 @@ def check(name: str, condition: bool, detail: str = ""):
         print(f"FAIL {name} {detail}")
 
 
-def _tmp_graph() -> FamilyDependencyGraph:
-    tmp = Path(tempfile.mkstemp(suffix=".json")[1])
-    tmp.unlink()  # start with no file, exercise the "no file yet" load path
-    return FamilyDependencyGraph(storage_file=tmp)
+class _FDFakeCursor:
+    def __init__(self, conn):
+        self.conn = conn
+        self._result = None
+        self._results = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        upper = " ".join(sql.split()).upper()
+        self._result = None
+        self._results = None
+        conn = self.conn
+        if upper.startswith("INSERT IGNORE INTO CLAIM_FAMILY"):
+            family_id, domain, canonical_text, created_at, updated_at = params
+            conn.families.setdefault(family_id, {
+                "family_id": family_id, "domain": domain, "canonical_text": canonical_text,
+                "created_at": created_at, "updated_at": updated_at,
+            })
+        elif upper.startswith("SELECT * FROM SEMANTIC_EDGE WHERE FAMILY_A=%S AND FAMILY_B=%S AND EDGE_TYPE=%S"):
+            fam_a, fam_b, edge_type = params
+            self._result = next(
+                (dict(e) for e in conn.edges.values() if e["family_a"] == fam_a and e["family_b"] == fam_b and e["edge_type"] == edge_type),
+                None,
+            )
+        elif upper.startswith("INSERT INTO SEMANTIC_EDGE"):
+            edge_id, family_a, family_b, edge_type, reason, triggering, created_at, last_seen_at = params
+            conn.edges[edge_id] = {
+                "edge_id": edge_id, "family_a": family_a, "family_b": family_b, "edge_type": edge_type,
+                "reason": reason, "observation_count": 1, "triggering_claim_ids": triggering,
+                "created_at": created_at, "last_seen_at": last_seen_at,
+            }
+        elif upper.startswith("UPDATE SEMANTIC_EDGE SET OBSERVATION_COUNT"):
+            last_seen_at, triggering, edge_id = params
+            e = conn.edges[edge_id]
+            e["observation_count"] += 1
+            e["last_seen_at"] = last_seen_at
+            e["triggering_claim_ids"] = triggering
+        elif upper.startswith("SELECT * FROM SEMANTIC_EDGE WHERE FAMILY_B=%S AND EDGE_TYPE='DEPENDS_ON'"):
+            (family_b,) = params
+            self._results = [dict(e) for e in conn.edges.values() if e["family_b"] == family_b and e["edge_type"] == "depends_on"]
+        elif upper.startswith("SELECT * FROM SEMANTIC_EDGE WHERE EDGE_TYPE='CONTRADICTS'"):
+            self._results = [dict(e) for e in conn.edges.values() if e["edge_type"] == "contradicts"]
+        elif upper.startswith("SELECT * FROM FAMILY_STATUS_STATE WHERE FAMILY_ID=%S"):
+            (family_id,) = params
+            self._result = dict(conn.status[family_id]) if family_id in conn.status else None
+        elif upper.startswith("INSERT INTO FAMILY_STATUS_STATE"):
+            family_id, last_status, updated_at = params
+            conn.status[family_id] = {"family_id": family_id, "last_status": last_status, "updated_at": updated_at}
+        elif upper.startswith("SELECT * FROM RECHECK_EVENT WHERE FAMILY_ID=%S ORDER BY STARTED_AT DESC LIMIT 1"):
+            (family_id,) = params
+            rows = [r for r in conn.rechecks if r["family_id"] == family_id]
+            rows.sort(key=lambda r: r["started_at"])
+            self._result = dict(rows[-1]) if rows else None
+        elif upper.startswith("INSERT INTO RECHECK_EVENT"):
+            family_id, run_id, trigger_reason, started_at, outcome, reason = params
+            conn.rechecks.append({
+                "family_id": family_id, "run_id": run_id, "trigger_reason": trigger_reason,
+                "started_at": started_at, "outcome": outcome, "reason": reason,
+            })
+
+    def fetchone(self):
+        return self._result
+
+    def fetchall(self):
+        return self._results or []
+
+
+class _FDFakeConnection:
+    def __init__(self):
+        self.families = {}
+        self.edges = {}
+        self.status = {}
+        self.rechecks = []
+
+    def cursor(self):
+        return _FDFakeCursor(self)
+
+    def commit(self):
+        pass
+
+
+def _fresh_graph():
+    """A brand-new FamilyDependencyGraph backed by a fresh, empty fake
+    claim_family/semantic_edge/family_status_state/recheck_event store."""
+    conn = _FDFakeConnection()
+
+    @contextlib.contextmanager
+    def _fake_get_connection(autocommit=False):
+        yield conn
+
+    fdg_mod.get_connection = _fake_get_connection
+    return FamilyDependencyGraph()
 
 
 def _claim(cid, text, family, status="unverified", conf=0.5):
@@ -61,7 +159,7 @@ def _disagreement(pairs):
 
 # ── 1. Simple dependency: A contradicts B -> depends_on edges recorded ──
 
-g = _tmp_graph()
+g = _fresh_graph()
 a1 = _claim("cl_a1", "A v1", "fam_A", status="supported")
 b1 = _claim("cl_b1", "B v1", "fam_B", status="supported")
 dis = _disagreement([("0:1", "contradicts", a1, b1, "llm_nli_batch")])
@@ -69,7 +167,6 @@ stats1 = apply_family_dependency_shadow([a1, b1], dis, log=lambda m: None, verbo
 check(
     "contradicts pair creates symmetric depends_on edges",
     len(g.dependents_of("fam_A")) == 1 and len(g.dependents_of("fam_B")) == 1,
-    f"{g.edges}",
 )
 check(
     "first observation of both families is never a change",
@@ -88,7 +185,7 @@ check(
 
 # ── 2. Multi-hop: A <- B <- C (B depends_on A, C depends_on B) via two separate contradictions ──
 
-g2 = _tmp_graph()
+g2 = _fresh_graph()
 a = _claim("cl_a", "A", "fam_A", status="supported")
 b = _claim("cl_b", "B", "fam_B", status="supported")
 c = _claim("cl_c", "C", "fam_C", status="supported")
@@ -100,7 +197,6 @@ apply_family_dependency_shadow(
 )
 a_changed = _claim("cl_a2", "A changed", "fam_A", status="contradicted")
 stats_multihop = apply_family_dependency_shadow([a_changed], None, log=lambda m: None, verbose=False, graph=g2)
-depths = sorted(cand["dependent_family"] for cand in [])  # placeholder, real check below
 check(
     "multi-hop: changing A reaches both direct (B) and transitive (C) dependents",
     stats_multihop["recheck_candidates"] == 2,
@@ -109,7 +205,7 @@ check(
 
 # ── 3. Cycle: A <-> B mutual contradiction terminates traversal (bounded, no infinite loop) ──
 
-g3 = _tmp_graph()
+g3 = _fresh_graph()
 apply_family_dependency_shadow(
     [a, b], _disagreement([("0:1", "contradicts", a, b, "llm_nli_batch")]), log=lambda m: None, verbose=False, graph=g3,
 )
@@ -128,11 +224,11 @@ check(
 
 # ── 4. Self-cycle: a claim NLI-paired with itself, or two occurrences of the SAME family, never self-loops ──
 
-g4 = _tmp_graph()
+g4 = _fresh_graph()
 same_fam_1 = _claim("cl_x1", "X v1", "fam_X")
 same_fam_2 = _claim("cl_x2", "X v2", "fam_X")
 edge = g4.record_edge("fam_X", "fam_X", "depends_on", "test", ["cl_x1"])
-check("record_edge refuses a self-loop", edge is None and g4.edges == [], f"{g4.edges}")
+check("record_edge refuses a self-loop", edge is None and g4.dependents_of("fam_X") == [])
 
 stats_self = apply_family_dependency_shadow(
     [same_fam_1, same_fam_2],
@@ -141,13 +237,13 @@ stats_self = apply_family_dependency_shadow(
 )
 check(
     "two occurrences of the same family NLI-compared never create a self-loop edge",
-    stats_self["dependency_edges_recorded"] == 0 and g4.edges == [],
-    f"{stats_self} {g4.edges}",
+    stats_self["dependency_edges_recorded"] == 0,
+    f"{stats_self}",
 )
 
 # ── 5. Multiple dependents: A contradicts B and A contradicts C -> both flagged ──
 
-g5 = _tmp_graph()
+g5 = _fresh_graph()
 apply_family_dependency_shadow(
     [a, b], _disagreement([("0:1", "contradicts", a, b, "llm_nli_batch")]), log=lambda m: None, verbose=False, graph=g5,
 )
@@ -164,13 +260,13 @@ check(
 
 # ── 6. Unrelated / uncertain relation never creates a dependency ──
 
-g6 = _tmp_graph()
+g6 = _fresh_graph()
 stats_unrelated = apply_family_dependency_shadow(
     [a, b], _disagreement([("0:1", "unrelated", a, b, "llm_nli_batch")]), log=lambda m: None, verbose=False, graph=g6,
 )
 check(
     "unrelated relation creates no edge",
-    stats_unrelated["dependency_edges_recorded"] == 0 and g6.edges == [],
+    stats_unrelated["dependency_edges_recorded"] == 0,
     f"{stats_unrelated}",
 )
 stats_uncertain = apply_family_dependency_shadow(
@@ -178,25 +274,24 @@ stats_uncertain = apply_family_dependency_shadow(
 )
 check(
     "uncertain relation creates no edge",
-    stats_uncertain["dependency_edges_recorded"] == 0 and g6.edges == [],
+    stats_uncertain["dependency_edges_recorded"] == 0,
     f"{stats_uncertain}",
 )
 
 # ── 7. Same semantic family, multiple occurrences within one request: last status wins, no crash ──
 
-g7 = _tmp_graph()
+g7 = _fresh_graph()
 occ1 = _claim("cl_o1", "occ1", "fam_O", status="supported")
 occ2 = _claim("cl_o2", "occ2", "fam_O", status="contradicted")
 apply_family_dependency_shadow([occ1, occ2], None, log=lambda m: None, verbose=False, graph=g7)
 check(
     "same family, multiple occurrences: baseline recorded without crash",
-    g7.family_state.get("fam_O", {}).get("last_status") == "contradicted",
-    f"{g7.family_state}",
+    g7.observe_family_status("fam_O", "contradicted")["previous_status"] == "contradicted",
 )
 
 # ── 8. No duplicate candidates: a family reachable via two paths appears once ──
 
-g8 = _tmp_graph()
+g8 = _fresh_graph()
 apply_family_dependency_shadow(
     [a, b], _disagreement([("0:1", "contradicts", a, b, "llm_nli_batch")]), log=lambda m: None, verbose=False, graph=g8,
 )
@@ -216,47 +311,37 @@ check(
 
 # ── 9. UNKNOWN relation / non-LLM method does not create a false dependency ──
 
-g9 = _tmp_graph()
+g9 = _fresh_graph()
 stats_fallback = apply_family_dependency_shadow(
     [a, b], _disagreement([("0:1", "contradicts", a, b, "batch_fallback")]), log=lambda m: None, verbose=False, graph=g9,
 )
 check(
     "non-llm_nli_batch method (fallback) never creates an edge, even if relation says contradicts",
-    stats_fallback["dependency_edges_recorded"] == 0 and g9.edges == [],
+    stats_fallback["dependency_edges_recorded"] == 0,
     f"{stats_fallback}",
 )
 
-# ── 10. Old graph/state remains readable after additive updates; corrupt file fails open ──
+# ── 10. Persistence: a SECOND FamilyDependencyGraph() sharing the SAME connection sees identical state ──
 
-tmp_path = Path(tempfile.mkstemp(suffix=".json")[1])
-g10a = FamilyDependencyGraph(storage_file=tmp_path)
+g10a = _fresh_graph()
 apply_family_dependency_shadow(
     [a, b], _disagreement([("0:1", "contradicts", a, b, "llm_nli_batch")]), log=lambda m: None, verbose=False, graph=g10a,
 )
-g10b = FamilyDependencyGraph(storage_file=tmp_path)  # fresh load from disk
+g10b = FamilyDependencyGraph()  # still wired to the same fake connection via fdg_mod.get_connection
 check(
-    "graph reloaded from disk retains previously persisted edges",
-    len(g10b.edges) == len(g10a.edges) and len(g10b.edges) > 0,
-    f"{g10b.edges}",
+    "a brand-new FamilyDependencyGraph() instance, same connection, sees the SAME edges immediately",
+    len(g10b.dependents_of("fam_A")) == len(g10a.dependents_of("fam_A")) and len(g10a.dependents_of("fam_A")) > 0,
 )
 apply_family_dependency_shadow(
     [a, c], _disagreement([("0:1", "contradicts", a, c, "llm_nli_batch")]), log=lambda m: None, verbose=False, graph=g10b,
 )
-g10c = FamilyDependencyGraph(storage_file=tmp_path)
+g10c = FamilyDependencyGraph()
 check(
-    "additive update on top of a reloaded graph preserves prior edges and adds new ones",
-    any(e["to_family"] == "fam_B" for e in g10c.edges) and any(e["to_family"] == "fam_C" for e in g10c.edges),
-    f"{g10c.edges}",
+    "additive update on top of a shared graph preserves prior edges and adds new ones",
+    any(e["from_family"] == "fam_B" for e in g10c.dependents_of("fam_A"))
+    and any(e["from_family"] == "fam_C" for e in g10c.dependents_of("fam_A")),
+    f"{g10c.dependents_of('fam_A')}",
 )
-
-tmp_path.write_text("not valid json{{{", encoding="utf-8")
-g10d = FamilyDependencyGraph(storage_file=tmp_path)
-check(
-    "corrupt on-disk file fails open (empty in-memory state, no crash)",
-    g10d.edges == [] and g10d.family_state == {},
-    f"{g10d.edges} {g10d.family_state}",
-)
-tmp_path.unlink()
 
 # ── 11. Scope containment: structural inertness w.r.t. THIS request ──
 #
@@ -271,10 +356,7 @@ tmp_path.unlink()
 # function to influence the current request's own answer/Trust/coverage,
 # regardless of who reads its return value afterward.
 
-import agent.family_dependency_graph as fdg_mod
-import inspect as _inspect
-
-_sig = _inspect.signature(fdg_mod.apply_family_dependency_shadow)
+_sig = inspect.signature(fdg_mod.apply_family_dependency_shadow)
 check(
     "apply_family_dependency_shadow has no synthesis_result/trust/evidence_data/"
     "belief_manager parameter — structurally cannot reach those subsystems",
@@ -315,6 +397,32 @@ check(
     and "infer_claim_relations_batch" not in inspect.getsource(fdg_mod),
     "",
 )
+
+# ── 12. Fail LOUD, not fail-open: SQL genuinely unreachable raises SqlUnavailable
+#      (replaces the retired "corrupt JSON file" scenario, which has no SQL
+#      equivalent — "точка ноль": there is no more file-based fallback). ──
+
+from agent.db.sql.connection import SqlUnavailable
+
+g12 = FamilyDependencyGraph()  # still wired to the last fake connection
+
+
+def _raise_unavailable(autocommit=False):
+    raise SqlUnavailable("forced unreachable for this test")
+
+
+from unittest.mock import patch as _patch
+with _patch.object(fdg_mod, "get_connection", _raise_unavailable):
+    raised = False
+    try:
+        g12.observe_family_status("fam_Z", "supported")
+    except SqlUnavailable:
+        raised = True
+    check(
+        "with SQL genuinely unreachable, observe_family_status() raises SqlUnavailable — the "
+        "deliberate opposite of the retired JSON fail-safe (\"corrupt file -> start empty, never crash\")",
+        raised,
+    )
 
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")

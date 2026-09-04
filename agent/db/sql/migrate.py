@@ -24,7 +24,7 @@ from agent.db.sql.schema import (
     SCHEMA_VERSION,
 )
 
-SCHEMA_VERSION_DESCRIPTION = "v5: belief gets full Bayesian/evidence columns (\"точка ноль\" — belief_manager.py's JSON store retired)"
+SCHEMA_VERSION_DESCRIPTION = "v10: semantic_edge.triggering_claim_ids + family_status_state (\"точка ноль\" — family_dependency_graph.py's JSON store retired)"
 
 
 def record_schema_version(

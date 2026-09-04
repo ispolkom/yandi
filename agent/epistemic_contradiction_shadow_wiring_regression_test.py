@@ -34,6 +34,8 @@ from unittest.mock import patch
 import agent.orchestrator_v2 as orch_v2_mod
 import agent.verification_memory as vm
 from agent.family_dependency_graph import FamilyDependencyGraph
+import agent.family_dependency_graph as fdg_mod
+import contextlib
 from agent.dependency_recheck import apply_dependency_recheck
 from agent.epistemic_contradiction_shadow import (
     run_epistemic_contradiction_shadow,
@@ -52,6 +54,117 @@ def check(name: str, condition: bool, detail: str = ""):
     else:
         FAIL += 1
         print(f"FAIL {name} {detail}")
+
+
+class _FDFakeCursor:
+    def __init__(self, conn):
+        self.conn = conn
+        self._result = None
+        self._results = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        upper = " ".join(sql.split()).upper()
+        self._result = None
+        self._results = None
+        conn = self.conn
+        if upper.startswith("INSERT IGNORE INTO CLAIM_FAMILY"):
+            family_id, domain, canonical_text, created_at, updated_at = params
+            conn.families.setdefault(family_id, {"family_id": family_id, "domain": domain, "canonical_text": canonical_text})
+        elif upper.startswith("SELECT * FROM SEMANTIC_EDGE WHERE FAMILY_A=%S AND FAMILY_B=%S AND EDGE_TYPE=%S"):
+            fam_a, fam_b, edge_type = params
+            self._result = next(
+                (dict(e) for e in conn.edges.values() if e["family_a"] == fam_a and e["family_b"] == fam_b and e["edge_type"] == edge_type),
+                None,
+            )
+        elif upper.startswith("INSERT INTO SEMANTIC_EDGE"):
+            edge_id, family_a, family_b, edge_type, reason, triggering, created_at, last_seen_at = params
+            conn.edges[edge_id] = {
+                "edge_id": edge_id, "family_a": family_a, "family_b": family_b, "edge_type": edge_type,
+                "reason": reason, "observation_count": 1, "triggering_claim_ids": triggering,
+                "created_at": created_at, "last_seen_at": last_seen_at,
+            }
+        elif upper.startswith("UPDATE SEMANTIC_EDGE SET OBSERVATION_COUNT"):
+            last_seen_at, triggering, edge_id = params
+            e = conn.edges[edge_id]
+            e["observation_count"] += 1
+            e["last_seen_at"] = last_seen_at
+            e["triggering_claim_ids"] = triggering
+        elif upper.startswith("SELECT * FROM SEMANTIC_EDGE WHERE FAMILY_B=%S AND EDGE_TYPE='DEPENDS_ON'"):
+            (family_b,) = params
+            self._results = [dict(e) for e in conn.edges.values() if e["family_b"] == family_b and e["edge_type"] == "depends_on"]
+        elif upper.startswith("SELECT * FROM SEMANTIC_EDGE WHERE EDGE_TYPE='CONTRADICTS'"):
+            self._results = [dict(e) for e in conn.edges.values() if e["edge_type"] == "contradicts"]
+        elif upper.startswith("SELECT * FROM FAMILY_STATUS_STATE WHERE FAMILY_ID=%S"):
+            (family_id,) = params
+            self._result = dict(conn.status[family_id]) if family_id in conn.status else None
+        elif upper.startswith("INSERT INTO FAMILY_STATUS_STATE"):
+            family_id, last_status, updated_at = params
+            conn.status[family_id] = {"family_id": family_id, "last_status": last_status, "updated_at": updated_at}
+        elif upper.startswith("SELECT * FROM RECHECK_EVENT WHERE FAMILY_ID=%S ORDER BY STARTED_AT DESC LIMIT 1"):
+            (family_id,) = params
+            rows = [r for r in conn.rechecks if r["family_id"] == family_id]
+            rows.sort(key=lambda r: r["started_at"])
+            self._result = dict(rows[-1]) if rows else None
+        elif upper.startswith("INSERT INTO RECHECK_EVENT"):
+            family_id, run_id, trigger_reason, started_at, outcome, reason = params
+            conn.rechecks.append({
+                "family_id": family_id, "run_id": run_id, "trigger_reason": trigger_reason,
+                "started_at": started_at, "outcome": outcome, "reason": reason,
+            })
+
+    def fetchone(self):
+        return self._result
+
+    def fetchall(self):
+        return self._results or []
+
+
+class _FDFakeConnection:
+    def __init__(self):
+        self.families = {}
+        self.edges = {}
+        self.status = {}
+        self.rechecks = []
+
+    def cursor(self):
+        return _FDFakeCursor(self)
+
+    def commit(self):
+        pass
+
+
+_SHARED_FD_CONN = _FDFakeConnection()
+
+
+@contextlib.contextmanager
+def _shared_fd_get_connection(autocommit=False):
+    yield _SHARED_FD_CONN
+
+
+fdg_mod.get_connection = _shared_fd_get_connection
+
+
+def _fresh_graph():
+    """A new FamilyDependencyGraph Python object, all sharing ONE
+    module-wide fake claim_family/semantic_edge/family_status_state/
+    recheck_event store ("точка ноль": no more storage_file= — and
+    unlike a per-call fresh connection, this matches production's own
+    real shape: every FamilyDependencyGraph() instance in this codebase
+    always talks to the SAME one database, via the SAME ambient
+    agent.family_dependency_graph.get_connection — never a private
+    connection stashed on the instance. Rebinding that module attribute
+    per graph, as an earlier draft of this fixture did, silently broke
+    whichever graph was constructed FIRST once a second graph's
+    construction reassigned the shared attribute out from under it)."""
+    return FamilyDependencyGraph()
+
+
 
 
 def _noop_log(*a, **k):
@@ -114,7 +227,7 @@ check(
 def _make_fixture():
     traces_dir = Path(tempfile.mkdtemp(prefix="p10_wire_traces_"))
     index_db = Path(tempfile.mkdtemp(prefix="p10_wire_index_")) / "index.db"
-    graph = FamilyDependencyGraph(storage_file=Path(tempfile.mkdtemp(prefix="p10_wire_g_")) / "g.json")
+    graph = _fresh_graph()
     graph.record_edge("fam_w_a", "fam_w_b", "contradicts", "claim_claim_nli:contradicts", ["cl_w_a", "cl_w_b"])
     graph.record_edge("fam_w_b", "fam_w_a", "contradicts", "claim_claim_nli:contradicts", ["cl_w_a", "cl_w_b"])
 
@@ -144,8 +257,7 @@ def _make_fixture():
 
 
 class _BrokenGraph:
-    @property
-    def edges(self):
+    def all_contradicts_edges(self):
         raise RuntimeError("simulated graph corruption")
 
 
@@ -161,8 +273,8 @@ def _run_phase12_twice(family_dependency_stats, shadow_call):
     empty-candidate short-circuit) while still exercising the real
     function under the real call-order.
     """
-    graph1 = FamilyDependencyGraph(storage_file=Path(tempfile.mkdtemp(prefix="p10_wire_p12a_")) / "g.json")
-    graph2 = FamilyDependencyGraph(storage_file=Path(tempfile.mkdtemp(prefix="p10_wire_p12b_")) / "g.json")
+    graph1 = _fresh_graph()
+    graph2 = _fresh_graph()
 
     stats_before = copy.deepcopy(family_dependency_stats)
 
