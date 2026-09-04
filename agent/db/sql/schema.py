@@ -46,7 +46,7 @@ DESIGN NOTES (read before changing a table):
    no HTTP retry chatter. RUN_ERROR is 5 columns, not a log warehouse.
 """
 
-SCHEMA_VERSION = 4  # v4: + grievance, forgiveness_capacity (SQL-backed character/relationship state)
+SCHEMA_VERSION = 5  # v5: belief gets its full Bayesian/evidence columns ("точка ноль" — belief_manager.py's JSON store retired, not migrated)
 
 SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -342,8 +342,26 @@ CREATE TABLE IF NOT EXISTS belief (
     statement            TEXT NOT NULL,
     confidence            FLOAT NOT NULL,
     status                ENUM('active','revised','rejected','superseded') NOT NULL DEFAULT 'active',
+    -- "Точка ноль" (owner mandate, 2026-09): agent/belief_manager.py's
+    -- ENTIRE Belief dataclass now lives here, not in registry/beliefs.
+    -- json — these columns did not exist in the original 5A design,
+    -- which only covered confidence/status/timestamps. JSON columns
+    -- for the two evidence-id lists and claim_ids, same pattern already
+    -- used elsewhere in this schema (decision_event.delta_factors,
+    -- grievance.context) — these are under the SAME bastion access
+    -- control as every other column here, unlike a JSON FILE.
+    evidence_for          JSON NULL,
+    evidence_against      JSON NULL,
+    claim_ids             JSON NULL,
+    prior                 FLOAT NOT NULL DEFAULT 0.5,
+    likelihood            FLOAT NOT NULL DEFAULT 0.5,
+    contradiction_score   FLOAT NOT NULL DEFAULT 0.0,
+    decay_factor          FLOAT NOT NULL DEFAULT 0.95,
+    superseded_by         VARCHAR(20) NULL,
     created_at           DATETIME NOT NULL,
     updated_at           DATETIME NOT NULL,
+    CONSTRAINT fk_belief_superseded_by FOREIGN KEY (superseded_by)
+        REFERENCES belief(belief_id),
     KEY idx_belief_topic (topic)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """

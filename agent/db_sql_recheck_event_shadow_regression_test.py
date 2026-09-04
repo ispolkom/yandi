@@ -51,6 +51,7 @@ from agent.dependency_recheck import apply_dependency_recheck
 from agent.family_dependency_graph import FamilyDependencyGraph
 import agent.family_dependency_graph as fdg_mod
 from agent.belief_manager import BeliefManager
+import agent.belief_manager as bm_mod
 import agent.db.sql.shadow_write as sw
 import agent.db.sql.connection as sqlconn
 
@@ -80,9 +81,19 @@ def _tmp_graph():
 
 
 def _tmp_belief_manager():
-    tmp = Path(tempfile.mkstemp(suffix=".json")[1])
-    tmp.unlink()
-    return BeliefManager(storage_file=tmp)
+    """"Точка ноль" (owner mandate): BeliefManager no longer accepts a
+    storage_file — it is SQL-backed unconditionally now (agent/
+    belief_manager_sql_regression_test.py tests THAT directly). This
+    file's own concern is recheck_event, not belief persistence — a
+    dedicated, always-on fake connection (patched at module scope right
+    after the fake classes below are defined) keeps every BeliefManager
+    used here isolated from the real live SQL instance, and — just as
+    importantly — isolated from Section F's own YANDI_SQL_SOCKET
+    forcing further down this file, which is testing recheck_event's
+    OWN fail-open behavior, not belief_manager's (separately confirmed
+    to now fail LOUD by design, in belief_manager_sql_regression_test.py's
+    own check 7)."""
+    return BeliefManager()
 
 
 def _family(family_id, canonical_text, claim_id, domain="factual"):
@@ -137,6 +148,8 @@ class FakeCursor:
     def __init__(self, conn):
         self.conn = conn
         self.lastrowid = None
+        self._result = None
+        self._results = []
 
     def __enter__(self):
         return self
@@ -145,22 +158,48 @@ class FakeCursor:
         return False
 
     def execute(self, sql, params=None):
-        self.conn.calls.append((" ".join(sql.split()), params))
-        if sql.strip().upper().startswith("INSERT"):
+        norm = " ".join(sql.split())
+        self.conn.calls.append((norm, params))
+        upper = norm.strip().upper()
+        self._result = None
+        self._results = []
+
+        # Minimal belief-table awareness — this file's own concern is
+        # recheck_event, not belief CRUD correctness (that's fully
+        # covered separately in belief_manager_sql_regression_test.py);
+        # this just needs BeliefManager to not crash when it reads back
+        # what it just wrote.
+        if upper.startswith("INSERT INTO BELIEF "):
+            belief_id = params[0]
+            self.conn.beliefs[belief_id] = {
+                "belief_id": params[0], "topic": params[1], "statement": params[2],
+                "confidence": params[3], "status": params[4],
+                "evidence_for": params[5], "evidence_against": params[6], "claim_ids": params[7],
+                "prior": params[8], "likelihood": params[9], "contradiction_score": params[10],
+                "decay_factor": params[11], "superseded_by": params[12],
+                "created_at": params[13], "updated_at": params[14],
+            }
+        elif upper.startswith("SELECT * FROM BELIEF WHERE BELIEF_ID=%S"):
+            (belief_id,) = params
+            self._result = dict(self.conn.beliefs[belief_id]) if belief_id in self.conn.beliefs else None
+        elif upper.startswith("SELECT * FROM BELIEF"):
+            self._results = [dict(r) for r in self.conn.beliefs.values()]
+        elif sql.strip().upper().startswith("INSERT"):
             self.conn.next_id += 1
             self.lastrowid = self.conn.next_id
 
     def fetchone(self):
-        return None
+        return self._result
 
     def fetchall(self):
-        return []
+        return self._results
 
 
 class FakeConnection:
     def __init__(self):
         self.calls = []
         self.next_id = 1000
+        self.beliefs = {}
 
     def cursor(self):
         return FakeCursor(self)
@@ -185,6 +224,22 @@ def _run_with_fake_sql(fn):
     with patch.object(sw, "get_connection", _fake_get_connection):
         result = fn()
     return conn, result
+
+
+# Belief-manager connection: patched ONCE, for this whole file's
+# duration, deliberately separate from _run_with_fake_sql's per-call
+# sw.get_connection patch above — see _tmp_belief_manager()'s own
+# docstring for why. Never stopped (this is a standalone top-to-bottom
+# script, not a test suite with teardown between cases).
+_belief_fake_conn = FakeConnection()
+
+
+@contextlib.contextmanager
+def _fake_belief_get_connection(autocommit=False):
+    yield _belief_fake_conn
+
+
+patch.object(bm_mod, "get_connection", _fake_belief_get_connection).start()
 
 
 def _recheck_inserts(conn):

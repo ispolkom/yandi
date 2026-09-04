@@ -11,6 +11,25 @@ agent/belief_manager.py — Управление убеждениями для Y
 
 Цель: система может менять мнение при появлении новых данных,
 используя математически обоснованное обновление убеждений.
+
+"ТОЧКА НОЛЬ" (owner mandate, 2026-09): раньше текущее состояние жило в
+registry/beliefs.json, а история изменений ДОПОЛНИТЕЛЬНО дублировалась
+в SQL через shadow_record_belief_assessment() — то есть JSON оставался
+источником истины, SQL был лишь тенью. Теперь SQL (agent.db.sql.belief
++ belief_assessment_history) — ЕДИНСТВЕННЫЙ источник истины, JSON-файла
+для этого состояния больше нет вообще. Владелец: "если мы строим
+бастион, то json не должно быть в принципе — мы пытаемся сохранить
+цепочку знаний, рассуждений, почему они менялись". Старое содержимое
+registry/beliefs.json НЕ переносится — начинаем с чистого состояния,
+не с миграции.
+
+ВАЖНОЕ ПОСЛЕДСТВИЕ: раньше при недоступности SQL это was a "shadow"
+write — сбой молча проглатывался, JSON-путь работал независимо. Теперь
+SQL — не тень, а единственный путь: agent.db.sql.connection.
+SqlUnavailable из любого метода этого класса ПРОБРАСЫВАЕТСЯ наружу, а
+не глотается. Система, которая не доверяет себе, не может тихо делать
+вид, что убеждение сохранено, когда оно на самом деле нигде не
+записано.
 """
 
 from __future__ import annotations
@@ -24,10 +43,27 @@ sys.path.insert(0, str(BASE))
 import json
 import time
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
-from agent.db.sql.shadow_write import shadow_record_belief_assessment
+from agent.db.sql.connection import get_connection
+import agent.db.sql.repositories as repo
+
+
+def _dt_to_unix(value) -> float:
+    """SQL DATETIME columns come back as naive datetime objects
+    representing UTC (see repositories._coerce_datetime's own
+    docstring) — .timestamp() on a naive datetime assumes LOCAL time,
+    which silently corrupts the value (same class of bug already found
+    and fixed once this session in agent/relationship_memory_regression_
+    test.py). Attaching tzinfo=utc explicitly before converting is the
+    only correct way back to a Unix timestamp float."""
+    if value is None:
+        return time.time()
+    if isinstance(value, (int, float)):
+        return float(value)
+    return value.replace(tzinfo=timezone.utc).timestamp()
 
 
 @dataclass
@@ -44,7 +80,7 @@ class Belief:
     updated_at: float
     history: List[Dict[str, Any]]
     status: str = "active"  # active | revised | rejected | superseded
-    
+
     # Bayesian параметры
     prior: float = 0.5  # априорная вероятность
     likelihood: float = 0.5  # правдоподобие
@@ -53,101 +89,100 @@ class Belief:
     superseded_by: Optional[str] = None  # id убеждения, которое заменило это
 
 
+def _row_to_belief(row: Dict[str, Any]) -> Belief:
+    """SQL row (agent.db.sql.repositories.get_belief()/list_*) -> Belief.
+    `history` is deliberately empty here — it is no longer embedded in
+    the current-state row (it lives in belief_assessment_history, a
+    separate append-only table); call get_belief_history() for the real
+    thing. No current caller reads Belief.history (confirmed via grep
+    before this rewrite), so an empty list is honest, not a stub
+    pretending to be complete data."""
+    return Belief(
+        id=row["belief_id"], topic=row["topic"], statement=row["statement"],
+        confidence=row["confidence"], evidence_for=row.get("evidence_for") or [],
+        evidence_against=row.get("evidence_against") or [], claim_ids=row.get("claim_ids") or [],
+        created_at=_dt_to_unix(row["created_at"]), updated_at=_dt_to_unix(row["updated_at"]),
+        history=[], status=row["status"], prior=row["prior"], likelihood=row["likelihood"],
+        contradiction_score=row["contradiction_score"], decay_factor=row["decay_factor"],
+        superseded_by=row.get("superseded_by"),
+    )
+
+
 class BeliefManager:
     """
-    Управление убеждениями с Bayesian обновлением.
+    Управление убеждениями с Bayesian обновлением. SQL-backed — см.
+    модульный докстринг про "точку ноль".
     """
-    
-    def __init__(self, storage_file: Optional[Path] = None):
-        self.storage_file = storage_file or BASE / "registry" / "beliefs.json"
-        self.beliefs: List[Belief] = []
-        self._load()
-        self._apply_decay()  # применяем затухание при загрузке
-    
-    def _load(self):
-        if self.storage_file.exists():
-            try:
-                with open(self.storage_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self.beliefs = [Belief(**b) for b in data]
-            except Exception as e:
-                print(f"[belief_manager] Ошибка загрузки: {e}")
-    
-    def _save(self):
-        try:
-            self.storage_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.storage_file, 'w', encoding='utf-8') as f:
-                json.dump([b.__dict__ for b in self.beliefs], f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[belief_manager] Ошибка сохранения: {e}")
-    
+
+    def __init__(self):
+        self._apply_decay()
+
     def _apply_decay(self):
-        """Применить затухание уверенности со временем."""
+        """Применить затухание уверенности со временем — раньше
+        выполнялось один раз при загрузке JSON в память; теперь читает
+        активные убеждения из SQL, считает decay в Python, и пишет
+        изменившиеся обратно за один проход."""
         now = time.time()
-        for belief in self.beliefs:
-            if belief.status == "active":
-                age_days = (now - belief.updated_at) / 86400
-                if age_days > 1:
-                    decay = belief.decay_factor ** age_days
-                    old_conf = belief.confidence
-                    belief.confidence = belief.confidence * decay
-                    belief.history.append({
-                        "timestamp": now,
-                        "old_confidence": old_conf,
-                        "new_confidence": belief.confidence,
-                        "reason": f"decay: {age_days:.1f} days",
-                        "change": "decayed",
-                    })
-                    belief.updated_at = now
-                    shadow_record_belief_assessment(
-                        belief_id=belief.id, topic=belief.topic, statement=belief.statement,
-                        confidence=belief.confidence, status=belief.status,
-                        change_type="decayed", old_confidence=old_conf, new_confidence=belief.confidence,
-                        reason=f"decay: {age_days:.1f} days",
-                    )
-        self._save()
-    
+        with get_connection() as conn:
+            active = repo.list_active_beliefs(conn)
+            for row in active:
+                updated_at = _dt_to_unix(row["updated_at"])
+                age_days = (now - updated_at) / 86400
+                if age_days <= 1:
+                    continue
+                decay = row["decay_factor"] ** age_days
+                old_conf = row["confidence"]
+                new_conf = old_conf * decay
+                repo.upsert_belief(
+                    conn, row["belief_id"], row["topic"], row["statement"], new_conf,
+                    status=row["status"], evidence_for=row.get("evidence_for") or [],
+                    evidence_against=row.get("evidence_against") or [], claim_ids=row.get("claim_ids") or [],
+                    prior=row["prior"], likelihood=row["likelihood"],
+                    contradiction_score=row["contradiction_score"], decay_factor=row["decay_factor"],
+                    superseded_by=row.get("superseded_by"), created_at=row["created_at"], updated_at=now,
+                )
+                repo.record_belief_assessment(
+                    conn, row["belief_id"], change_type="decayed",
+                    old_confidence=old_conf, new_confidence=new_conf,
+                    reason=f"decay: {age_days:.1f} days", created_at=now,
+                )
+            conn.commit()
+
     def _bayesian_update(self, belief: Belief, new_evidence: float, is_supporting: bool) -> float:
         """
         Bayesian обновление уверенности.
-        
+
         Args:
             belief: текущее убеждение
             new_evidence: 0..1, сила нового свидетельства
             is_supporting: поддерживает ли новое свидетельство убеждение
-        
+
         Returns:
             новая уверенность (апостериорная вероятность)
         """
         prior = belief.confidence
         likelihood = new_evidence
-        
+
         if is_supporting:
-            # P(E|H) = likelihood
-            # P(E|¬H) = 1 - likelihood
             posterior = (prior * likelihood) / (prior * likelihood + (1 - prior) * (1 - likelihood))
         else:
-            # Контраргумент: P(E|¬H) = likelihood
-            # P(E|H) = 1 - likelihood
             posterior = (prior * (1 - likelihood)) / (prior * (1 - likelihood) + (1 - prior) * likelihood)
-        
-        # Ограничиваем и добавляем сглаживание
+
         posterior = max(0.01, min(0.99, posterior))
         return posterior
-    
+
     def _calculate_contradiction_score(self, belief: Belief) -> float:
         """Рассчитать противоречивость убеждения."""
         if not belief.evidence_for and not belief.evidence_against:
             return 0.0
-        
+
         total = len(belief.evidence_for) + len(belief.evidence_against)
         if total == 0:
             return 0.0
-        
-        # Чем больше противоречивых evidence, тем выше противоречивость
+
         ratio = len(belief.evidence_against) / total
-        return min(1.0, ratio * 2)  # умножаем на 2, чтобы усилить эффект
-    
+        return min(1.0, ratio * 2)
+
     def add_belief(
         self,
         topic: str,
@@ -162,102 +197,62 @@ class BeliefManager:
         existing = self._find_similar(topic, statement)
         if existing:
             return self._update_existing(existing, confidence, evidence_for, evidence_against)
-        
-        belief = Belief(
-            id=f"bel_{uuid.uuid4().hex[:8]}",
-            topic=topic,
-            statement=statement,
-            confidence=confidence,
-            evidence_for=evidence_for or [],
-            evidence_against=evidence_against or [],
-            claim_ids=claim_ids or [],
-            created_at=time.time(),
-            updated_at=time.time(),
-            history=[{
-                "timestamp": time.time(),
-                "old_confidence": 0.0,
-                "new_confidence": confidence,
-                "reason": "initial",
-                "change": "created",
-            }],
-            status="active",
-            prior=prior,
-            likelihood=confidence,
-            contradiction_score=0.0,
-        )
-        self.beliefs.append(belief)
-        self._save()
-        shadow_record_belief_assessment(
-            belief_id=belief.id, topic=belief.topic, statement=belief.statement,
-            confidence=belief.confidence, status=belief.status,
-            change_type="created", old_confidence=0.0, new_confidence=confidence,
-            reason="initial",
-        )
-        return belief
-    
+
+        belief_id = f"bel_{uuid.uuid4().hex[:8]}"
+        now = time.time()
+        with get_connection() as conn:
+            repo.upsert_belief(
+                conn, belief_id, topic, statement, confidence, status="active",
+                evidence_for=evidence_for or [], evidence_against=evidence_against or [],
+                claim_ids=claim_ids or [], prior=prior, likelihood=confidence,
+                contradiction_score=0.0, decay_factor=0.95, created_at=now, updated_at=now,
+            )
+            repo.record_belief_assessment(
+                conn, belief_id, change_type="created", old_confidence=0.0,
+                new_confidence=confidence, reason="initial", created_at=now,
+            )
+            conn.commit()
+            row = repo.get_belief(conn, belief_id)
+        return _row_to_belief(row)
+
     def _find_similar(self, topic: str, statement: str) -> Optional[Belief]:
         """
         Найти существующее убеждение, эквивалентное новому statement.
 
-        P0 (performance architecture pass): раньше _is_similar_statement()
-        делал СВОИ 2 embed HTTP-вызова на КАЖДОЕ сравнение — включая
-        повторное re-embed одного и того же нового `statement` на
-        каждой итерации. При 108 активных beliefs одной темы (реальное
-        число в registry на момент фикса) один add_belief() для
-        действительно нового утверждения мог стоить 200+ HTTP round-trips
-        (наблюдалось ~27s/кандидат в живом прогоне).
-
-        Теперь: сначала быстрый exact-match проход по всем кандидатам
-        (без единого HTTP-вызова — как и раньше, эта проверка не стоила
-        сети). Только если exact match не найден, делается ОДИН
-        batch-embed вызов (statement + все оставшиеся кандидаты этой
-        темы), и по кандидатам в ТОМ ЖЕ порядке — threshold-gated LLM
-        judge, первый "equivalent" выигрывает. Критерии решения не
-        изменились — изменился только способ получения embedding (один
-        batch-запрос вместо N избыточных), и лишний embed-вызов больше
-        не тратится впустую, когда дубликат находится по exact match.
+        Сначала быстрый exact-match проход (без HTTP-вызовов). Только
+        если exact match не найден — один batch-embed вызов, и по
+        кандидатам в том же порядке threshold-gated LLM judge, первый
+        "equivalent" выигрывает.
         """
         import numpy as np
 
-        candidates = [
-            belief
-            for belief in self.beliefs
-            if belief.status in ["active", "revised"] and belief.topic == topic
-        ]
+        if not statement:
+            return None
 
-        if not candidates or not statement:
+        with get_connection() as conn:
+            candidates = repo.list_beliefs_by_topic(conn, topic)
+
+        if not candidates:
             return None
 
         statement_norm = " ".join(statement.lower().split())
 
-        for belief in candidates:
-            belief_norm = " ".join((belief.statement or "").lower().split())
+        for row in candidates:
+            belief_norm = " ".join((row["statement"] or "").lower().split())
             if belief_norm == statement_norm:
-                return belief
+                return _row_to_belief(row)
 
-        vectors = self._embed_batch([statement] + [c.statement for c in candidates])
+        vectors = self._embed_batch([statement] + [c["statement"] for c in candidates])
 
         if vectors is None:
-            # Fail-safe (как раньше): при отказе embedding — не сливаем
-            # по fuzzy-пути.
             return None
 
-        for i, belief in enumerate(candidates):
+        for i, row in enumerate(candidates):
             similarity = float(np.dot(vectors[0], vectors[i + 1]))
-
-            # По измеренным данным:
-            # ~0.17 — unrelated
-            # ~0.54-0.64 — одна тема, разные утверждения
-            # ~0.81 — даже противоположные утверждения могут быть близки
-            # ~0.92 — почти эквивалентные формулировки
-            #
-            # Поэтому threshold здесь НЕ решает equivalence.
-            # Он только отсекает явно разные утверждения.
             if similarity < 0.70:
                 continue
-
-            if self._llm_judge_relation(belief.statement, statement) == "equivalent":
-                return belief
+            if self._llm_judge_relation(row["statement"], statement) == "equivalent":
+                return _row_to_belief(row)
 
         return None
 
@@ -292,9 +287,8 @@ class BeliefManager:
 
     def _llm_judge_relation(self, a: str, b: str) -> str:
         """
-        Короткий LLM judge — то же решение, что раньше было хвостом
-        _is_similar_statement(), вызывается только для кандидатов,
-        уже прошедших embedding-prefilter (similarity >= 0.70).
+        Короткий LLM judge, вызывается только для кандидатов, уже
+        прошедших embedding-prefilter (similarity >= 0.70).
         """
         try:
             import requests
@@ -359,7 +353,6 @@ different
             ).strip().lower()
 
         except Exception:
-            # При отказе LLM judge НЕ сливаем beliefs (как раньше).
             return ""
 
     def _update_existing(
@@ -371,93 +364,51 @@ different
     ) -> Belief:
         """Обновить существующее убеждение с Bayesian обновлением."""
         old_confidence = belief.confidence
-        
-        # ------------------------------------------------------------
-        # Обновление только по НОВЫМ evidence.
-        #
-        # Один и тот же evidence_id не должен повторно изменять belief
-        # при каждом проходе orchestrator.
-        #
-        # new_confidence здесь трактуется как качество/сила текущего
-        # candidate claim, а не как готовая новая confidence belief.
-        # ------------------------------------------------------------
 
-        evidence_strength = max(
-            0.05,
-            min(0.95, float(new_confidence))
-        )
+        evidence_strength = max(0.05, min(0.95, float(new_confidence)))
 
         known_for = set(belief.evidence_for or [])
         known_against = set(belief.evidence_against or [])
 
         if new_evidence_for:
             for ev in new_evidence_for:
-                if not ev:
+                if not ev or ev in known_for or ev in known_against:
                     continue
-
-                # Уже известное свидетельство повторно не учитываем.
-                if ev in known_for:
-                    continue
-
-                # Один evidence не может одновременно считаться
-                # и поддержкой, и опровержением.
-                if ev in known_against:
-                    continue
-
-                belief.confidence = self._bayesian_update(
-                    belief,
-                    evidence_strength,
-                    True,
-                )
-
+                belief.confidence = self._bayesian_update(belief, evidence_strength, True)
                 belief.evidence_for.append(ev)
                 known_for.add(ev)
 
         if new_evidence_against:
             for ev in new_evidence_against:
-                if not ev:
+                if not ev or ev in known_against or ev in known_for:
                     continue
-
-                if ev in known_against:
-                    continue
-
-                if ev in known_for:
-                    continue
-
-                belief.confidence = self._bayesian_update(
-                    belief,
-                    evidence_strength,
-                    False,
-                )
-
+                belief.confidence = self._bayesian_update(belief, evidence_strength, False)
                 belief.evidence_against.append(ev)
                 known_against.add(ev)
-        
-        # Обновляем contradiction_score
+
         belief.contradiction_score = self._calculate_contradiction_score(belief)
-        
-        # Если противоречивость высокая — понижаем уверенность
+
         if belief.contradiction_score > 0.5:
             belief.confidence = belief.confidence * (1 - belief.contradiction_score * 0.2)
-        
+
         belief.updated_at = time.time()
-        belief.history.append({
-            "timestamp": time.time(),
-            "old_confidence": old_confidence,
-            "new_confidence": belief.confidence,
-            "reason": "bayesian_update",
-            "change": "updated",
-            "contradiction_score": belief.contradiction_score,
-        })
-        self._save()
-        shadow_record_belief_assessment(
-            belief_id=belief.id, topic=belief.topic, statement=belief.statement,
-            confidence=belief.confidence, status=belief.status,
-            change_type="updated", old_confidence=old_confidence, new_confidence=belief.confidence,
-            reason="bayesian_update",
-        )
+
+        with get_connection() as conn:
+            repo.upsert_belief(
+                conn, belief.id, belief.topic, belief.statement, belief.confidence,
+                status=belief.status, evidence_for=belief.evidence_for,
+                evidence_against=belief.evidence_against, claim_ids=belief.claim_ids,
+                prior=belief.prior, likelihood=belief.likelihood,
+                contradiction_score=belief.contradiction_score, decay_factor=belief.decay_factor,
+                superseded_by=belief.superseded_by, created_at=belief.created_at, updated_at=belief.updated_at,
+            )
+            repo.record_belief_assessment(
+                conn, belief.id, change_type="updated", old_confidence=old_confidence,
+                new_confidence=belief.confidence, reason="bayesian_update", created_at=belief.updated_at,
+            )
+            conn.commit()
         return belief
-    
+
     def challenge_belief(
         self,
         belief_id: str,
@@ -468,125 +419,114 @@ different
         """
         Оспорить убеждение — изменить мнение под влиянием контраргументов.
         """
-        for belief in self.beliefs:
-            if belief.id == belief_id:
-                old_confidence = belief.confidence
-                # ----------------------------------------------------
-                # Challenge также учитываем только один раз.
-                #
-                # disagreement_engine уже передаёт new_confidence,
-                # поэтому больше не выбрасываем этот параметр.
-                # ----------------------------------------------------
+        with get_connection() as conn:
+            row = repo.get_belief(conn, belief_id)
+        if not row:
+            return None
+        belief = _row_to_belief(row)
 
-                challenge_strength = max(
-                    0.05,
-                    min(0.95, float(new_confidence))
-                )
+        old_confidence = belief.confidence
+        challenge_strength = max(0.05, min(0.95, float(new_confidence)))
+        known_against = set(belief.evidence_against or [])
 
-                known_against = set(belief.evidence_against or [])
+        if counter_evidence and counter_evidence not in known_against:
+            belief.evidence_against.append(counter_evidence)
+            belief.confidence = self._bayesian_update(belief, challenge_strength, False)
 
-                if counter_evidence and counter_evidence not in known_against:
-                    belief.evidence_against.append(counter_evidence)
+        belief.contradiction_score = self._calculate_contradiction_score(belief)
+        belief.updated_at = time.time()
 
-                    belief.confidence = self._bayesian_update(
-                        belief,
-                        challenge_strength,
-                        False,
-                    )
+        if belief.confidence < 0.3:
+            belief.status = "revised"
 
-                belief.contradiction_score = self._calculate_contradiction_score(belief)
-                
-                belief.updated_at = time.time()
-                belief.history.append({
-                    "timestamp": time.time(),
-                    "old_confidence": old_confidence,
-                    "new_confidence": belief.confidence,
-                    "reason": f"challenged: {reason}",
-                    "change": "revised",
-                    "contradiction_score": belief.contradiction_score,
-                })
-                
-                if belief.confidence < 0.3:
-                    belief.status = "revised"
+        with get_connection() as conn:
+            repo.upsert_belief(
+                conn, belief.id, belief.topic, belief.statement, belief.confidence,
+                status=belief.status, evidence_for=belief.evidence_for,
+                evidence_against=belief.evidence_against, claim_ids=belief.claim_ids,
+                prior=belief.prior, likelihood=belief.likelihood,
+                contradiction_score=belief.contradiction_score, decay_factor=belief.decay_factor,
+                superseded_by=belief.superseded_by, created_at=belief.created_at, updated_at=belief.updated_at,
+            )
+            repo.record_belief_assessment(
+                conn, belief.id, change_type="revised", old_confidence=old_confidence,
+                new_confidence=belief.confidence, reason=f"challenged: {reason}", created_at=belief.updated_at,
+            )
+            conn.commit()
+        return belief
 
-                self._save()
-                shadow_record_belief_assessment(
-                    belief_id=belief.id, topic=belief.topic, statement=belief.statement,
-                    confidence=belief.confidence, status=belief.status,
-                    change_type="revised", old_confidence=old_confidence, new_confidence=belief.confidence,
-                    reason=f"challenged: {reason}",
-                )
-                return belief
-        return None
-    
     def supersede_belief(self, old_belief_id: str, new_belief_id: str):
         """Заменяет одно убеждение другим."""
-        old_belief = None
-        new_belief = None
-        
-        for belief in self.beliefs:
-            if belief.id == old_belief_id:
-                old_belief = belief
-            if belief.id == new_belief_id:
-                new_belief = belief
-        
-        if old_belief and new_belief:
-            old_belief.status = "superseded"
-            old_belief.superseded_by = new_belief_id
-            old_belief.updated_at = time.time()
-            old_belief.history.append({
-                "timestamp": time.time(),
-                "reason": f"superseded by {new_belief_id}",
-                "change": "superseded",
-            })
-            self._save()
-            shadow_record_belief_assessment(
-                belief_id=old_belief.id, topic=old_belief.topic, statement=old_belief.statement,
-                confidence=old_belief.confidence, status=old_belief.status,
-                change_type="superseded", old_confidence=None, new_confidence=None,
-                reason=f"superseded by {new_belief_id}",
+        with get_connection() as conn:
+            old_row = repo.get_belief(conn, old_belief_id)
+            new_row = repo.get_belief(conn, new_belief_id)
+            if not old_row or not new_row:
+                return False
+
+            now = time.time()
+            repo.upsert_belief(
+                conn, old_row["belief_id"], old_row["topic"], old_row["statement"], old_row["confidence"],
+                status="superseded", evidence_for=old_row.get("evidence_for") or [],
+                evidence_against=old_row.get("evidence_against") or [], claim_ids=old_row.get("claim_ids") or [],
+                prior=old_row["prior"], likelihood=old_row["likelihood"],
+                contradiction_score=old_row["contradiction_score"], decay_factor=old_row["decay_factor"],
+                superseded_by=new_belief_id, created_at=old_row["created_at"], updated_at=now,
             )
-            return True
-        return False
-    
+            repo.record_belief_assessment(
+                conn, old_belief_id, change_type="superseded", old_confidence=None, new_confidence=None,
+                reason=f"superseded by {new_belief_id}", created_at=now,
+            )
+            conn.commit()
+        return True
+
     def get_beliefs_by_topic(self, topic: str) -> List[Belief]:
-        return [b for b in self.beliefs if b.topic == topic and b.status == "active"]
-    
+        with get_connection() as conn:
+            rows = repo.list_beliefs_by_topic(conn, topic, statuses=["active"])
+        return [_row_to_belief(r) for r in rows]
+
     def get_all_active(self) -> List[Belief]:
-        return [b for b in self.beliefs if b.status == "active"]
-    
+        with get_connection() as conn:
+            rows = repo.list_active_beliefs(conn)
+        return [_row_to_belief(r) for r in rows]
+
+    def get_belief(self, belief_id: str) -> Optional[Belief]:
+        with get_connection() as conn:
+            row = repo.get_belief(conn, belief_id)
+        return _row_to_belief(row) if row else None
+
+    def get_belief_history(self, belief_id: str) -> List[Dict[str, Any]]:
+        """The REAL, append-only history — belief_assessment_history,
+        never Belief.history (always [] now, see _row_to_belief's own
+        docstring)."""
+        with get_connection() as conn:
+            return repo.list_belief_history(conn, belief_id)
+
+    def get_all(self) -> List[Belief]:
+        """Every belief regardless of status. Public replacement for
+        directly reaching into a (now nonexistent) `.beliefs` in-memory
+        list — agent/dependency_recheck.py's _belief_for_family() used
+        to do exactly that; fixed to call this instead as part of
+        "точка ноль"."""
+        with get_connection() as conn:
+            rows = repo.list_all_beliefs(conn)
+        return [_row_to_belief(r) for r in rows]
+
     def get_contradictory(self, min_score: float = 0.5) -> List[Belief]:
         """Получить убеждения с высокой противоречивостью."""
-        return [b for b in self.beliefs if b.contradiction_score >= min_score]
-    
+        with get_connection() as conn:
+            rows = repo.list_contradictory_beliefs(conn, min_score)
+        return [_row_to_belief(r) for r in rows]
+
     def get_stats(self) -> Dict[str, Any]:
-        active = len(self.get_all_active())
-        revised = len([b for b in self.beliefs if b.status == "revised"])
-        superseded = len([b for b in self.beliefs if b.status == "superseded"])
-        contradictory = len(self.get_contradictory())
-        
-        topics = {}
-        for b in self.beliefs:
-            topics[b.topic] = topics.get(b.topic, 0) + 1
-        
-        avg_conf = sum(b.confidence for b in self.beliefs) / len(self.beliefs) if self.beliefs else 0
-        avg_contradiction = sum(b.contradiction_score for b in self.beliefs) / len(self.beliefs) if self.beliefs else 0
-        
-        return {
-            "total": len(self.beliefs),
-            "active": active,
-            "revised": revised,
-            "superseded": superseded,
-            "contradictory": contradictory,
-            "topics": topics,
-            "avg_confidence": round(avg_conf, 2),
-            "avg_contradiction": round(avg_contradiction, 2),
-        }
-    
+        with get_connection() as conn:
+            return repo.get_belief_stats(conn)
+
     def summary(self) -> str:
         stats = self.get_stats()
-        recent = self.beliefs[-3:] if self.beliefs else []
-        
+        with get_connection() as conn:
+            cur_rows = repo.list_active_beliefs(conn)
+        recent = [_row_to_belief(r) for r in cur_rows[-3:]] if cur_rows else []
+
         return f"""
 === BELIEF MANAGER V7 ===
 Всего: {stats['total']} | Активных: {stats['active']} | Пересмотренных: {stats['revised']} | Заменённых: {stats['superseded']}
@@ -607,44 +547,3 @@ def get_belief_manager() -> BeliefManager:
     if _inst is None:
         _inst = BeliefManager()
     return _inst
-
-
-if __name__ == "__main__":
-    bm = get_belief_manager()
-    print(bm.summary())
-    
-    b = bm.add_belief(
-        topic="consciousness",
-        statement="Сознание является эмерджентным свойством нейронных сетей",
-        confidence=0.7,
-        evidence_for=["ev_001", "ev_002"],
-        evidence_against=["ev_003"],
-    )
-    print(f"\n✅ Добавлено: {b.statement} (conf: {b.confidence})")
-    
-    bm.challenge_belief(
-        belief_id=b.id,
-        counter_evidence="ev_004: философские аргументы против редукционизма",
-        new_confidence=0.55,
-        reason="философские контраргументы",
-    )
-    print(f"✅ Оспорено: новая уверенность {b.confidence}")
-    
-    # Добавляем ещё одно убеждение для демонстрации противоречий
-    b2 = bm.add_belief(
-        topic="consciousness",
-        statement="Сознание первично по отношению к материи",
-        confidence=0.6,
-        evidence_for=["ev_005"],
-        evidence_against=["ev_006"],
-    )
-    print(f"\n✅ Добавлено: {b2.statement} (conf: {b2.confidence})")
-    
-    print("\n=== СТАТИСТИКА ===")
-    print(bm.get_stats())
-    
-    print("\n=== ПРОТИВОРЕЧИВЫЕ УБЕЖДЕНИЯ ===")
-    for c in bm.get_contradictory(0.3):
-        print(f"  [{c.confidence:.2f}] {c.statement[:50]} (score: {c.contradiction_score:.2f})")
-    
-    print(bm.summary())

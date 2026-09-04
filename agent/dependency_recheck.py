@@ -117,7 +117,7 @@ def _belief_for_family(belief_manager, family: Dict[str, Any]):
         return None
 
     matches = [
-        b for b in belief_manager.beliefs
+        b for b in belief_manager.get_all()
         if member_claim_ids.intersection(set(b.claim_ids or []))
     ]
     if not matches:

@@ -4,21 +4,12 @@ _find_similar() embedding fix (performance architecture pass, unaccounted
 time investigation).
 
 Root cause fixed: _is_similar_statement() used to make 2 separate
-/api/embed HTTP calls per candidate compared (including re-embedding the
-SAME new statement on every single iteration). With 108 active
-"biological"-topic beliefs in the real registry, one add_belief() call
-for a genuinely new statement could cost 200+ HTTP round-trips
-(~27s/candidate observed live). Fixed by batch-embedding [statement] +
-all same-topic candidates in ONE /api/embed call, then iterating
-candidates in the SAME original order with the SAME decision logic
-(exact-match first, then threshold-gated LLM judge, first "equivalent"
-wins) — only the embedding lookup changed from N live calls to 1 batch
-lookup.
-
-Live equivalence check already done against real registry/beliefs.json
-data (108 real "biological" beliefs): max abs diff between old
-sequential and new batched cosine similarities = 2.98e-08 (float32
-noise), 30.8x speedup on a 15-candidate subset.
+/api/embed HTTP calls per candidate compared. Fixed by batch-embedding
+[statement] + all same-topic candidates in ONE /api/embed call, then
+iterating candidates in the SAME original order with the SAME decision
+logic (exact-match first, then threshold-gated LLM judge, first
+"equivalent" wins) — only the embedding lookup changed from N live
+calls to 1 batch lookup.
 
 This suite covers the MECHANISM deterministically with mocked embed/LLM
 calls: exact-match fast path, one-batch-call guarantee (not N calls),
@@ -26,18 +17,28 @@ threshold gating, LLM-judge equivalent/contradicts/different outcomes,
 first-match short-circuit order preservation, and fail-safe (no merge)
 on embedding failure.
 
+"ТОЧКА НОЛЬ" UPDATE (owner mandate, 2026-09): _find_similar() now reads
+candidates from SQL (agent.db.sql.repositories.list_beliefs_by_topic())
+instead of an in-memory `self.beliefs` list — the old
+`BeliefManager.__new__(BeliefManager); mgr.beliefs = [...]` construction
+this file used to use bypasses __init__ entirely and has no SQL
+equivalent to bypass INTO. Rewired to mock repo.list_beliefs_by_topic()
+directly (and a no-op get_connection(), since _find_similar() still
+opens a connection before handing it to the now-mocked repo call) — the
+DECISION LOGIC under test (exact match, batching, threshold, LLM judge,
+short-circuit order, fail-safe) is completely unchanged, only how
+candidates are supplied changed.
+
 Run: /home/iam/venv/bin/python3 -m agent.belief_manager_regression_test
 """
 
-import sys
-from pathlib import Path
+import contextlib
 from unittest.mock import patch
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from agent.belief_manager import BeliefManager, Belief
+from agent.belief_manager import BeliefManager
+import agent.belief_manager as bm_mod
 
 PASS = 0
 FAIL = 0
@@ -53,41 +54,46 @@ def check(name: str, condition: bool, detail: str = ""):
         print(f"FAIL {name} {detail}")
 
 
-def _make_manager(tmp_path):
-    mgr = BeliefManager.__new__(BeliefManager)
-    mgr.beliefs = []
-    mgr.storage_path = tmp_path
-    mgr._save = lambda: None  # avoid touching disk in these tests
-    return mgr
+def _row(belief_id, topic, statement, status="active"):
+    """A SQL-row-shaped dict — exactly what agent.db.sql.repositories.
+    list_beliefs_by_topic() would hand back (already JSON-decoded, see
+    repositories._decode_belief_json())."""
+    return {
+        "belief_id": belief_id, "topic": topic, "statement": statement,
+        "confidence": 0.7, "status": status,
+        "evidence_for": [], "evidence_against": [], "claim_ids": [],
+        "prior": 0.5, "likelihood": 0.7, "contradiction_score": 0.0, "decay_factor": 0.95,
+        "superseded_by": None, "created_at": 0.0, "updated_at": 0.0,
+    }
 
 
-def _add(mgr, topic, statement, status="active"):
-    b = Belief(
-        id=f"bel_{len(mgr.beliefs)}",
-        topic=topic,
-        statement=statement,
-        confidence=0.7,
-        evidence_for=[],
-        evidence_against=[],
-        claim_ids=[],
-        created_at=0.0,
-        updated_at=0.0,
-        history=[],
-        status=status,
-        prior=0.5,
-        likelihood=0.7,
-        contradiction_score=0.0,
-    )
-    mgr.beliefs.append(b)
-    return b
+@contextlib.contextmanager
+def _noop_get_connection(autocommit=False):
+    yield None
 
 
-TMP = Path("/tmp/belief_manager_regression_test_dummy.json")
+def _find_similar_with(mgr, candidates, topic, statement):
+    """Runs mgr._find_similar(topic, statement) with get_connection()
+    a no-op and list_beliefs_by_topic() doing the SAME topic+status
+    filtering the real SQL query does (WHERE topic=%s AND status IN
+    ('active','revised')) over the given fixture rows — preserves this
+    file's own scenario 7 (topic/status filtering) as a meaningful
+    check of the real integration contract, not just a mock that
+    hands back whatever it's given unconditionally."""
+    def _fake_list_beliefs_by_topic(conn, t, statuses=None):
+        statuses = statuses or ["active", "revised"]
+        return [dict(c) for c in candidates if c["topic"] == t and c["status"] in statuses]
+
+    with patch.object(bm_mod, "get_connection", _noop_get_connection):
+        with patch.object(bm_mod.repo, "list_beliefs_by_topic", _fake_list_beliefs_by_topic):
+            return mgr._find_similar(topic, statement)
+
+
+mgr = BeliefManager.__new__(BeliefManager)  # skip __init__'s decay sweep — irrelevant to _find_similar
 
 # ── 1. Exact match (normalized) short-circuits, no embed/LLM calls ──
 
-mgr1 = _make_manager(TMP)
-b1 = _add(mgr1, "biological", "Митохондрии присутствуют в клетках эукариот.")
+b1 = _row("bel_0", "biological", "Митохондрии присутствуют в клетках эукариот.")
 
 embed_calls = {"n": 0}
 llm_calls = {"n": 0}
@@ -99,18 +105,16 @@ def _spy_embed(texts):
 
 
 with patch.object(BeliefManager, "_embed_batch", staticmethod(_spy_embed)):
-    with patch.object(mgr1, "_llm_judge_relation", lambda a, b: llm_calls.__setitem__("n", llm_calls["n"] + 1) or "equivalent"):
-        found = mgr1._find_similar("biological", "митохондрии   присутствуют В клетках эукариот.")
+    with patch.object(mgr, "_llm_judge_relation", lambda a, b: llm_calls.__setitem__("n", llm_calls["n"] + 1) or "equivalent"):
+        found = _find_similar_with(mgr, [b1], "biological", "митохондрии   присутствуют В клетках эукариот.")
 
-check("exact match (case/whitespace normalized) returns the existing belief", found is b1)
+check("exact match (case/whitespace normalized) returns the existing belief", found is not None and found.id == "bel_0")
 check("exact match takes the fast path: no embed call needed", embed_calls["n"] == 0, f"got {embed_calls['n']}")
 check("exact match takes the fast path: no LLM judge call needed", llm_calls["n"] == 0, f"got {llm_calls['n']}")
 
 # ── 2. ONE batch embed call regardless of candidate count ──
 
-mgr2 = _make_manager(TMP)
-for i in range(10):
-    _add(mgr2, "biological", f"Утверждение номер {i} про клетки.")
+rows2 = [_row(f"bel_{i}", "biological", f"Утверждение номер {i} про клетки.") for i in range(10)]
 
 embed_calls["n"] = 0
 
@@ -128,21 +132,18 @@ def _spy_embed2(texts):
 
 
 with patch.object(BeliefManager, "_embed_batch", staticmethod(_spy_embed2)):
-    with patch.object(mgr2, "_llm_judge_relation", lambda a, b: "different"):
-        mgr2._find_similar("biological", "Новое непохожее утверждение.")
+    with patch.object(mgr, "_llm_judge_relation", lambda a, b: "different"):
+        _find_similar_with(mgr, rows2, "biological", "Новое непохожее утверждение.")
 
 check("exactly ONE embed call made for 10 candidates (not 10 or 20)", embed_calls["n"] == 1, f"got {embed_calls['n']}")
 
 # ── 3. Similarity below threshold (0.70) skips LLM judge entirely ──
 
-mgr3 = _make_manager(TMP)
-_add(mgr3, "biological", "Слон - крупное млекопитающее.")
-
+row3 = _row("bel_3", "biological", "Слон - крупное млекопитающее.")
 llm_calls["n"] = 0
 
 
 def _spy_embed_low(texts):
-    # statement vector orthogonal-ish to candidate -> similarity ~0.0
     vecs = np.zeros((len(texts), 2), dtype=np.float32)
     vecs[0] = [1.0, 0.0]
     vecs[1] = [0.0, 1.0]
@@ -150,45 +151,41 @@ def _spy_embed_low(texts):
 
 
 with patch.object(BeliefManager, "_embed_batch", staticmethod(_spy_embed_low)):
-    with patch.object(mgr3, "_llm_judge_relation", lambda a, b: llm_calls.__setitem__("n", llm_calls["n"] + 1) or "equivalent"):
-        found3 = mgr3._find_similar("biological", "Совершенно другая тема про математику.")
+    with patch.object(mgr, "_llm_judge_relation", lambda a, b: llm_calls.__setitem__("n", llm_calls["n"] + 1) or "equivalent"):
+        found3 = _find_similar_with(mgr, [row3], "biological", "Совершенно другая тема про математику.")
 
 check("below-threshold similarity -> no match returned", found3 is None)
 check("below-threshold similarity -> LLM judge never invoked", llm_calls["n"] == 0, f"got {llm_calls['n']}")
 
 # ── 4. Above threshold + LLM judge says equivalent -> match ──
 
-mgr4 = _make_manager(TMP)
-b4 = _add(mgr4, "biological", "Кит - млекопитающее, а не рыба.")
+row4 = _row("bel_4", "biological", "Кит - млекопитающее, а не рыба.")
 
 
 def _spy_embed_high(texts):
-    vecs = np.ones((len(texts), 2), dtype=np.float32)
-    return vecs  # identical vectors -> similarity 1.0
+    return np.ones((len(texts), 2), dtype=np.float32)  # identical vectors -> similarity 1.0
 
 
 with patch.object(BeliefManager, "_embed_batch", staticmethod(_spy_embed_high)):
-    with patch.object(mgr4, "_llm_judge_relation", lambda a, b: "equivalent"):
-        found4 = mgr4._find_similar("biological", "Киты являются млекопитающими, не рыбами.")
+    with patch.object(mgr, "_llm_judge_relation", lambda a, b: "equivalent"):
+        found4 = _find_similar_with(mgr, [row4], "biological", "Киты являются млекопитающими, не рыбами.")
 
-check("above-threshold + LLM equivalent -> returns the matching belief", found4 is b4)
+check("above-threshold + LLM equivalent -> returns the matching belief", found4 is not None and found4.id == "bel_4")
 
 # ── 5. Above threshold + LLM says contradicts/different -> no match ──
 
-mgr5 = _make_manager(TMP)
-_add(mgr5, "biological", "Кит - млекопитающее.")
+row5 = _row("bel_5", "biological", "Кит - млекопитающее.")
 
 with patch.object(BeliefManager, "_embed_batch", staticmethod(_spy_embed_high)):
-    with patch.object(mgr5, "_llm_judge_relation", lambda a, b: "contradicts"):
-        found5 = mgr5._find_similar("biological", "Кит - это вид рыбы.")
+    with patch.object(mgr, "_llm_judge_relation", lambda a, b: "contradicts"):
+        found5 = _find_similar_with(mgr, [row5], "biological", "Кит - это вид рыбы.")
 
 check("above-threshold + LLM contradicts -> no match (not merged)", found5 is None)
 
 # ── 6. First-match short-circuit: iteration order preserved ──
 
-mgr6 = _make_manager(TMP)
-b6_first = _add(mgr6, "biological", "Кандидат первый.")
-b6_second = _add(mgr6, "biological", "Кандидат второй.")
+row6_first = _row("bel_6a", "biological", "Кандидат первый.")
+row6_second = _row("bel_6b", "biological", "Кандидат второй.")
 
 judge_seen = []
 
@@ -199,43 +196,46 @@ def _judge_first_wins(a, b):
 
 
 with patch.object(BeliefManager, "_embed_batch", staticmethod(_spy_embed_high)):
-    with patch.object(mgr6, "_llm_judge_relation", _judge_first_wins):
-        found6 = mgr6._find_similar("biological", "Новое утверждение.")
+    with patch.object(mgr, "_llm_judge_relation", _judge_first_wins):
+        found6 = _find_similar_with(mgr, [row6_first, row6_second], "biological", "Новое утверждение.")
 
-check("first candidate in original order wins (short-circuit)", found6 is b6_first)
+check("first candidate in original order wins (short-circuit)", found6 is not None and found6.id == "bel_6a")
 check("second candidate never reached once first matched", judge_seen == ["Кандидат первый."], f"got {judge_seen}")
 
 # ── 7. Topic/status filtering preserved (unaffected candidates excluded) ──
+# NOTE: the actual topic/status filtering now lives in the real SQL
+# query (list_beliefs_by_topic's WHERE clause) rather than inside
+# _find_similar() itself — _find_similar_with()'s fake reproduces that
+# exact filter, so this still meaningfully proves the integration
+# contract (call it with the right topic, trust it to filter), not
+# _find_similar()'s own no-longer-existent filtering code.
 
-mgr7 = _make_manager(TMP)
-_add(mgr7, "historical", "Другая тема.")
-_add(mgr7, "biological", "Отклонённое убеждение.", status="rejected")
-b7_active = _add(mgr7, "biological", "Активное убеждение про клетки.")
+row7_other_topic = _row("bel_7a", "historical", "Другая тема.")
+row7_rejected = _row("bel_7b", "biological", "Отклонённое убеждение.", status="rejected")
+row7_active = _row("bel_7c", "biological", "Активное убеждение про клетки.")
 
 with patch.object(BeliefManager, "_embed_batch", staticmethod(_spy_embed_high)):
-    with patch.object(mgr7, "_llm_judge_relation", lambda a, b: "equivalent"):
-        found7 = mgr7._find_similar("biological", "Новый кандидат.")
+    with patch.object(mgr, "_llm_judge_relation", lambda a, b: "equivalent"):
+        found7 = _find_similar_with(mgr, [row7_other_topic, row7_rejected, row7_active], "biological", "Новый кандидат.")
 
-check("only same-topic, active/revised beliefs considered", found7 is b7_active)
+check("only same-topic, active/revised beliefs considered", found7 is not None and found7.id == "bel_7c")
 
 # ── 8. Fail-safe: embedding batch failure -> no merge (never crash) ──
 
-mgr8 = _make_manager(TMP)
-_add(mgr8, "biological", "Что-то про биологию.")
+row8 = _row("bel_8", "biological", "Что-то про биологию.")
 
 with patch.object(BeliefManager, "_embed_batch", staticmethod(lambda texts: None)):
-    found8 = mgr8._find_similar("biological", "Другое утверждение, не точное совпадение.")
+    found8 = _find_similar_with(mgr, [row8], "biological", "Другое утверждение, не точное совпадение.")
 
 check("embed batch failure (returns None) -> no match, no crash", found8 is None)
 
 # ── 9. No candidates for topic -> returns None without calling embed ──
 
-mgr9 = _make_manager(TMP)
-_add(mgr9, "historical", "Не та тема.")
+row9 = _row("bel_9", "historical", "Не та тема.")
 
 embed_calls["n"] = 0
 with patch.object(BeliefManager, "_embed_batch", staticmethod(_spy_embed)):
-    found9 = mgr9._find_similar("biological", "Любое утверждение.")
+    found9 = _find_similar_with(mgr, [row9], "biological", "Любое утверждение.")
 
 check("no same-topic candidates -> None, no embed call wasted", found9 is None and embed_calls["n"] == 0)
 
