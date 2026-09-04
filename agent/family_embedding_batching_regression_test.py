@@ -27,6 +27,7 @@ Run: /home/iam/venv/bin/python3 -m agent.family_embedding_batching_regression_te
 """
 from __future__ import annotations
 
+import contextlib
 import tempfile
 import time
 import uuid
@@ -36,12 +37,123 @@ from unittest.mock import patch
 import numpy as np
 
 from agent.claim_family_registry import ClaimFamilyRegistry
+import agent.claim_family_registry as registry_mod
+from agent.db.sql.repositories import _coerce_datetime
 from agent.belief_manager import BeliefManager
 import agent.claim_semantic_identity_prototype as prototype_mod
 from agent.claim_semantic_identity_prototype import classify_claim_pair, EMBEDDING_PREFILTER_THRESHOLD
 
 PASS = 0
 FAIL = 0
+
+
+# ============================================================
+# "ТОЧКА НОЛЬ": ClaimFamilyRegistry is SQL-only now (no storage_file).
+# A small fake claim_family/family_member connection stands in for the
+# real bastion-protected tables, seeded directly from this file's own
+# fixture shape ([{"family_id", "domain", "canonical_text", "members":
+# [{"claim_id","claim_text","linked_at"}]}]) so every scenario below
+# keeps testing the exact same decision logic against the exact same
+# starting state as before.
+# ============================================================
+
+class _CFFakeCursor:
+    def __init__(self, conn):
+        self.conn = conn
+        self._result = None
+        self._results = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        norm = " ".join(sql.split())
+        upper = norm.upper()
+        self._result = None
+        self._results = None
+        if upper.startswith("INSERT IGNORE INTO CLAIM_FAMILY"):
+            family_id, domain, canonical_text, created_at, updated_at = params
+            self.conn.families.setdefault(family_id, {
+                "family_id": family_id, "domain": domain, "canonical_text": canonical_text,
+                "created_at": created_at, "updated_at": updated_at,
+            })
+        elif upper.startswith("INSERT IGNORE INTO FAMILY_MEMBER"):
+            family_id, claim_id, linked_at = params
+            self.conn.members.setdefault((family_id, claim_id), {
+                "family_id": family_id, "claim_id": claim_id, "linked_at": linked_at,
+            })
+        elif upper.startswith("SELECT FAMILY_ID, CANONICAL_TEXT FROM CLAIM_FAMILY WHERE DOMAIN=%S"):
+            (domain,) = params
+            matches = [f for f in self.conn.families.values() if f["domain"] == domain]
+            matches.sort(key=lambda f: f["created_at"])
+            self._results = [{"family_id": f["family_id"], "canonical_text": f["canonical_text"]} for f in matches]
+        elif upper.startswith("SELECT * FROM CLAIM_FAMILY WHERE FAMILY_ID=%S"):
+            (family_id,) = params
+            self._result = dict(self.conn.families[family_id]) if family_id in self.conn.families else None
+        elif upper.startswith("SELECT CLAIM_ID, LINKED_AT FROM FAMILY_MEMBER WHERE FAMILY_ID=%S"):
+            (family_id,) = params
+            matches = [m for m in self.conn.members.values() if m["family_id"] == family_id]
+            matches.sort(key=lambda m: m["linked_at"])
+            self._results = [{"claim_id": m["claim_id"], "linked_at": m["linked_at"]} for m in matches]
+
+    def fetchone(self):
+        return self._result
+
+    def fetchall(self):
+        return self._results or []
+
+
+class _CFFakeConnection:
+    def __init__(self):
+        self.families = {}
+        self.members = {}
+
+    def cursor(self):
+        return _CFFakeCursor(self)
+
+    def commit(self):
+        pass
+
+
+def _seed_fake_connection(families_fixture):
+    """Builds a fake claim_family/family_member store from this file's
+    own fixture shape and patches it in as the module's connection."""
+    conn = _CFFakeConnection()
+    for f in families_fixture:
+        conn.families[f["family_id"]] = {
+            "family_id": f["family_id"], "domain": f["domain"], "canonical_text": f["canonical_text"],
+            "created_at": _coerce_datetime(f["created_at"]), "updated_at": _coerce_datetime(f["updated_at"]),
+        }
+        for m in f.get("members", []):
+            conn.members[(f["family_id"], m["claim_id"])] = {
+                "family_id": f["family_id"], "claim_id": m["claim_id"],
+                "linked_at": _coerce_datetime(m["linked_at"]),
+            }
+
+    @contextlib.contextmanager
+    def _fake_get_connection(autocommit=False):
+        yield conn
+
+    registry_mod.get_connection = _fake_get_connection
+    return conn
+
+
+def _snapshot(conn):
+    """Reconstructs the old JSON shape from the fake connection's own
+    state, ordered oldest-first (mirrors epistemic_claim_family_
+    regression_test.py's own helper of the same name and intent)."""
+    families = sorted(conn.families.values(), key=lambda f: f["created_at"])
+    out = []
+    for f in families:
+        members = sorted(
+            (m for m in conn.members.values() if m["family_id"] == f["family_id"]),
+            key=lambda m: m["linked_at"],
+        )
+        out.append({**f, "members": [{"claim_id": m["claim_id"], "linked_at": m["linked_at"]} for m in members]})
+    return out
 
 
 def check(name: str, condition: bool, detail: str = ""):
@@ -215,21 +327,21 @@ def _old_find_or_link_reference(families, claim_text, claim_id, domain, embed_ca
 
 def _run_new(families, claim_text, claim_id, domain, embed_call_log=None):
     """Runs the REAL, current production ClaimFamilyRegistry.find_or_link_claim()."""
-    tmp = Path(tempfile.mkdtemp(prefix="p9_scenario_")) / "families.json"
-    registry = ClaimFamilyRegistry(storage_file=tmp)
-    registry.families = families
+    conn = _seed_fake_connection(families)
+    registry = ClaimFamilyRegistry()
     pre_existing_ids = {f["family_id"] for f in families}
     stats = {}
     family_id = registry.find_or_link_claim(claim_text, claim_id, domain, log=_noop_log, verbose=False, stats=stats)
+    snapshot = _snapshot(conn)
     if family_id is None or family_id not in pre_existing_ids:
         # None -> degenerate input; not-pre-existing -> a NEW family was
         # created for this claim (canonical_text would just be the
         # claim's own text, which is not a meaningful "matched an
         # existing family" signal — normalize both to None, same as
         # the OLD reference's own "no match" return value).
-        return None, registry.families, stats
-    matched = next((f for f in registry.families if f["family_id"] == family_id), None)
-    return (matched["canonical_text"] if matched else None), registry.families, stats
+        return None, snapshot, stats
+    matched = next((f for f in snapshot if f["family_id"] == family_id), None)
+    return (matched["canonical_text"] if matched else None), snapshot, stats
 
 
 # ============================================================
@@ -324,8 +436,8 @@ check(
 ec = []
 with patch.object(BeliefManager, "_embed_batch", staticmethod(lambda texts: _fake_embed_batch(texts, ec))), \
      patch.object(BeliefManager, "_llm_judge_relation", _fake_llm_judge):
-    tmp0 = Path(tempfile.mkdtemp(prefix="p9_empty_")) / "families.json"
-    registry0 = ClaimFamilyRegistry(storage_file=tmp0)
+    _seed_fake_connection([])
+    registry0 = ClaimFamilyRegistry()
     fam_id0 = registry0.find_or_link_claim("Совсем новое утверждение про физику частиц.", "cl_empty", "factual", log=_noop_log)
 
 check(
@@ -336,11 +448,10 @@ check(
 
 with patch.object(BeliefManager, "_embed_batch", staticmethod(lambda texts: _fake_embed_batch(texts))), \
      patch.object(BeliefManager, "_llm_judge_relation", _fake_llm_judge):
-    tmp1 = Path(tempfile.mkdtemp(prefix="p9_one_")) / "families.json"
-    registry1 = ClaimFamilyRegistry(storage_file=tmp1)
-    registry1.families = _make_fixture_families()[:1]  # only F1
+    conn1 = _seed_fake_connection(_make_fixture_families()[:1])  # only F1
+    registry1 = ClaimFamilyRegistry()
     fam_id1 = registry1.find_or_link_claim("Кофе является причиной рака.", "cl_one", "factual", log=_noop_log)
-    matched1 = next((f for f in registry1.families if f["family_id"] == fam_id1), None)
+    matched1 = next((f for f in _snapshot(conn1) if f["family_id"] == fam_id1), None)
 
 check(
     "9b: 1 existing family, claim matches it correctly",
@@ -357,9 +468,8 @@ check(
 _fixture2 = _make_fixture_families()
 _pre_existing_ids2 = {f["family_id"] for f in _fixture2}
 with patch.object(BeliefManager, "_embed_batch", staticmethod(lambda texts: None)):
-    tmp2 = Path(tempfile.mkdtemp(prefix="p9_fail_")) / "families.json"
-    registry2 = ClaimFamilyRegistry(storage_file=tmp2)
-    registry2.families = _fixture2
+    _seed_fake_connection(_fixture2)
+    registry2 = ClaimFamilyRegistry()
     fam_id2 = registry2.find_or_link_claim("Кофе является причиной рака.", "cl_fail", "factual", log=_noop_log)
 
 check(
@@ -375,9 +485,8 @@ check(
 
 with patch.object(BeliefManager, "_embed_batch", staticmethod(lambda texts: _fake_embed_batch(texts))), \
      patch.object(BeliefManager, "_llm_judge_relation", _fake_llm_judge):
-    tmp3 = Path(tempfile.mkdtemp(prefix="p9_stats_")) / "families.json"
-    registry3 = ClaimFamilyRegistry(storage_file=tmp3)
-    registry3.families = _make_fixture_families()
+    _seed_fake_connection(_make_fixture_families())
+    registry3 = ClaimFamilyRegistry()
     stats3 = {}
     registry3.find_or_link_claim("Европейский союз включает 27 государств.", "cl_stats", "factual", stats=stats3)
 

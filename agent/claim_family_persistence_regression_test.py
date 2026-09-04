@@ -34,6 +34,7 @@ Run: /home/iam/venv/bin/python3 -m agent.claim_family_persistence_regression_tes
 """
 from __future__ import annotations
 
+import contextlib
 import inspect
 import tempfile
 import time
@@ -46,7 +47,83 @@ import agent.orchestrator.claims.lifecycle as lifecycle_mod
 import agent.orchestrator_v2 as orch_v2_mod
 import agent.claim_semantic_identity_hardening as hardening_mod
 from agent.claim_family_registry import ClaimFamilyRegistry
+import agent.claim_family_registry as registry_mod
 from agent.claim_identity import extract_subject_anchors
+
+
+# "ТОЧКА НОЛЬ": ClaimFamilyRegistry is SQL-only now (no storage_file) —
+# a tiny isolated fake claim_family/family_member connection, freshly
+# empty each call, stands in for the real bastion-protected tables.
+
+class _CFFakeCursor:
+    def __init__(self, conn):
+        self.conn = conn
+        self._result = None
+        self._results = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        upper = " ".join(sql.split()).upper()
+        self._result = None
+        self._results = None
+        if upper.startswith("INSERT IGNORE INTO CLAIM_FAMILY"):
+            family_id, domain, canonical_text, created_at, updated_at = params
+            self.conn.families.setdefault(family_id, {
+                "family_id": family_id, "domain": domain, "canonical_text": canonical_text,
+                "created_at": created_at, "updated_at": updated_at,
+            })
+        elif upper.startswith("INSERT IGNORE INTO FAMILY_MEMBER"):
+            family_id, claim_id, linked_at = params
+            self.conn.members.setdefault((family_id, claim_id), {
+                "family_id": family_id, "claim_id": claim_id, "linked_at": linked_at,
+            })
+        elif upper.startswith("SELECT FAMILY_ID, CANONICAL_TEXT FROM CLAIM_FAMILY WHERE DOMAIN=%S"):
+            (domain,) = params
+            matches = [f for f in self.conn.families.values() if f["domain"] == domain]
+            matches.sort(key=lambda f: f["created_at"])
+            self._results = [{"family_id": f["family_id"], "canonical_text": f["canonical_text"]} for f in matches]
+        elif upper.startswith("SELECT * FROM CLAIM_FAMILY WHERE FAMILY_ID=%S"):
+            (family_id,) = params
+            self._result = dict(self.conn.families[family_id]) if family_id in self.conn.families else None
+        elif upper.startswith("SELECT CLAIM_ID, LINKED_AT FROM FAMILY_MEMBER WHERE FAMILY_ID=%S"):
+            (family_id,) = params
+            matches = [m for m in self.conn.members.values() if m["family_id"] == family_id]
+            matches.sort(key=lambda m: m["linked_at"])
+            self._results = [{"claim_id": m["claim_id"], "linked_at": m["linked_at"]} for m in matches]
+
+    def fetchone(self):
+        return self._result
+
+    def fetchall(self):
+        return self._results or []
+
+
+class _CFFakeConnection:
+    def __init__(self):
+        self.families = {}
+        self.members = {}
+
+    def cursor(self):
+        return _CFFakeCursor(self)
+
+    def commit(self):
+        pass
+
+
+def _isolated_registry():
+    conn = _CFFakeConnection()
+
+    @contextlib.contextmanager
+    def _fake_get_connection(autocommit=False):
+        yield conn
+
+    registry_mod.get_connection = _fake_get_connection
+    return ClaimFamilyRegistry()
 
 PASS = 0
 FAIL = 0
@@ -192,16 +269,15 @@ check(
 def _isolated_paths():
     traces = Path(tempfile.mkdtemp(prefix="yandi_p7_traces_"))
     index = Path(tempfile.mkdtemp(prefix="yandi_p7_index_")) / "index.db"
-    registry = Path(tempfile.mkdtemp(prefix="yandi_p7_families_")) / "families.json"
-    return traces, index, registry
+    return traces, index
 
 
-traces_a, index_a, registry_a = _isolated_paths()
+traces_a, index_a = _isolated_paths()
 
 with patch.object(ot, "TRACES_DIR", traces_a), \
      patch.object(vm, "TRACES_DIR", traces_a), \
      patch.object(vm, "INDEX_DB", index_a), \
-     patch.object(lifecycle_mod, "get_claim_family_registry", lambda: ClaimFamilyRegistry(storage_file=registry_a)):
+     patch.object(lifecycle_mod, "get_claim_family_registry", _isolated_registry):
 
     claims_data_a = [{
         "claim_id": "cl_p7_a1",
@@ -250,9 +326,7 @@ with patch.object(ot, "TRACES_DIR", traces_a), \
 # the SEPARATE belief-update [:3] cap remains untouched.
 # ============================================================
 
-traces_b, index_b, registry_b = _isolated_paths()
-
-with patch.object(lifecycle_mod, "get_claim_family_registry", lambda: ClaimFamilyRegistry(storage_file=registry_b)):
+with patch.object(lifecycle_mod, "get_claim_family_registry", _isolated_registry):
     claims_data_b = [
         {"claim_id": f"cl_p7_b{i}", "claim_text": f"Уникальное утверждение номер {i} про разные темы совсем."}
         for i in range(1, 6)

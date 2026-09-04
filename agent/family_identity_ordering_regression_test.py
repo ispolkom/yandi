@@ -17,6 +17,7 @@ Run: /home/iam/venv/bin/python3 -m agent.family_identity_ordering_regression_tes
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import inspect
 import tempfile
@@ -30,6 +31,82 @@ import agent.orchestrator.claims.lifecycle as lifecycle_mod
 from agent.orchestrator.claims.status import classify_claim_epistemic_status
 from agent.orchestrator.claims.lifecycle import assign_claim_family_identity
 from agent.claim_family_registry import ClaimFamilyRegistry
+import agent.claim_family_registry as registry_mod
+
+
+# "ТОЧКА НОЛЬ": ClaimFamilyRegistry is SQL-only now (no storage_file) —
+# a tiny isolated fake claim_family/family_member connection, freshly
+# empty each call, stands in for the real bastion-protected tables.
+
+class _CFFakeCursor:
+    def __init__(self, conn):
+        self.conn = conn
+        self._result = None
+        self._results = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        upper = " ".join(sql.split()).upper()
+        self._result = None
+        self._results = None
+        if upper.startswith("INSERT IGNORE INTO CLAIM_FAMILY"):
+            family_id, domain, canonical_text, created_at, updated_at = params
+            self.conn.families.setdefault(family_id, {
+                "family_id": family_id, "domain": domain, "canonical_text": canonical_text,
+                "created_at": created_at, "updated_at": updated_at,
+            })
+        elif upper.startswith("INSERT IGNORE INTO FAMILY_MEMBER"):
+            family_id, claim_id, linked_at = params
+            self.conn.members.setdefault((family_id, claim_id), {
+                "family_id": family_id, "claim_id": claim_id, "linked_at": linked_at,
+            })
+        elif upper.startswith("SELECT FAMILY_ID, CANONICAL_TEXT FROM CLAIM_FAMILY WHERE DOMAIN=%S"):
+            (domain,) = params
+            matches = [f for f in self.conn.families.values() if f["domain"] == domain]
+            matches.sort(key=lambda f: f["created_at"])
+            self._results = [{"family_id": f["family_id"], "canonical_text": f["canonical_text"]} for f in matches]
+        elif upper.startswith("SELECT * FROM CLAIM_FAMILY WHERE FAMILY_ID=%S"):
+            (family_id,) = params
+            self._result = dict(self.conn.families[family_id]) if family_id in self.conn.families else None
+        elif upper.startswith("SELECT CLAIM_ID, LINKED_AT FROM FAMILY_MEMBER WHERE FAMILY_ID=%S"):
+            (family_id,) = params
+            matches = [m for m in self.conn.members.values() if m["family_id"] == family_id]
+            matches.sort(key=lambda m: m["linked_at"])
+            self._results = [{"claim_id": m["claim_id"], "linked_at": m["linked_at"]} for m in matches]
+
+    def fetchone(self):
+        return self._result
+
+    def fetchall(self):
+        return self._results or []
+
+
+class _CFFakeConnection:
+    def __init__(self):
+        self.families = {}
+        self.members = {}
+
+    def cursor(self):
+        return _CFFakeCursor(self)
+
+    def commit(self):
+        pass
+
+
+def _isolated_registry():
+    conn = _CFFakeConnection()
+
+    @contextlib.contextmanager
+    def _fake_get_connection(autocommit=False):
+        yield conn
+
+    registry_mod.get_connection = _fake_get_connection
+    return ClaimFamilyRegistry()
 
 PASS = 0
 FAIL = 0
@@ -102,16 +179,16 @@ def _make_claims_and_evidence():
     return claims, evidence_data
 
 
-def _run_family_then_status(claims, evidence_data, registry_storage):
-    with patch.object(lifecycle_mod, "get_claim_family_registry", lambda: ClaimFamilyRegistry(storage_file=registry_storage)):
+def _run_family_then_status(claims, evidence_data, registry_storage=None):
+    with patch.object(lifecycle_mod, "get_claim_family_registry", _isolated_registry):
         assign_claim_family_identity(claims, _FakeEpistemicResult(), False, {}, _noop_log, False)
     classify_claim_epistemic_status(claims, _noop_log, False, evidence_data)
     return claims
 
 
-def _run_status_then_family(claims, evidence_data, registry_storage):
+def _run_status_then_family(claims, evidence_data, registry_storage=None):
     classify_claim_epistemic_status(claims, _noop_log, False, evidence_data)
-    with patch.object(lifecycle_mod, "get_claim_family_registry", lambda: ClaimFamilyRegistry(storage_file=registry_storage)):
+    with patch.object(lifecycle_mod, "get_claim_family_registry", _isolated_registry):
         assign_claim_family_identity(claims, _FakeEpistemicResult(), False, {}, _noop_log, False)
     return claims
 
@@ -125,11 +202,8 @@ def _run_status_then_family(claims, evidence_data, registry_storage):
 claims_a, evidence_a = _make_claims_and_evidence()
 claims_b, evidence_b = _make_claims_and_evidence()
 
-reg_a = Path(tempfile.mkdtemp(prefix="p10_ord_a_")) / "families.json"
-reg_b = Path(tempfile.mkdtemp(prefix="p10_ord_b_")) / "families.json"
-
-result_new_order = _run_family_then_status(claims_a, evidence_a, reg_a)   # NEW (Этап 4G-1) order
-result_old_order = _run_status_then_family(claims_b, evidence_b, reg_b)   # OLD (pre-4G-1) order
+result_new_order = _run_family_then_status(claims_a, evidence_a)   # NEW (Этап 4G-1) order
+result_old_order = _run_status_then_family(claims_b, evidence_b)   # OLD (pre-4G-1) order
 
 for c_new, c_old in zip(result_new_order, result_old_order):
     check(
@@ -178,7 +252,6 @@ check(
 
 traces_5 = Path(tempfile.mkdtemp(prefix="p10_trace_"))
 index_5 = Path(tempfile.mkdtemp(prefix="p10_index_")) / "index.db"
-reg_5 = Path(tempfile.mkdtemp(prefix="p10_reg5_")) / "families.json"
 
 claims_5, evidence_5 = _make_claims_and_evidence()
 for c in claims_5:
@@ -187,7 +260,7 @@ for c in claims_5:
 with patch.object(ot, "TRACES_DIR", traces_5), \
      patch.object(vm, "TRACES_DIR", traces_5), \
      patch.object(vm, "INDEX_DB", index_5), \
-     patch.object(lifecycle_mod, "get_claim_family_registry", lambda: ClaimFamilyRegistry(storage_file=reg_5)):
+     patch.object(lifecycle_mod, "get_claim_family_registry", _isolated_registry):
 
     assign_claim_family_identity(claims_5, _FakeEpistemicResult(), False, {}, _noop_log, False)
     classify_claim_epistemic_status(claims_5, _noop_log, False, evidence_5)

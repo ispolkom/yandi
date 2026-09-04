@@ -245,6 +245,44 @@ def link_family_member(conn, family_id: str, claim_id: str, linked_at=None) -> N
         )
 
 
+def list_claim_families_by_domain(conn, domain: str) -> List[Dict[str, Any]]:
+    """Candidates for agent.claim_family_registry.ClaimFamilyRegistry.
+    find_or_link_claim()'s own matching loop — same domain-scoped
+    candidate set the retired JSON registry used
+    (`[f for f in self.families if f.get("domain") == domain]`), same
+    registry order (oldest first) so first-candidate-wins stays
+    deterministic."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT family_id, canonical_text FROM claim_family WHERE domain=%s ORDER BY created_at ASC",
+            (domain,),
+        )
+        return cur.fetchall()
+
+
+def get_claim_family(conn, family_id: str) -> Optional[Dict[str, Any]]:
+    """One family plus its members — mirrors the retired JSON record's
+    own shape ({"family_id", "domain", "canonical_text", "members": [...],
+    "created_at", "updated_at"}), except a member here is {"claim_id",
+    "linked_at"} — family_member never stored claim_text redundantly
+    the way the old JSON member dict did, and the one real caller
+    (agent.dependency_recheck._belief_for_family()) only ever reads
+    claim_id."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM claim_family WHERE family_id=%s", (family_id,))
+        family = cur.fetchone()
+    if not family:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT claim_id, linked_at FROM family_member WHERE family_id=%s ORDER BY linked_at ASC",
+            (family_id,),
+        )
+        members = cur.fetchall()
+    family["members"] = members
+    return family
+
+
 def record_claim_occurrence(
     conn, claim_id: str, run_id: str, claim_text: str, content_hash: Optional[str],
     claim_type: Optional[str], claim_confidence: Optional[float], verification_status: Optional[str],

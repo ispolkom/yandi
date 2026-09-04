@@ -73,6 +73,15 @@ class FakeRegistry:
     def __init__(self, families):
         self.families = families
 
+    def get_family(self, family_id):
+        # "точка ноль”: matches the real ClaimFamilyRegistry.get_family() public API
+        # (_family_by_id() in dependency_recheck.py now calls this,
+        # not registry.families directly).
+        for fam in self.families:
+            if fam.get("family_id") == family_id:
+                return fam
+        return None
+
 
 def _tmp_graph():
     tmp = Path(tempfile.mkstemp(suffix=".json")[1])

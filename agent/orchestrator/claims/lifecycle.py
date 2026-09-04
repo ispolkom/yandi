@@ -276,10 +276,13 @@ def assign_claim_family_identity(
             # recomputed — find_or_link_claim() is the sole writer of
             # canonical_text and already ran above.
             if family_id:
-                _canonical_text = next(
-                    (f.get("canonical_text") for f in registry.families if f.get("family_id") == family_id),
-                    claim_text,
-                )
+                # "точка ноль": ClaimFamilyRegistry no longer has a
+                # `.families` in-memory list to reach into (SQL-backed
+                # now) — get_family() is the public replacement, same
+                # fallback-to-claim_text semantics as before if the
+                # lookup somehow comes back empty.
+                _family_record = registry.get_family(family_id)
+                _canonical_text = (_family_record or {}).get("canonical_text") or claim_text
                 shadow_record_claim_family(
                     family_id=family_id, domain=domain, canonical_text=_canonical_text,
                     claim_id=claim_id, log=log, verbose=verbose,

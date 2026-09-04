@@ -92,10 +92,7 @@ DEFAULT_RECHECK_EVIDENCE_STRENGTH = 0.5  # same established default as a freshly
 
 
 def _family_by_id(registry, family_id: str) -> Optional[Dict[str, Any]]:
-    for fam in registry.families:
-        if fam.get("family_id") == family_id:
-            return fam
-    return None
+    return registry.get_family(family_id)
 
 
 def _belief_for_family(belief_manager, family: Dict[str, Any]):
