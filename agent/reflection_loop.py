@@ -10,6 +10,20 @@ agent/reflection_loop.py — Рефлексивный цикл для YANDI V7.
 - ПРИМЕНЕНИЕ УРОКОВ К ПЛАНИРОВЩИКУ (Planner Update)
 
 Цель: система учится на собственном опыте и меняет своё поведение.
+
+"ТОЧКА НОЛЬ" (owner mandate, 2026-09): registry/reflection_policies.json
+is retired, not migrated — old JSON was disposable test-era cruft.
+Policy state now lives exclusively in reflection_policy (class C,
+mutable current-state projection) — agent/db/sql/schema.py. Every
+get_policies() call now returns a genuinely FRESH list of dicts from a
+SQL query — the old JSON version's "returns active_policies BY
+REFERENCE" aliasing hazard (agent/orch_planner.py's own comment
+documents a real incident: ad-hoc entries silently leaking into the
+live JSON file through a shared list reference) is now structurally
+impossible, not just guarded against by callers remembering to copy.
+
+FAIL LOUD, not fail-open: SqlUnavailable propagates out of every method
+here. There is no JSON fallback left to quietly succeed against.
 """
 
 from __future__ import annotations
@@ -28,6 +42,8 @@ from typing import Optional, Dict, Any, List
 
 from agent.self_model import get_self_model, SelfModel
 from agent.memory_episodic import get_memory, EpisodicMemory
+from agent.db.sql.connection import get_connection
+import agent.db.sql.repositories as repo
 
 
 @dataclass
@@ -68,34 +84,10 @@ class ReflectionLoop:
         self.self_model = get_self_model()
         self.memory = get_memory()
         self.reflection_count = 0
-        
+
         # История рефлексий
         self.reflections: List[ReflectionResult] = []
-        
-        # Накопленные политики
-        self.active_policies: List[Dict[str, Any]] = []
-        self._load_policies()
-    
-    def _load_policies(self):
-        """Загрузить активные политики."""
-        policy_file = BASE / "registry" / "reflection_policies.json"
-        if policy_file.exists():
-            try:
-                with open(policy_file, 'r', encoding='utf-8') as f:
-                    self.active_policies = json.load(f)
-            except Exception:
-                pass
-    
-    def _save_policies(self):
-        """Сохранить активные политики."""
-        policy_file = BASE / "registry" / "reflection_policies.json"
-        try:
-            policy_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(policy_file, 'w', encoding='utf-8') as f:
-                json.dump(self.active_policies, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-    
+
     # Foundation Repair P0-1 safety gate: a brand-new policy must recur this
     # many times (independent triggers, i.e. separate reflect_on_query calls)
     # before it is allowed to affect production Planner behavior. This is
@@ -123,31 +115,23 @@ class ReflectionLoop:
         policy_type = policy.get("type")
         rule = policy.get("rule")
 
-        # Проверяем, не существует ли уже такая политика
-        for existing in self.active_policies:
-            if existing.get("rule") == rule:
-                existing["observed_count"] = existing.get("observed_count", 1) + 1
-                if existing.get("status") != "active" and \
-                        existing["observed_count"] >= self._MIN_OBSERVATIONS_TO_ACTIVATE:
-                    existing["status"] = "active"
-                    existing["activated_at"] = time.time()
-                self._save_policies()
-                return existing.get("status") == "active"
+        with get_connection() as conn:
+            # Проверяем, не существует ли уже такая политика
+            existing = repo.find_reflection_policy_by_rule(conn, rule)
+            if existing:
+                new_count = existing["observed_count"] + 1
+                activate = existing["status"] != "active" and new_count >= self._MIN_OBSERVATIONS_TO_ACTIVATE
+                repo.bump_reflection_policy_observed(conn, existing["policy_id"], activate=activate)
+                conn.commit()
+                return activate or existing["status"] == "active"
 
-        # Новая политика — фиксируем confidence на момент создания (больше
-        # не растёт от одного лишь повторения) и НЕ применяем к planner,
-        # пока не накопится _MIN_OBSERVATIONS_TO_ACTIVATE независимых
-        # повторений одного и того же rule.
-        self.active_policies.append({
-            "type": policy_type,
-            "rule": rule,
-            "confidence": policy.get("confidence", 0.7),
-            "status": "observed",
-            "observed_count": 1,
-            "created_at": time.time(),
-            "applied_count": 0,
-        })
-        self._save_policies()
+            # Новая политика — фиксируем confidence на момент создания (больше
+            # не растёт от одного лишь повторения) и НЕ применяем к planner,
+            # пока не накопится _MIN_OBSERVATIONS_TO_ACTIVATE независимых
+            # повторений одного и того же rule.
+            policy_id = f"pol_{uuid.uuid4().hex[:8]}"
+            repo.create_reflection_policy(conn, policy_id, policy_type, rule, policy.get("confidence", 0.7))
+            conn.commit()
         return False
     
     def reflect_on_query(self, query: str, response: str, 
@@ -449,11 +433,15 @@ class ReflectionLoop:
         return None
     
     def get_policies(self) -> List[Dict[str, Any]]:
-        """Получить все активные политики."""
-        return self.active_policies
+        """Получить все политики (оба статуса: observed и active) — имя
+        метода отражает исторический Python-атрибут, не SQL-фильтр по
+        статусу."""
+        with get_connection() as conn:
+            return repo.list_all_reflection_policies(conn)
     
     def get_summary(self) -> Dict[str, Any]:
         """Получить сводку рефлексий."""
+        active_policy_count = len(self.get_policies())
         if not self.reflections:
             return {
                 "total_reflections": 0,
@@ -463,9 +451,9 @@ class ReflectionLoop:
                 "lessons_count": 0,
                 "policy_changes_suggested": 0,
                 "applied_policies": 0,
-                "active_policies": len(self.active_policies),
+                "active_policies": active_policy_count,
             }
-        
+
         recent = self.reflections[-20:] if len(self.reflections) >= 20 else self.reflections
         return {
             "total_reflections": self.reflection_count,
@@ -475,26 +463,26 @@ class ReflectionLoop:
             "lessons_count": sum(len(r.lessons) for r in recent),
             "policy_changes_suggested": sum(1 for r in self.reflections if r.suggested_policy_change),
             "applied_policies": sum(1 for r in self.reflections if r.applied_policy_changes),
-            "active_policies": len(self.active_policies),
+            "active_policies": active_policy_count,
         }
-    
+
     def summary_text(self) -> str:
         """Текстовое представление сводки."""
         stats = self.get_summary()
         recent = self.reflections[-3:] if self.reflections else []
-        
+
         lessons_text = ""
         for r in recent:
             for l in r.lessons[:2]:
                 lessons_text += f"  - {l}\n"
-        
+
         if not lessons_text:
             lessons_text = "  нет\n"
-        
+
         policies_text = ""
-        for p in self.active_policies[:3]:
+        for p in self.get_policies()[:3]:
             policies_text += f"  - {p.get('rule')} (conf: {p.get('confidence', 0):.2f})\n"
-        
+
         if not policies_text:
             policies_text = "  нет\n"
         

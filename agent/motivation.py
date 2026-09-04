@@ -53,20 +53,18 @@ class MotivationSystem:
     
     def _load_or_create(self) -> Motivation:
         """Загрузить или создать мотивацию."""
-        state = self.self_model.state
-        if hasattr(state, 'metadata') and 'motivation' in state.metadata:
+        metadata = self.self_model.get_metadata()
+        if 'motivation' in metadata:
             try:
-                data = state.metadata['motivation']
-                return Motivation(**data)
+                return Motivation(**metadata['motivation'])
             except Exception:
                 pass
         return Motivation()
-    
+
     def _save(self):
         """Сохранить мотивацию в self_model."""
         self.motivation.last_update = time.time()
-        self.self_model.state.metadata['motivation'] = self.motivation.__dict__
-        self.self_model._save()
+        self.self_model.set_metadata_value('motivation', self.motivation.__dict__)
     
     # ---- ГЕТТЕРЫ ----
     

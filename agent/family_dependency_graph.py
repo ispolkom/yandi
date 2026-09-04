@@ -77,66 +77,71 @@ semantic_family_id on one or both sides — those pairs are skipped (counted
 in `skipped_no_family`), not treated as absent relations. This means the
 persisted graph only ever grows from the subset of claims that also got a
 family assigned, exactly mirroring the existing [:3] bound elsewhere.
+
+"ТОЧКА НОЛЬ" (owner mandate, 2026-09): registry/claim_family_graph.json is
+retired, not migrated — old JSON was disposable test-era cruft. State now
+lives exclusively in semantic_edge (class C, mutable upsert-in-place —
+already existed in schema.py, previously dormant), family_status_state
+(class C, new — the old JSON's `family_state` dict), and recheck_event
+(class B, append-only — already existed, previously reached only via a
+JSON-primary/SQL-shadow write). This FIXES the real, confirmed
+recheck_log[family_id]-overwrites-on-every-call bug the old JSON had
+(schema.py's own long-standing comment about it) — recheck_event was
+always append-only, it just was not the only place recheck history lived
+until now.
+
+FAIL LOUD, not fail-open: SqlUnavailable propagates out of every method
+here. There is no JSON fallback left to quietly succeed against.
 """
 
 from __future__ import annotations
 
-import json
 import time
 import uuid
-from pathlib import Path
+from datetime import timezone
 from typing import Any, Dict, List, Optional
 
-from agent.db.sql.shadow_write import shadow_record_recheck_event
-
-BASE = Path(__file__).parent.parent
-DEFAULT_STORE_PATH = BASE / "registry" / "claim_family_graph.json"
+from agent.db.sql.connection import get_connection
+import agent.db.sql.repositories as repo
 
 MAX_TRAVERSAL_DEPTH = 5
 MAX_RECHECK_CANDIDATES = 50
 
 
+def _dt_to_unix(value) -> Optional[float]:
+    """agent.db.sql.repositories._coerce_datetime() stores a NAIVE
+    datetime representing UTC (datetime.utcfromtimestamp) — converting
+    back with a bare .timestamp() would silently reinterpret it as
+    LOCAL time instead (the exact naive-UTC pitfall this whole SQL
+    migration has hit and fixed several times already this session)."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return value.replace(tzinfo=timezone.utc).timestamp()
+
+
+def _row_to_edge(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "edge_id": row["edge_id"],
+        "from_family": row["family_a"],
+        "to_family": row["family_b"],
+        "edge_type": row["edge_type"],
+        "reason": row["reason"],
+        "triggering_claim_ids": row.get("triggering_claim_ids") or [],
+        "created_at": _dt_to_unix(row.get("created_at")),
+        "last_seen_at": _dt_to_unix(row.get("last_seen_at")),
+        "observation_count": row["observation_count"],
+    }
+
+
 class FamilyDependencyGraph:
-    def __init__(self, storage_file: Optional[Path] = None):
-        self.storage_file = storage_file or DEFAULT_STORE_PATH
-        self.edges: List[Dict[str, Any]] = []
-        self.family_state: Dict[str, Dict[str, Any]] = {}
-        self.recheck_log: Dict[str, Dict[str, Any]] = {}
-        self._load()
-
-    def _load(self) -> None:
-        if self.storage_file.exists():
-            try:
-                with open(self.storage_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                self.edges = data.get("edges", []) or []
-                self.family_state = data.get("family_state", {}) or {}
-                self.recheck_log = data.get("recheck_log", {}) or {}
-            except Exception:
-                # Fail-safe: a corrupt/unreadable graph must never crash the
-                # pipeline. Start empty in memory; the on-disk file is left
-                # untouched until the next successful _save() (never
-                # blindly overwritten before a real write happens).
-                self.edges = []
-                self.family_state = {}
-                self.recheck_log = {}
-
     def _save(self) -> None:
-        try:
-            self.storage_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.storage_file, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "edges": self.edges,
-                        "family_state": self.family_state,
-                        "recheck_log": self.recheck_log,
-                    },
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-        except Exception:
-            pass
+        """No-op — every write below already commits inline. Kept only
+        so existing callers (agent/dependency_recheck.py, this module's
+        own apply_family_dependency_shadow()) don't need a second edit
+        just to drop a now-meaningless call."""
+        pass
 
     def can_recheck(self, family_id: str, cooldown_seconds: float) -> bool:
         """
@@ -147,10 +152,12 @@ class FamilyDependencyGraph:
         intersection of several changed dependencies from being
         re-fetched over and over in a short span.
         """
-        entry = self.recheck_log.get(family_id)
-        if not entry:
+        with get_connection() as conn:
+            last = repo.get_last_recheck(conn, family_id)
+        if not last:
             return True
-        return (time.time() - entry.get("last_rechecked_at", 0)) >= cooldown_seconds
+        started_at = _dt_to_unix(last.get("started_at")) or 0
+        return (time.time() - started_at) >= cooldown_seconds
 
     def record_recheck(
         self, family_id: str, outcome: str, run_id: Optional[str] = None,
@@ -158,31 +165,11 @@ class FamilyDependencyGraph:
         reason: Optional[str] = None, domain: Optional[str] = None,
         canonical_text: Optional[str] = None,
     ) -> None:
-        entry = self.recheck_log.get(family_id, {"recheck_count": 0})
-        entry["last_rechecked_at"] = time.time()
-        entry["last_outcome"] = outcome
-        entry["recheck_count"] = entry.get("recheck_count", 0) + 1
-        self.recheck_log[family_id] = entry
-        # Этап 5 (SQL persistence migration, mandate §16): the JSON
-        # recheck_log above is CURRENT-STATE-ONLY (overwrites on every
-        # call, a confirmed real bug — see schema.py's recheck_event
-        # comment). This is the append-only side: one row per actual
-        # recheck attempt, history never lost.
-        shadow_record_recheck_event(
-            family_id=family_id, outcome=outcome, run_id=run_id,
-            trigger_reason=trigger_reason, started_at=started_at, reason=reason,
-            domain=domain, canonical_text=canonical_text,
-        )
-
-    def _find_edge(self, from_family: str, to_family: str, edge_type: str) -> Optional[Dict[str, Any]]:
-        for e in self.edges:
-            if (
-                e.get("from_family") == from_family
-                and e.get("to_family") == to_family
-                and e.get("edge_type") == edge_type
-            ):
-                return e
-        return None
+        with get_connection() as conn:
+            if domain and canonical_text:
+                repo.get_or_create_claim_family(conn, family_id, domain, canonical_text)
+            repo.record_recheck_event(conn, family_id, outcome, run_id, trigger_reason, started_at, reason)
+            conn.commit()
 
     def record_edge(
         self,
@@ -203,43 +190,32 @@ class FamilyDependencyGraph:
         if not from_family or not to_family or from_family == to_family:
             return None
 
-        triggering_claim_ids = triggering_claim_ids or []
-        now = time.time()
-        existing = self._find_edge(from_family, to_family, edge_type)
-        if existing:
-            existing["last_seen_at"] = now
-            existing["observation_count"] = existing.get("observation_count", 1) + 1
-            known = set(existing.get("triggering_claim_ids", []))
-            for cid in triggering_claim_ids:
-                if cid and cid not in known:
-                    existing.setdefault("triggering_claim_ids", []).append(cid)
-                    known.add(cid)
-            return existing
+        edge_id = f"edg_{uuid.uuid4().hex[:8]}"
+        with get_connection() as conn:
+            row = repo.upsert_semantic_edge(
+                conn, edge_id, from_family, to_family, edge_type, reason,
+                triggering_claim_ids=triggering_claim_ids,
+            )
+            conn.commit()
+        return _row_to_edge(row)
 
-        edge = {
-            "edge_id": f"edg_{uuid.uuid4().hex[:8]}",
-            "from_family": from_family,
-            "to_family": to_family,
-            "edge_type": edge_type,
-            "reason": reason,
-            "triggering_claim_ids": [cid for cid in triggering_claim_ids if cid],
-            "created_at": now,
-            "last_seen_at": now,
-            "observation_count": 1,
-        }
-        self.edges.append(edge)
-        return edge
+    def all_contradicts_edges(self) -> List[Dict[str, Any]]:
+        """Every persisted 'contradicts' edge — replaces the retired
+        `.edges` in-memory list that agent/epistemic_contradiction_
+        shadow.py's own _distinct_contradicts_pairs() used to scan via
+        getattr(graph, "edges", [])."""
+        with get_connection() as conn:
+            rows = repo.list_contradicts_edges(conn)
+        return [_row_to_edge(r) for r in rows]
 
     def dependents_of(self, family_id: str) -> List[Dict[str, Any]]:
         """
         Families Y such that Y depends_on family_id — i.e. edges recorded
         as (from_family=Y, to_family=family_id, edge_type="depends_on").
         """
-        return [
-            e
-            for e in self.edges
-            if e.get("to_family") == family_id and e.get("edge_type") == "depends_on"
-        ]
+        with get_connection() as conn:
+            rows = repo.list_dependents(conn, family_id)
+        return [_row_to_edge(r) for r in rows]
 
     def observe_family_status(self, family_id: str, status: str) -> Dict[str, Any]:
         """
@@ -250,16 +226,13 @@ class FamilyDependencyGraph:
         A first-ever observation is NEVER "changed" — there is no prior
         state for the new state to have diverged from.
         """
-        prev = self.family_state.get(family_id)
-        prev_status = prev.get("last_status") if prev else None
-        first_observation = prev is None
-
-        changed = (not first_observation) and (prev_status != status)
-
-        self.family_state[family_id] = {
-            "last_status": status,
-            "updated_at": time.time(),
-        }
+        with get_connection() as conn:
+            prev = repo.get_family_status(conn, family_id)
+            first_observation = prev is None
+            prev_status = prev.get("last_status") if prev else None
+            changed = (not first_observation) and (prev_status != status)
+            repo.upsert_family_status(conn, family_id, status)
+            conn.commit()
 
         return {
             "changed": changed,

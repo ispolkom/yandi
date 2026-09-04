@@ -30,6 +30,8 @@ import agent.orch_tracer as ot
 import agent.verification_memory as vm
 from agent.orch_schemas import EvidenceRecord
 from agent.family_dependency_graph import FamilyDependencyGraph
+import agent.family_dependency_graph as fdg_mod
+import contextlib
 from agent.epistemic_contradiction_shadow import (
     evaluate_contradiction_event,
     run_epistemic_contradiction_shadow,
@@ -51,6 +53,105 @@ def check(name: str, condition: bool, detail: str = ""):
 
 def _noop_log(*a, **k):
     pass
+
+
+class _FDFakeCursor:
+    def __init__(self, conn):
+        self.conn = conn
+        self._result = None
+        self._results = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        upper = " ".join(sql.split()).upper()
+        self._result = None
+        self._results = None
+        conn = self.conn
+        if upper.startswith("INSERT IGNORE INTO CLAIM_FAMILY"):
+            family_id, domain, canonical_text, created_at, updated_at = params
+            conn.families.setdefault(family_id, {"family_id": family_id, "domain": domain, "canonical_text": canonical_text})
+        elif upper.startswith("SELECT * FROM SEMANTIC_EDGE WHERE FAMILY_A=%S AND FAMILY_B=%S AND EDGE_TYPE=%S"):
+            fam_a, fam_b, edge_type = params
+            self._result = next(
+                (dict(e) for e in conn.edges.values() if e["family_a"] == fam_a and e["family_b"] == fam_b and e["edge_type"] == edge_type),
+                None,
+            )
+        elif upper.startswith("INSERT INTO SEMANTIC_EDGE"):
+            edge_id, family_a, family_b, edge_type, reason, triggering, created_at, last_seen_at = params
+            conn.edges[edge_id] = {
+                "edge_id": edge_id, "family_a": family_a, "family_b": family_b, "edge_type": edge_type,
+                "reason": reason, "observation_count": 1, "triggering_claim_ids": triggering,
+                "created_at": created_at, "last_seen_at": last_seen_at,
+            }
+        elif upper.startswith("UPDATE SEMANTIC_EDGE SET OBSERVATION_COUNT"):
+            last_seen_at, triggering, edge_id = params
+            e = conn.edges[edge_id]
+            e["observation_count"] += 1
+            e["last_seen_at"] = last_seen_at
+            e["triggering_claim_ids"] = triggering
+        elif upper.startswith("SELECT * FROM SEMANTIC_EDGE WHERE FAMILY_B=%S AND EDGE_TYPE='DEPENDS_ON'"):
+            (family_b,) = params
+            self._results = [dict(e) for e in conn.edges.values() if e["family_b"] == family_b and e["edge_type"] == "depends_on"]
+        elif upper.startswith("SELECT * FROM SEMANTIC_EDGE WHERE EDGE_TYPE='CONTRADICTS'"):
+            self._results = [dict(e) for e in conn.edges.values() if e["edge_type"] == "contradicts"]
+        elif upper.startswith("SELECT * FROM FAMILY_STATUS_STATE WHERE FAMILY_ID=%S"):
+            (family_id,) = params
+            self._result = dict(conn.status[family_id]) if family_id in conn.status else None
+        elif upper.startswith("INSERT INTO FAMILY_STATUS_STATE"):
+            family_id, last_status, updated_at = params
+            conn.status[family_id] = {"family_id": family_id, "last_status": last_status, "updated_at": updated_at}
+        elif upper.startswith("SELECT * FROM RECHECK_EVENT WHERE FAMILY_ID=%S ORDER BY STARTED_AT DESC LIMIT 1"):
+            (family_id,) = params
+            rows = [r for r in conn.rechecks if r["family_id"] == family_id]
+            rows.sort(key=lambda r: r["started_at"])
+            self._result = dict(rows[-1]) if rows else None
+        elif upper.startswith("INSERT INTO RECHECK_EVENT"):
+            family_id, run_id, trigger_reason, started_at, outcome, reason = params
+            conn.rechecks.append({
+                "family_id": family_id, "run_id": run_id, "trigger_reason": trigger_reason,
+                "started_at": started_at, "outcome": outcome, "reason": reason,
+            })
+
+    def fetchone(self):
+        return self._result
+
+    def fetchall(self):
+        return self._results or []
+
+
+class _FDFakeConnection:
+    def __init__(self):
+        self.families = {}
+        self.edges = {}
+        self.status = {}
+        self.rechecks = []
+
+    def cursor(self):
+        return _FDFakeCursor(self)
+
+    def commit(self):
+        pass
+
+
+def _fresh_graph():
+    """A brand-new FamilyDependencyGraph backed by a fresh, empty fake
+    claim_family/semantic_edge/family_status_state/recheck_event store
+    ("точка ноль": no more storage_file= — see agent/family_dependency_
+    graph.py's own rewrite)."""
+    conn = _FDFakeConnection()
+
+    @contextlib.contextmanager
+    def _fake_get_connection(autocommit=False):
+        yield conn
+
+    fdg_mod.get_connection = _fake_get_connection
+    return FamilyDependencyGraph()
+
 
 
 def _make_env():
@@ -156,7 +257,7 @@ def _current_evidence(evidence_id, source_uri, route="internet", origin_route=No
 # ============================================================
 
 traces_apple, index_apple = _make_env()
-graph_apple = FamilyDependencyGraph(storage_file=Path(tempfile.mkdtemp(prefix="p10_ecs_g_apple_")) / "g.json")
+graph_apple = _fresh_graph()
 graph_apple.record_edge("fam_apple_1976", "fam_apple_1975", "contradicts", "claim_claim_nli:contradicts", ["cl_1976", "cl_1975"])
 graph_apple.record_edge("fam_apple_1975", "fam_apple_1976", "contradicts", "claim_claim_nli:contradicts", ["cl_1976", "cl_1975"])
 
@@ -175,8 +276,8 @@ with patch.object(ot, "TRACES_DIR", traces_apple), patch.object(vm, "TRACES_DIR"
 
 check(
     "APPLE NEGATIVE: contradicts edge persists in the graph (untouched)",
-    len([e for e in graph_apple.edges if e.get("edge_type") == "contradicts"]) == 2,
-    f"{graph_apple.edges}",
+    len(graph_apple.all_contradicts_edges()) == 2,
+    f"{graph_apple.all_contradicts_edges()}",
 )
 check(
     "APPLE NEGATIVE: exactly one edge evaluated (both directions collapsed to one pair)",
@@ -201,7 +302,7 @@ check(
 
 def _run_positive_fixture(name, fam_a, fam_b, url_a, url_b):
     traces_dir, index_db = _make_env()
-    graph = FamilyDependencyGraph(storage_file=Path(tempfile.mkdtemp(prefix=f"p10_ecs_g_{name}_")) / "g.json")
+    graph = _fresh_graph()
     graph.record_edge(fam_a, fam_b, "contradicts", "claim_claim_nli:contradicts", [f"cl_{name}_a", f"cl_{name}_b"])
     graph.record_edge(fam_b, fam_a, "contradicts", "claim_claim_nli:contradicts", [f"cl_{name}_a", f"cl_{name}_b"])
 
@@ -246,7 +347,7 @@ for fixture_name, fam_a, fam_b, url_a, url_b, label in [
 # ============================================================
 
 traces_n1, index_n1 = _make_env()
-graph_n1 = FamilyDependencyGraph(storage_file=Path(tempfile.mkdtemp(prefix="p10_ecs_g_n1_")) / "g.json")
+graph_n1 = _fresh_graph()
 graph_n1.record_edge("fam_n1_a", "fam_n1_b", "contradicts", "claim_claim_nli:contradicts", ["cl_n1_a", "cl_n1_b"])
 graph_n1.record_edge("fam_n1_b", "fam_n1_a", "contradicts", "claim_claim_nli:contradicts", ["cl_n1_a", "cl_n1_b"])
 
@@ -281,7 +382,7 @@ check(
 # ============================================================
 
 traces_n2, index_n2 = _make_env()
-graph_n2 = FamilyDependencyGraph(storage_file=Path(tempfile.mkdtemp(prefix="p10_ecs_g_n2_")) / "g.json")
+graph_n2 = _fresh_graph()
 graph_n2.record_edge("fam_n2_a", "fam_n2_b", "contradicts", "claim_claim_nli:contradicts", ["cl_n2_a", "cl_n2_b"])
 graph_n2.record_edge("fam_n2_b", "fam_n2_a", "contradicts", "claim_claim_nli:contradicts", ["cl_n2_a", "cl_n2_b"])
 
@@ -311,7 +412,7 @@ check(
 # ============================================================
 
 traces_n3, index_n3 = _make_env()
-graph_n3 = FamilyDependencyGraph(storage_file=Path(tempfile.mkdtemp(prefix="p10_ecs_g_n3_")) / "g.json")
+graph_n3 = _fresh_graph()
 graph_n3.record_edge("fam_n3_a", "fam_n3_b", "contradicts", "claim_claim_nli:contradicts", ["cl_n3_a", "cl_n3_b"])
 graph_n3.record_edge("fam_n3_b", "fam_n3_a", "contradicts", "claim_claim_nli:contradicts", ["cl_n3_a", "cl_n3_b"])
 
@@ -344,7 +445,7 @@ check(
 # ============================================================
 
 traces_n4, index_n4 = _make_env()
-graph_n4 = FamilyDependencyGraph(storage_file=Path(tempfile.mkdtemp(prefix="p10_ecs_g_n4_")) / "g.json")
+graph_n4 = _fresh_graph()
 graph_n4.record_edge("fam_n4_a", "fam_n4_b", "contradicts", "claim_claim_nli:contradicts", ["cl_n4_a", "cl_n4_b"])
 graph_n4.record_edge("fam_n4_b", "fam_n4_a", "contradicts", "claim_claim_nli:contradicts", ["cl_n4_a", "cl_n4_b"])
 
@@ -375,7 +476,7 @@ check(
 # ============================================================
 
 traces_n5, index_n5 = _make_env()
-graph_n5 = FamilyDependencyGraph(storage_file=Path(tempfile.mkdtemp(prefix="p10_ecs_g_n5_")) / "g.json")
+graph_n5 = _fresh_graph()
 graph_n5.record_edge("fam_n5_a", "fam_n5_b", "supports", "claim_claim_nli:supports", ["cl_n5_a", "cl_n5_b"])
 graph_n5.record_edge("fam_n5_c", "fam_n5_d", "depends_on", "contradicts", ["cl_n5_c", "cl_n5_d"])
 
@@ -394,7 +495,7 @@ check(
 # ============================================================
 
 traces_s, index_s = _make_env()
-graph_s = FamilyDependencyGraph(storage_file=Path(tempfile.mkdtemp(prefix="p10_ecs_g_s_")) / "g.json")
+graph_s = _fresh_graph()
 graph_s.record_edge("fam_s_a", "fam_s_b", "contradicts", "claim_claim_nli:contradicts", ["cl_s_a", "cl_s_b"])
 graph_s.record_edge("fam_s_b", "fam_s_a", "contradicts", "claim_claim_nli:contradicts", ["cl_s_a", "cl_s_b"])
 
@@ -408,7 +509,7 @@ evidence_s = [
 ]
 claims_s_before = copy.deepcopy(claims_s)
 evidence_s_before = copy.deepcopy(evidence_s)
-edges_s_before = copy.deepcopy(graph_s.edges)
+edges_s_before = copy.deepcopy(graph_s.all_contradicts_edges())
 
 with patch.object(ot, "TRACES_DIR", traces_s), patch.object(vm, "TRACES_DIR", traces_s), patch.object(vm, "INDEX_DB", index_s):
     run_epistemic_contradiction_shadow(claims_s, evidence_s, graph=graph_s, log=_noop_log, verbose=False)
@@ -424,9 +525,9 @@ check(
     f"before={evidence_s_before} after={evidence_s}",
 )
 check(
-    "STRUCTURAL: graph.edges unchanged after run (no new/mutated edges)",
-    graph_s.edges == edges_s_before,
-    f"before={edges_s_before} after={graph_s.edges}",
+    "STRUCTURAL: graph's contradicts edges unchanged after run (no new/mutated edges)",
+    graph_s.all_contradicts_edges() == edges_s_before,
+    f"before={edges_s_before} after={graph_s.all_contradicts_edges()}",
 )
 
 # ============================================================
@@ -435,8 +536,7 @@ check(
 # ============================================================
 
 class _BrokenGraph:
-    @property
-    def edges(self):
+    def all_contradicts_edges(self):
         raise RuntimeError("simulated graph corruption")
 
 stats_broken = run_epistemic_contradiction_shadow(

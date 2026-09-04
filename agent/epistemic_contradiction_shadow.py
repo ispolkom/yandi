@@ -220,7 +220,7 @@ def _distinct_contradicts_pairs(graph) -> List[Tuple[str, str]]:
     """
     seen: Set[frozenset] = set()
     pairs: List[Tuple[str, str]] = []
-    for edge in getattr(graph, "edges", []):
+    for edge in graph.all_contradicts_edges():
         if edge.get("edge_type") != "contradicts":
             continue
         fam_a, fam_b = edge.get("from_family"), edge.get("to_family")

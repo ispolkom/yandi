@@ -263,12 +263,18 @@ check(
 # definition introduced by this fix).
 # ============================================================
 check(
-    "3a. schema.ALL_TABLES_IN_ORDER currently defines exactly 25 tables "
+    "3a. schema.ALL_TABLES_IN_ORDER currently defines exactly 34 tables "
     "(21 domain/history/projection tables + instance_identity — v2 added "
     "decision_event, the \"живая память\" decision/reasoning ledger; v3 added "
     "integrity_journal, the \"10-year bastion\" Layer 4 tamper-evidence hash-chain; "
-    "v4 added grievance + forgiveness_capacity, SQL-backed character/relationship state)",
-    len(ALL_TABLES_IN_ORDER) == 25,
+    "v4 added grievance + forgiveness_capacity, SQL-backed character/relationship state; "
+    "v6 added personality + personality_change, \"точка ноль\" retiring personality_core.py's JSON store; "
+    "v7 added episode, \"точка ноль\" retiring memory_episodic.py's JSON store; "
+    "v8 added self_state + self_event, \"точка ноль\" retiring self_model.py's JSON store; "
+    "v9 added reflection_policy, \"точка ноль\" retiring reflection_loop.py's JSON store; "
+    "v10 added family_status_state, \"точка ноль\" retiring family_dependency_graph.py's JSON store; "
+    "v11 added knowledge_record + peer_config, \"точка ноль\" retiring orch_knowledge_writer.py's JSON store)",
+    len(ALL_TABLES_IN_ORDER) == 34,
     f"actual={len(ALL_TABLES_IN_ORDER)}",
 )
 check(
