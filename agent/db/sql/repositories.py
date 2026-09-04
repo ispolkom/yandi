@@ -1831,12 +1831,18 @@ def update_decision_journal_self_correction(conn, decision_id: str, self_correct
 
 
 def list_decision_journal_entries(conn, user_id: str, limit: int = 1000) -> List[Dict[str, Any]]:
+    """The most recent `limit` entries, oldest-first — same DESC+reverse
+    fix as list_inner_state_events()/list_trait_changes(): a plain ASC+
+    LIMIT would silently return the OLDEST entries once a user passes
+    `limit` decisions, freezing get_recent()/analyze_patterns() on
+    stale history forever."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT * FROM decision_journal_entry WHERE user_id=%s ORDER BY created_at ASC LIMIT %s",
+            "SELECT * FROM decision_journal_entry WHERE user_id=%s ORDER BY created_at DESC LIMIT %s",
             (user_id, limit),
         )
         rows = cur.fetchall()
+    rows.reverse()
     return [_decode_decision_journal_json(r) for r in rows]
 
 
@@ -1993,14 +1999,23 @@ def record_inner_state_event(
 
 
 def list_inner_state_events(conn, user_id: str, limit: int = 200) -> List[Dict[str, Any]]:
-    """Oldest-first, matching InnerStateManager.state.relationship.history's
-    own chronological-append order."""
+    """The most recent `limit` events, oldest-first — matches the OLD
+    JSON RelationshipState.history's own effective semantics (capped at
+    200, always dropped from the FRONT in _save(), so weight/pattern
+    logic always saw the most recent window). A plain `ORDER BY
+    created_at ASC LIMIT limit` would instead return the OLDEST `limit`
+    rows once a relationship passes 200 events — silently freezing
+    insult-count/pattern detection on ancient history forever (a real
+    bug caught in this codebase's own review before it could bite any
+    long-running relationship in production)."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT * FROM inner_state_event WHERE user_id=%s ORDER BY created_at ASC LIMIT %s",
+            "SELECT * FROM inner_state_event WHERE user_id=%s ORDER BY created_at DESC LIMIT %s",
             (user_id, limit),
         )
-        return cur.fetchall()
+        rows = cur.fetchall()
+    rows.reverse()
+    return rows
 
 
 # ============================================================
@@ -2084,15 +2099,27 @@ def record_trait_change(conn, node: str, new_value: float, source: Optional[str]
 
 
 def list_trait_changes(conn, since=None, limit: int = 500) -> List[Dict[str, Any]]:
+    """Oldest-first within the returned window. When `since` is given,
+    the window is "everything after that point" (ASC + LIMIT is correct
+    there — a change history rarely has more than `limit` entries AFTER
+    a recent cutoff). When `since` is None (the "give me the most
+    RECENT history" fallback path — personality_graph.py's own
+    get_evolution()), ASC + LIMIT would silently return the OLDEST
+    `limit` rows once the table grows past that count, not the most
+    recent ones (a real bug caught in this codebase's own review before
+    it could bite in production) — DESC + LIMIT then reverse is the
+    correct way to get "the most recent N, oldest-first."""
     with conn.cursor() as cur:
         if since is not None:
             cur.execute(
                 "SELECT * FROM trait_change WHERE created_at >= %s ORDER BY created_at ASC LIMIT %s",
                 (_coerce_datetime(since), limit),
             )
-        else:
-            cur.execute("SELECT * FROM trait_change ORDER BY created_at ASC LIMIT %s", (limit,))
-        return cur.fetchall()
+            return cur.fetchall()
+        cur.execute("SELECT * FROM trait_change ORDER BY created_at DESC LIMIT %s", (limit,))
+        rows = cur.fetchall()
+    rows.reverse()
+    return rows
 
 
 def record_trait_edge_change(conn, source_node: str, target_node: str, old_weight: float, new_weight: float, created_at=None) -> None:
