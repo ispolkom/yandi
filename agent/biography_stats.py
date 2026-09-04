@@ -12,166 +12,130 @@ agent/biography_stats.py — Биография Янди.
 - количество забытых воспоминаний
 - количество переосмысленных решений
 - количество изменённых привычек
+
+"ТОЧКА НОЛЬ" (owner mandate, 2026-09): registry/biography/{user_id}.json
+is retired, not migrated. State now lives in biography (class C) +
+biography_event (class B, append-only) — agent/db/sql/schema.py. The
+old JSON's four redundant sub-lists (errors, regrets, beliefs, habits),
+each capped at the last 10, collapse into biography_event alone — no
+data loss, no arbitrary cap.
+
+FAIL LOUD, not fail-open: SqlUnavailable propagates out of every method
+here.
 """
 
 import time
-import json
-from pathlib import Path
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
-BASE = Path(__file__).parent.parent
-BIOGRAPHY_DIR = BASE / "registry" / "biography"
-BIOGRAPHY_DIR.mkdir(parents=True, exist_ok=True)
+from agent.db.sql.connection import get_connection
+import agent.db.sql.repositories as repo
+
+
+def _dt_to_unix(value) -> float:
+    if value is None:
+        return time.time()
+    if isinstance(value, (int, float)):
+        return float(value)
+    return value.replace(tzinfo=timezone.utc).timestamp()
 
 
 class BiographyStats:
     def __init__(self, user_id: str = "global"):
         self.user_id = user_id
-        self.file_path = BIOGRAPHY_DIR / f"{user_id}.json"
-        self.data = self._load()
+        with get_connection() as conn:
+            repo.get_or_create_biography(conn, user_id)
+            conn.commit()
 
-    def _load(self) -> Dict[str, Any]:
-        if self.file_path.exists():
-            try:
-                with open(self.file_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as e:
-                print(f"[Biography] Ошибка загрузки: {e}")
-        return self._default_data()
-
-    def _default_data(self) -> Dict[str, Any]:
-        return {
-            "user_id": self.user_id,
-            "birth": time.time(),
-            "last_updated": time.time(),
-            "cycles": 0,
-            "last_principles_change": None,
-            "last_regret": None,
-            "last_error": None,
-            "last_new_belief": None,
-            "saved_memories": 0,
-            "forgotten_memories": 0,
-            "reconsidered_decisions": 0,
-            "changed_habits": 0,
-            "total_decisions": 0,
-            "total_reflections": 0,
-            "errors": [],
-            "regrets": [],
-            "beliefs": [],
-            "habits": [],
-            "milestones": [],
-        }
-
-    def _save(self):
-        self.data["last_updated"] = time.time()
-        try:
-            with open(self.file_path, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[Biography] Ошибка сохранения: {e}")
+    def _row(self) -> Dict[str, Any]:
+        with get_connection() as conn:
+            return repo.get_biography(conn, self.user_id)
 
     def increment_cycles(self, count: int = 1):
-        self.data["cycles"] += count
-        self._save()
+        with get_connection() as conn:
+            repo.bump_biography_counter(conn, self.user_id, "cycles", amount=count)
+            conn.commit()
 
     def add_error(self, error: str):
-        self.data["errors"].append({
-            "timestamp": time.time(),
-            "error": error,
-        })
-        self.data["last_error"] = error
-        self.data["total_decisions"] += 1
-        # Если ошибок больше 10, забываем старые
-        if len(self.data["errors"]) > 10:
-            forgotten = len(self.data["errors"]) - 10
-            self.data["forgotten_memories"] += forgotten
-            self.data["errors"] = self.data["errors"][-10:]
-        self._save()
+        with get_connection() as conn:
+            repo.bump_biography_counter(conn, self.user_id, "total_decisions")
+            repo.record_biography_event(conn, self.user_id, "error", {"error": error})
+            conn.commit()
 
     def add_regret(self, regret: str):
-        self.data["regrets"].append({
-            "timestamp": time.time(),
-            "regret": regret,
-        })
-        self.data["last_regret"] = regret
-        if len(self.data["regrets"]) > 10:
-            self.data["regrets"] = self.data["regrets"][-10:]
-        self._save()
+        with get_connection() as conn:
+            repo.record_biography_event(conn, self.user_id, "regret", {"regret": regret})
+            conn.commit()
 
     def add_belief(self, belief: str):
-        self.data["beliefs"].append({
-            "timestamp": time.time(),
-            "belief": belief,
-        })
-        self.data["last_new_belief"] = belief
-        if len(self.data["beliefs"]) > 10:
-            self.data["beliefs"] = self.data["beliefs"][-10:]
-        self._save()
+        with get_connection() as conn:
+            repo.record_biography_event(conn, self.user_id, "belief", {"belief": belief})
+            conn.commit()
 
     def add_milestone(self, milestone: str):
-        self.data["milestones"].append({
-            "timestamp": time.time(),
-            "milestone": milestone,
-        })
-        self._save()
+        with get_connection() as conn:
+            repo.record_biography_event(conn, self.user_id, "milestone", {"milestone": milestone})
+            conn.commit()
 
     def add_habit_change(self, old: str, new: str):
-        self.data["changed_habits"] += 1
-        self.data["habits"].append({
-            "timestamp": time.time(),
-            "old": old,
-            "new": new,
-        })
-        if len(self.data["habits"]) > 10:
-            self.data["habits"] = self.data["habits"][-10:]
-        self._save()
+        with get_connection() as conn:
+            repo.bump_biography_counter(conn, self.user_id, "changed_habits")
+            repo.record_biography_event(conn, self.user_id, "habit", {"old": old, "new": new})
+            conn.commit()
 
     def add_principles_change(self, old: str, new: str):
-        self.data["last_principles_change"] = {
-            "timestamp": time.time(),
-            "old": old,
-            "new": new,
-        }
-        self._save()
+        with get_connection() as conn:
+            repo.set_biography_principles_change(conn, self.user_id, old, new)
+            conn.commit()
 
     def add_reconsidered_decision(self, decision_id: str, reason: str):
-        self.data["reconsidered_decisions"] += 1
-        self._save()
+        with get_connection() as conn:
+            repo.bump_biography_counter(conn, self.user_id, "reconsidered_decisions")
+            conn.commit()
 
     def add_memory(self, memory_type: str):
-        self.data["saved_memories"] += 1
-        self._save()
+        with get_connection() as conn:
+            repo.bump_biography_counter(conn, self.user_id, "saved_memories")
+            conn.commit()
 
     def forget_memory(self, count: int = 1):
-        self.data["forgotten_memories"] += count
-        self._save()
+        with get_connection() as conn:
+            repo.bump_biography_counter(conn, self.user_id, "forgotten_memories", amount=count)
+            conn.commit()
 
     def get_summary(self) -> Dict[str, Any]:
-        data = self.data
-        age_hours = (time.time() - data["birth"]) / 3600
+        row = self._row()
+        age_hours = (time.time() - _dt_to_unix(row["birth"])) / 3600
         age_days = age_hours / 24
-        age_cycles = data["cycles"]
+
+        with get_connection() as conn:
+            errors = repo.list_biography_events(conn, self.user_id, "error", limit=1)
+            regrets = repo.list_biography_events(conn, self.user_id, "regret", limit=1)
+            beliefs = repo.list_biography_events(conn, self.user_id, "belief", limit=1)
+            errors_count = repo.count_biography_events(conn, self.user_id, "error")
+            regrets_count = repo.count_biography_events(conn, self.user_id, "regret")
+            beliefs_count = repo.count_biography_events(conn, self.user_id, "belief")
+            milestones_count = repo.count_biography_events(conn, self.user_id, "milestone")
 
         return {
             "age_hours": round(age_hours, 1),
             "age_days": round(age_days, 1),
-            "age_cycles": age_cycles,
-            "cycles": data["cycles"],
-            "last_principles_change": data.get("last_principles_change"),
-            "last_regret": data.get("last_regret"),
-            "last_error": data.get("last_error"),
-            "last_new_belief": data.get("last_new_belief"),
-            "saved_memories": data["saved_memories"],
-            "forgotten_memories": data["forgotten_memories"],
-            "reconsidered_decisions": data["reconsidered_decisions"],
-            "changed_habits": data["changed_habits"],
-            "total_decisions": data["total_decisions"],
-            "total_reflections": data["total_reflections"],
-            "errors_count": len(data.get("errors", [])),
-            "regrets_count": len(data.get("regrets", [])),
-            "beliefs_count": len(data.get("beliefs", [])),
-            "milestones_count": len(data.get("milestones", [])),
+            "age_cycles": row["cycles"],
+            "cycles": row["cycles"],
+            "last_principles_change": row.get("last_principles_change"),
+            "last_regret": regrets[0]["payload"]["regret"] if regrets else None,
+            "last_error": errors[0]["payload"]["error"] if errors else None,
+            "last_new_belief": beliefs[0]["payload"]["belief"] if beliefs else None,
+            "saved_memories": row["saved_memories"],
+            "forgotten_memories": row["forgotten_memories"],
+            "reconsidered_decisions": row["reconsidered_decisions"],
+            "changed_habits": row["changed_habits"],
+            "total_decisions": row["total_decisions"],
+            "total_reflections": row["total_reflections"],
+            "errors_count": errors_count,
+            "regrets_count": regrets_count,
+            "beliefs_count": beliefs_count,
+            "milestones_count": milestones_count,
         }
 
     def get_human_readable(self) -> str:
@@ -201,7 +165,7 @@ class BiographyStats:
         return "\n".join(lines)
 
     def to_dict(self) -> Dict[str, Any]:
-        return self.data
+        return self._row()
 
 
 _instances: Dict[str, BiographyStats] = {}

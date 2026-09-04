@@ -24,7 +24,7 @@ from agent.db.sql.schema import (
     SCHEMA_VERSION,
 )
 
-SCHEMA_VERSION_DESCRIPTION = "v10: semantic_edge.triggering_claim_ids + family_status_state (\"точка ноль\" — family_dependency_graph.py's JSON store retired)"
+SCHEMA_VERSION_DESCRIPTION = "v12: biography/context/decision_journal/experience/secret_archive/inner_state/disagreement/trait_graph/self_reflection_profile/social_knowledge (\"точка ноль\" — remaining live JSON-backed subsystems retired)"
 
 
 def record_schema_version(

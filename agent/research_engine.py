@@ -2,18 +2,28 @@
 agent/research_engine.py — Research Engine.
 Когда Янди сталкивается с новой ситуацией, она исследует её.
 Не ищет готовые ответы — ищет понимание.
+
+"ТОЧКА НОЛЬ" (owner mandate, 2026-09): registry/social_knowledge/
+{speech_act}_{topic}.json is retired, not migrated. State now lives in
+social_knowledge (class C — update_knowledge() legitimately revises an
+existing row in place) — agent/db/sql/schema.py. Builtin seed knowledge
+stays a Python default, never persisted (same "static config isn't a
+table" choice as personality_graph.py's DEFAULT_NODES).
+
+Zero production callers (confirmed via grep before this rewrite) —
+migrated for schema completeness/consistency, not because anything
+currently depends on it.
+
+FAIL LOUD, not fail-open: SqlUnavailable propagates out of every method
+here.
 """
 
-import json
-import re
-import time
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
-from pathlib import Path
+import time
 
-BASE = Path(__file__).parent.parent
-KNOWLEDGE_DIR = BASE / "registry" / "social_knowledge"
-KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+from agent.db.sql.connection import get_connection
+import agent.db.sql.repositories as repo
 
 
 @dataclass
@@ -33,11 +43,20 @@ class SocialKnowledge:
     updated_at: float = field(default_factory=time.time)
 
 
+def _row_to_knowledge(row: Dict[str, Any]) -> SocialKnowledge:
+    return SocialKnowledge(
+        speech_act=row["speech_act"], topic=row["topic"], description=row["description"],
+        typical_reactions=row.get("typical_reactions") or [], cultural_context=row.get("cultural_context") or "",
+        boundaries=row.get("boundaries") or [], recommended_approach=row.get("recommended_approach") or "",
+        examples=row.get("examples") or [], source=row["source"], confidence=row["confidence"],
+    )
+
+
 class ResearchEngine:
     """
     Исследует новые социальные ситуации.
     """
-    
+
     def __init__(self):
         # ---- БАЗОВЫЕ ЗНАНИЯ (встроенные) ----
         self.builtin_knowledge = {
@@ -174,72 +193,46 @@ class ResearchEngine:
                 confidence=0.7,
             ),
         }
-    
+
     def research(self, speech_act: str, topic: str, query: str = "", context: Dict = None) -> Optional[SocialKnowledge]:
         """
         Исследует ситуацию.
         """
         key = (speech_act, topic)
-        
+
         # 1. Проверяем встроенные знания
         if key in self.builtin_knowledge:
             return self.builtin_knowledge[key]
-        
+
         # 2. Проверяем сохранённые знания
         saved = self._load_knowledge(speech_act, topic)
         if saved:
             return saved
-        
+
         # 3. Если нет знаний — создаём базовое (будет пополняться из опыта)
         return self._create_initial_knowledge(speech_act, topic, query)
-    
+
     def _load_knowledge(self, speech_act: str, topic: str) -> Optional[SocialKnowledge]:
         """Загружает сохранённое знание"""
-        path = KNOWLEDGE_DIR / f"{speech_act}_{topic}.json"
-        if path.exists():
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    return SocialKnowledge(
-                        speech_act=data.get("speech_act", speech_act),
-                        topic=data.get("topic", topic),
-                        description=data.get("description", ""),
-                        typical_reactions=data.get("typical_reactions", []),
-                        cultural_context=data.get("cultural_context", ""),
-                        boundaries=data.get("boundaries", []),
-                        recommended_approach=data.get("recommended_approach", ""),
-                        examples=data.get("examples", []),
-                        source=data.get("source", "saved"),
-                        confidence=data.get("confidence", 0.5),
-                    )
-            except Exception as e:
-                print(f"[ResearchEngine] Ошибка загрузки: {e}")
-        return None
-    
+        with get_connection() as conn:
+            row = repo.get_social_knowledge(conn, speech_act, topic)
+        return _row_to_knowledge(row) if row else None
+
     def _save_knowledge(self, knowledge: SocialKnowledge):
         """Сохраняет знание"""
-        path = KNOWLEDGE_DIR / f"{knowledge.speech_act}_{knowledge.topic}.json"
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({
-                    "speech_act": knowledge.speech_act,
-                    "topic": knowledge.topic,
-                    "description": knowledge.description,
-                    "typical_reactions": knowledge.typical_reactions,
-                    "cultural_context": knowledge.cultural_context,
-                    "boundaries": knowledge.boundaries,
-                    "recommended_approach": knowledge.recommended_approach,
-                    "examples": knowledge.examples,
-                    "source": knowledge.source,
-                    "confidence": knowledge.confidence,
-                }, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[ResearchEngine] Ошибка сохранения: {e}")
-    
+        with get_connection() as conn:
+            repo.upsert_social_knowledge(
+                conn, knowledge.speech_act, knowledge.topic, knowledge.description,
+                knowledge.typical_reactions, knowledge.cultural_context, knowledge.boundaries,
+                knowledge.recommended_approach, knowledge.examples, source=knowledge.source,
+                confidence=knowledge.confidence,
+            )
+            conn.commit()
+
     def _create_initial_knowledge(self, speech_act: str, topic: str, query: str) -> SocialKnowledge:
         """Создаёт начальное знание для неизвестной ситуации"""
         description = f"Ситуация типа {speech_act} на тему {topic}. Требуется изучение."
-        
+
         knowledge = SocialKnowledge(
             speech_act=speech_act,
             topic=topic,
@@ -252,21 +245,19 @@ class ResearchEngine:
             source="initial",
             confidence=0.3,
         )
-        
+
         self._save_knowledge(knowledge)
         return knowledge
-    
-    def update_knowledge(self, speech_act: str, topic: str, 
+
+    def update_knowledge(self, speech_act: str, topic: str,
                          feedback: Dict[str, Any], new_example: str):
         """
         Обновляет знание на основе опыта.
         """
-        # Загружаем существующее
         knowledge = self._load_knowledge(speech_act, topic)
         if not knowledge:
             knowledge = self._create_initial_knowledge(speech_act, topic, "")
-        
-        # Обновляем
+
         if feedback.get("description"):
             knowledge.description = feedback["description"]
         if feedback.get("typical_reactions"):
@@ -275,11 +266,10 @@ class ResearchEngine:
             knowledge.examples.append(new_example)
             if len(knowledge.examples) > 10:
                 knowledge.examples = knowledge.examples[-10:]
-        
+
         knowledge.confidence = min(1.0, knowledge.confidence + 0.1)
-        knowledge.updated_at = time.time()
         knowledge.source = "experience"
-        
+
         self._save_knowledge(knowledge)
         return knowledge
 
@@ -290,24 +280,21 @@ def get_research_engine() -> ResearchEngine:
 
 if __name__ == "__main__":
     engine = get_research_engine()
-    
+
     print("=== Тест Research Engine ===\n")
-    
-    # Сарказм
+
     knowledge = engine.research("sarcasm", "general")
     print("Знание о сарказме:")
     print(f"  Описание: {knowledge.description}")
     print(f"  Реакции: {knowledge.typical_reactions[:2]}...")
     print()
-    
-    # Флирт (должен создать новое знание)
+
     knowledge = engine.research("flirt", "romantic")
     print("Знание о флирте:")
     print(f"  Описание: {knowledge.description}")
     print(f"  Реакции: {knowledge.typical_reactions}")
     print()
-    
-    # Проверяем, сохранилось ли знание о флирте
+
     knowledge2 = engine.research("flirt", "romantic")
     print("Повторный запрос о флирте:")
     print(f"  Описание: {knowledge2.description}")

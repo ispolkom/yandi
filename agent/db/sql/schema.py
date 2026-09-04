@@ -46,7 +46,7 @@ DESIGN NOTES (read before changing a table):
    no HTTP retry chatter. RUN_ERROR is 5 columns, not a log warehouse.
 """
 
-SCHEMA_VERSION = 11  # v11: knowledge_record + peer_config ("точка ноль" — orch_knowledge_writer.py's registry/knowledge/*.jsonl + registry/peers.json retired, not migrated)
+SCHEMA_VERSION = 12  # v12: biography/context/decision_journal/experience/secret_archive/inner_state/disagreement/trait_graph/self_reflection_profile/social_knowledge ("точка ноль" — remaining live JSON-backed subsystems retired, not migrated)
 
 SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1051,6 +1051,303 @@ CREATE TABLE IF NOT EXISTS peer_config (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
+# ── BIOGRAPHY / BIOGRAPHY_EVENT ───────────────────────────────────────────
+# SQL-backed replacement for agent/biography_stats.py's registry/
+# biography/{user_id}.json ("точка ноль"). Same pattern as self_state/
+# self_event: the old JSON's four redundant, capped-at-10 sub-lists
+# (errors, regrets, beliefs, habits) collapse into biography_event alone.
+BIOGRAPHY = """
+CREATE TABLE IF NOT EXISTS biography (
+    user_id                  VARCHAR(64) PRIMARY KEY,
+    birth                    DATETIME NOT NULL,
+    cycles                   INT NOT NULL DEFAULT 0,
+    saved_memories           INT NOT NULL DEFAULT 0,
+    forgotten_memories       INT NOT NULL DEFAULT 0,
+    reconsidered_decisions   INT NOT NULL DEFAULT 0,
+    changed_habits           INT NOT NULL DEFAULT 0,
+    total_decisions          INT NOT NULL DEFAULT 0,
+    total_reflections        INT NOT NULL DEFAULT 0,
+    last_principles_change   JSON NULL,
+    updated_at               DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+BIOGRAPHY_EVENT = """
+CREATE TABLE IF NOT EXISTS biography_event (
+    event_id     BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id      VARCHAR(64) NOT NULL,
+    event_type   VARCHAR(20) NOT NULL,  -- error | regret | belief | habit | milestone
+    payload      JSON NOT NULL,
+    created_at   DATETIME NOT NULL,
+    KEY idx_biography_event_user (user_id, event_type, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# ── CONTEXT_TOPIC / CONTEXT_INSTANCE ──────────────────────────────────────
+# SQL-backed replacement for agent/context_registry.py's registry/
+# context/{user_id}.json ("точка ноль"). CONTEXT_TOPIC is the mutable
+# per-topic summary (class C); CONTEXT_INSTANCE is APPEND-ONLY (class B)
+# — no more 100-cap on instances.
+CONTEXT_TOPIC = """
+CREATE TABLE IF NOT EXISTS context_topic (
+    user_id           VARCHAR(64) NOT NULL,
+    topic             VARCHAR(60) NOT NULL,
+    last_activity     DATETIME NULL,
+    total_instances   INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, topic)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+CONTEXT_INSTANCE = """
+CREATE TABLE IF NOT EXISTS context_instance (
+    instance_id  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id      VARCHAR(64) NOT NULL,
+    topic        VARCHAR(60) NOT NULL,
+    query        TEXT NOT NULL,
+    response     TEXT NOT NULL,
+    type         VARCHAR(30) NULL,
+    source       VARCHAR(20) NULL,
+    created_at   DATETIME NOT NULL,
+    KEY idx_context_instance_topic (user_id, topic, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# ── DECISION_JOURNAL_ENTRY ─────────────────────────────────────────────────
+# SQL-backed replacement for agent/decision_journal.py's registry/
+# decisions/{user_id}.json ("точка ноль"). Class C: add_outcome()/
+# add_self_correction() legitimately revise an existing entry in place
+# (same shape as verification_run's own narrow post-creation mutation).
+DECISION_JOURNAL_ENTRY = """
+CREATE TABLE IF NOT EXISTS decision_journal_entry (
+    decision_id      VARCHAR(40) PRIMARY KEY,
+    user_id          VARCHAR(64) NOT NULL,
+    event_type       VARCHAR(40) NOT NULL,
+    event_text       VARCHAR(500) NOT NULL,
+    context          JSON NULL,
+    analysis         JSON NULL,
+    alternatives     JSON NULL,
+    decision         VARCHAR(120) NOT NULL,
+    confidence       FLOAT NOT NULL DEFAULT 0.7,
+    outcome          JSON NULL,
+    self_correction  JSON NULL,
+    created_at       DATETIME NOT NULL,
+    updated_at       DATETIME NOT NULL,
+    KEY idx_dje_user (user_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# ── EXPERIENCE ──────────────────────────────────────────────────────────────
+# SQL-backed replacement for agent/experience_memory.py's registry/
+# experiences/{user_id}.json ("точка ноль"). Class C: get_experience()/
+# update_success() legitimately mutate used_count/success/user_reaction
+# in place. No more silent 200-entry cap.
+EXPERIENCE = """
+CREATE TABLE IF NOT EXISTS experience (
+    experience_id  VARCHAR(40) PRIMARY KEY,
+    user_id        VARCHAR(64) NOT NULL,
+    speech_act     VARCHAR(40) NOT NULL,
+    topic          VARCHAR(60) NOT NULL,
+    query          TEXT NOT NULL,
+    response       TEXT NOT NULL,
+    user_reaction  TEXT NULL,
+    success        FLOAT NOT NULL DEFAULT 0.5,
+    used_count     INT NOT NULL DEFAULT 0,
+    context        JSON NULL,
+    created_at     DATETIME NOT NULL,
+    KEY idx_experience_user_act (user_id, speech_act, topic)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# ── SECRET_ARCHIVE_QUESTION ─────────────────────────────────────────────────
+# SQL-backed replacement for agent/secret_archive.py's registry/
+# secret_archive/{user_id}.json ("точка ноль"). Class C: answer_
+# question() revises answered/answer/answer_time in place.
+SECRET_ARCHIVE_QUESTION = """
+CREATE TABLE IF NOT EXISTS secret_archive_question (
+    question_id  VARCHAR(40) PRIMARY KEY,
+    user_id      VARCHAR(64) NOT NULL,
+    query        VARCHAR(500) NOT NULL,
+    reason       VARCHAR(255) NULL,
+    context      JSON NULL,
+    answered     BOOLEAN NOT NULL DEFAULT FALSE,
+    answer       TEXT NULL,
+    answer_time  DATETIME NULL,
+    created_at   DATETIME NOT NULL,
+    KEY idx_saq_user (user_id, answered, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# ── INNER_STATE / INNER_STATE_EVENT ───────────────────────────────────────
+# SQL-backed replacement for agent/inner_state.py's registry/
+# inner_states/{user_id}.json ("точка ноль"). INNER_STATE is the mutable
+# current-state row (class C); INNER_STATE_EVENT is APPEND-ONLY (class B)
+# — no more 200-cap on relationship history.
+INNER_STATE = """
+CREATE TABLE IF NOT EXISTS inner_state (
+    user_id      VARCHAR(64) PRIMARY KEY,
+    mood         VARCHAR(20) NOT NULL DEFAULT 'calm',
+    energy       FLOAT NOT NULL DEFAULT 70.0,
+    curiosity    FLOAT NOT NULL DEFAULT 60.0,
+    patience     FLOAT NOT NULL DEFAULT 50.0,
+    openness     FLOAT NOT NULL DEFAULT 60.0,
+    trust        FLOAT NOT NULL DEFAULT 50.0,
+    respect      FLOAT NOT NULL DEFAULT 50.0,
+    forgiveness  FLOAT NOT NULL DEFAULT 50.0,
+    affection    FLOAT NOT NULL DEFAULT 30.0,
+    pattern      VARCHAR(30) NOT NULL DEFAULT 'unknown',
+    current_feeling  VARCHAR(20) NOT NULL DEFAULT 'neutral',
+    current_intent   VARCHAR(20) NOT NULL DEFAULT 'listen',
+    current_tone     VARCHAR(20) NOT NULL DEFAULT 'neutral',
+    updated_at   DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+INNER_STATE_EVENT = """
+CREATE TABLE IF NOT EXISTS inner_state_event (
+    event_id     BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id      VARCHAR(64) NOT NULL,
+    event_type   VARCHAR(40) NOT NULL,
+    description  VARCHAR(255) NULL,
+    sincerity    FLOAT NOT NULL DEFAULT 0.5,
+    weight       FLOAT NOT NULL DEFAULT 0.0,
+    resolved     BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at   DATETIME NOT NULL,
+    KEY idx_ise_user (user_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# ── DISAGREEMENT ─────────────────────────────────────────────────────────
+# SQL-backed replacement for agent/disagreement_engine.py's registry/
+# disagreements.json ("точка ноль"). APPEND-ONLY (class B) — an argument
+# episode is a historical event, never rewritten.
+DISAGREEMENT = """
+CREATE TABLE IF NOT EXISTS disagreement (
+    disagreement_id     VARCHAR(20) PRIMARY KEY,
+    topic                VARCHAR(120) NOT NULL,
+    old_position         TEXT NOT NULL,
+    challenge            TEXT NOT NULL,
+    analysis             TEXT NOT NULL,
+    new_position         TEXT NOT NULL,
+    confidence_before    FLOAT NOT NULL,
+    confidence_after     FLOAT NOT NULL,
+    resolved             BOOLEAN NOT NULL DEFAULT TRUE,
+    related_belief_id    VARCHAR(20) NULL,
+    created_at           DATETIME NOT NULL,
+    KEY idx_disagreement_topic (topic, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# ── TRAIT_GRAPH / TRAIT_CHANGE / TRAIT_EDGE_CHANGE / INTERNAL_QUESTION /
+#    INTERNAL_QUESTION_ANSWER ────────────────────────────────────────────
+# SQL-backed replacement for agent/personality_graph.py's registry/
+# personality_graph.json + registry/internal_questions.json ("точка
+# ноль"). Distinct from PERSONALITY/PERSONALITY_CHANGE above — a
+# different, independently-evolving subsystem (a weighted trait GRAPH
+# with propagating changes, not personality_core.py's flat trait list) —
+# named to avoid any collision. TRAIT_GRAPH is a singleton (class C,
+# same `id` CHECK pattern); node/edge topology is static seed config
+# (ported to Python defaults, not a table — only VALUES/WEIGHTS mutate).
+# TRAIT_CHANGE/TRAIT_EDGE_CHANGE are APPEND-ONLY (class B), replacing the
+# old JSON's 50-cap/20-cap history. INTERNAL_QUESTION/_ANSWER are
+# APPEND-ONLY (class B) — no more per-question 10-cap on answers.
+TRAIT_GRAPH = """
+CREATE TABLE IF NOT EXISTS trait_graph (
+    id           TINYINT NOT NULL PRIMARY KEY DEFAULT 1,
+    nodes        JSON NOT NULL,
+    edges        JSON NOT NULL,
+    updated_at   DATETIME NOT NULL,
+    CONSTRAINT chk_trait_graph_singleton CHECK (id = 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+TRAIT_CHANGE = """
+CREATE TABLE IF NOT EXISTS trait_change (
+    change_id   BIGINT AUTO_INCREMENT PRIMARY KEY,
+    node        VARCHAR(60) NOT NULL,
+    new_value   FLOAT NOT NULL,
+    source      VARCHAR(60) NULL,
+    created_at  DATETIME NOT NULL,
+    KEY idx_trait_change_node (node, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+TRAIT_EDGE_CHANGE = """
+CREATE TABLE IF NOT EXISTS trait_edge_change (
+    change_id    BIGINT AUTO_INCREMENT PRIMARY KEY,
+    source_node  VARCHAR(60) NOT NULL,
+    target_node  VARCHAR(60) NOT NULL,
+    old_weight   FLOAT NOT NULL,
+    new_weight   FLOAT NOT NULL,
+    created_at   DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+INTERNAL_QUESTION = """
+CREATE TABLE IF NOT EXISTS internal_question (
+    question_id    BIGINT AUTO_INCREMENT PRIMARY KEY,
+    question_text  VARCHAR(500) NOT NULL,
+    created_at     DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+INTERNAL_QUESTION_ANSWER = """
+CREATE TABLE IF NOT EXISTS internal_question_answer (
+    answer_id     BIGINT AUTO_INCREMENT PRIMARY KEY,
+    question_id   BIGINT NOT NULL,
+    answer_text   TEXT NOT NULL,
+    created_at    DATETIME NOT NULL,
+    CONSTRAINT fk_iqa_question FOREIGN KEY (question_id)
+        REFERENCES internal_question(question_id),
+    KEY idx_iqa_question (question_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# ── SELF_REFLECTION_PROFILE ──────────────────────────────────────────────
+# SQL-backed replacement for agent/self_reflection_analyzer.py's
+# registry/yandi_profile.json ("точка ноль"). desires/fears/likes/
+# dislikes/limits were never actually mutated at runtime in the old
+# code (confirmed before this rewrite) — only reflections_count grows —
+# so this is a singleton (class C) like PERSONALITY, not an append-only
+# history table.
+SELF_REFLECTION_PROFILE = """
+CREATE TABLE IF NOT EXISTS self_reflection_profile (
+    id                  TINYINT NOT NULL PRIMARY KEY DEFAULT 1,
+    desires             JSON NOT NULL,
+    fears               JSON NOT NULL,
+    likes               JSON NOT NULL,
+    dislikes            JSON NOT NULL,
+    limitations         JSON NOT NULL,
+    reflections_count   INT NOT NULL DEFAULT 0,
+    updated_at          DATETIME NOT NULL,
+    CONSTRAINT chk_self_reflection_profile_singleton CHECK (id = 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# ── SOCIAL_KNOWLEDGE ─────────────────────────────────────────────────────
+# SQL-backed replacement for agent/research_engine.py's registry/
+# social_knowledge/{speech_act}_{topic}.json ("точка ноль"). Class C:
+# update_knowledge() legitimately revises an existing row in place.
+# Builtin seed knowledge stays a Python default (never persisted) —
+# same "don't table what's really static config" choice as PERSONALITY's
+# own DEFAULT_TRAITS.
+SOCIAL_KNOWLEDGE = """
+CREATE TABLE IF NOT EXISTS social_knowledge (
+    speech_act            VARCHAR(40) NOT NULL,
+    topic                 VARCHAR(60) NOT NULL,
+    description           TEXT NOT NULL,
+    typical_reactions     JSON NULL,
+    cultural_context      TEXT NULL,
+    boundaries            JSON NULL,
+    recommended_approach  TEXT NULL,
+    examples              JSON NULL,
+    source                VARCHAR(20) NOT NULL DEFAULT 'research',
+    confidence            FLOAT NOT NULL DEFAULT 0.5,
+    created_at            DATETIME NOT NULL,
+    updated_at            DATETIME NOT NULL,
+    PRIMARY KEY (speech_act, topic)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
 # ── INSTANCE_IDENTITY ────────────────────────────────────────────────────
 # DATABASE BOOTSTRAP V1, mandate §4. Classified "A" (canonical immutable
 # identity, TABLE_CLASSIFICATION's own definition: "one row per identity,
@@ -1119,6 +1416,23 @@ ALL_TABLES_IN_ORDER = [
     ("family_status_state", FAMILY_STATUS_STATE),
     ("knowledge_record", KNOWLEDGE_RECORD),
     ("peer_config", PEER_CONFIG),
+    ("biography", BIOGRAPHY),
+    ("biography_event", BIOGRAPHY_EVENT),
+    ("context_topic", CONTEXT_TOPIC),
+    ("context_instance", CONTEXT_INSTANCE),
+    ("decision_journal_entry", DECISION_JOURNAL_ENTRY),
+    ("experience", EXPERIENCE),
+    ("secret_archive_question", SECRET_ARCHIVE_QUESTION),
+    ("inner_state", INNER_STATE),
+    ("inner_state_event", INNER_STATE_EVENT),
+    ("disagreement", DISAGREEMENT),
+    ("trait_graph", TRAIT_GRAPH),
+    ("trait_change", TRAIT_CHANGE),
+    ("trait_edge_change", TRAIT_EDGE_CHANGE),
+    ("internal_question", INTERNAL_QUESTION),
+    ("internal_question_answer", INTERNAL_QUESTION_ANSWER),
+    ("self_reflection_profile", SELF_REFLECTION_PROFILE),
+    ("social_knowledge", SOCIAL_KNOWLEDGE),
     ("instance_identity", INSTANCE_IDENTITY),
 ]
 
@@ -1187,6 +1501,23 @@ TABLE_CLASSIFICATION = {
     "family_status_state": "C",
     "knowledge_record": "C",
     "peer_config": "C",
+    "biography": "C",
+    "biography_event": "B",
+    "context_topic": "C",
+    "context_instance": "B",
+    "decision_journal_entry": "C",
+    "experience": "C",
+    "secret_archive_question": "C",
+    "inner_state": "C",
+    "inner_state_event": "B",
+    "disagreement": "B",
+    "trait_graph": "C",
+    "trait_change": "B",
+    "trait_edge_change": "B",
+    "internal_question": "B",
+    "internal_question_answer": "B",
+    "self_reflection_profile": "C",
+    "social_knowledge": "C",
     "verification_run": "D",
     "instance_identity": "A",
 }
