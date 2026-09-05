@@ -182,6 +182,46 @@ ALTER TABLE verification_run
         REFERENCES answer_version(answer_id);
 """
 
+# "Точка ноль" v13: source_observation already existed live (pre-dates
+# this migration, built under the earlier "Этап 5" pass) — CREATE TABLE
+# IF NOT EXISTS above is a silent no-op against that existing table, so
+# these 16 new EvidenceRecord-fidelity columns need their own explicit
+# ALTER, one statement per column (pymysql's cursor.execute() does not
+# run multiple ;-separated statements in one call) — each becomes its
+# own (name, ddl) entry in ALTER_STATEMENTS_IN_ORDER below, so
+# migrate.py's existing per-statement "Duplicate column name"/"already
+# exists" idempotency catch (see apply()) skips exactly the columns
+# already present on a partial/re-run, never the whole batch.
+SOURCE_OBSERVATION_V13_COLUMN_DDL = {
+    "evidence_id": "VARCHAR(20) NULL",
+    "source_title": "VARCHAR(500) NULL",
+    "retrieval_query": "VARCHAR(500) NULL",
+    "retrieval_rank": "INT NULL",
+    "relevance_to_query": "FLOAT NULL",
+    "authority": "FLOAT NULL",
+    "traceability": "FLOAT NULL",
+    "primaryness": "FLOAT NULL",
+    "is_meta_pipeline_output": "BOOLEAN NOT NULL DEFAULT FALSE",
+    "is_subject_matter_evidence": "BOOLEAN NOT NULL DEFAULT TRUE",
+    "source_cluster_id": "VARCHAR(40) NULL",
+    "origin_source_cluster_id": "VARCHAR(40) NULL",
+    "retrieval_claim_id": "VARCHAR(20) NULL",
+    "route_side": "VARCHAR(20) NULL",
+    "subject_entities": "JSON NULL",
+    "fact_candidates": "JSON NULL",
+    "supports_query_aspect": "JSON NULL",
+}
+
+SOURCE_OBSERVATION_V13_ALTERS = [
+    (
+        f"source_observation.{col} column",
+        f"ALTER TABLE source_observation ADD COLUMN {col} {coldef};",
+    )
+    for col, coldef in SOURCE_OBSERVATION_V13_COLUMN_DDL.items()
+] + [
+    ("source_observation.evidence_id index", "ALTER TABLE source_observation ADD KEY idx_so_evidence_id (evidence_id);"),
+]
+
 # ── CLAIM_FAMILY / FAMILY_MEMBER / CLAIM_OCCURRENCE ─────────────────────
 # CLAIM_FAMILY.canonical_text is write-once (confirmed immutable in the
 # current Python implementation, agent/claim_family_registry.py — no
@@ -1531,7 +1571,7 @@ ALL_TABLES_IN_ORDER = [
 # Deferred ALTER (needs answer_version to already exist).
 ALTER_STATEMENTS_IN_ORDER = [
     ("verification_run.final_answer_id FK", VERIFICATION_RUN_FINAL_ANSWER_FK),
-]
+] + SOURCE_OBSERVATION_V13_ALTERS
 
 # Truth-claiming vocabulary is explicitly BANNED from this schema
 # (mandate §1/§14) — a regression test greps every DDL string above for
