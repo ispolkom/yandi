@@ -46,7 +46,7 @@ DESIGN NOTES (read before changing a table):
    no HTTP retry chatter. RUN_ERROR is 5 columns, not a log warehouse.
 """
 
-SCHEMA_VERSION = 13  # v13: source_observation gains full EvidenceRecord fidelity + trace_record + delayed_validation_event ("точка ноль" — the live evidence-memory/trace system, orch_tracer.py + verification_memory.py, retired from its JSONL source of truth)
+SCHEMA_VERSION = 14  # v14: knowledge_query_archive ("точка ноль" — agent/db/manager.py's sqlite KnowledgeDB query-log + moderation-queue system retired from registry/index.db + registry/knowledge/*.db)
 
 SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1478,6 +1478,48 @@ CREATE TABLE IF NOT EXISTS social_knowledge (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
+# ── KNOWLEDGE_QUERY_ARCHIVE ──────────────────────────────────────────────
+# "Точка ноль" v14 (owner mandate, 2026-09): agent/db/manager.py's own
+# sqlite KnowledgeDB (registry/index.db + registry/knowledge/{category}.db
+# files) retired. Every delivered answer is archived here unconditionally
+# (agent/orch_query_archive.py::record_query(), called from writeback.py's
+# archive_query() on every synthesized answer) — this is the full query
+# log + human moderation queue (agent/orch_query_archive.py's list_by_tag/
+# tag_stats/stats + pet/chat_orch.py's list_unverified/verify/
+# update_answer/delete), NOT the same thing as knowledge_record above
+# (which is the curated, arbiter-confirmed registry, a separate live path
+# — write_from_arbiter(), fires only on VERIFIED/PARTIALLY_VERIFIED
+# background-validation verdicts). The old sqlite schema's two-file split
+# (a small "index" db + one knowledge db per category) existed only to
+# keep the sqlite index fast/small; a single indexed MySQL table replaces
+# both. The old schema's separate traces/traces_index tables and
+# save_trace()/get_trace()/gold_dataset() are NOT migrated — confirmed
+# zero live callers (only agent/db/migrate.py, a one-time, already-
+# disposable import tool for a pre-"точка ноль" external dataset drive).
+KNOWLEDGE_QUERY_ARCHIVE = """
+CREATE TABLE IF NOT EXISTS knowledge_query_archive (
+    entry_id      VARCHAR(20) PRIMARY KEY,   -- md5(query.lower().strip())[:8]
+    query         TEXT NOT NULL,
+    answer        TEXT NOT NULL,
+    tag           VARCHAR(100) NOT NULL,
+    category      VARCHAR(50) NOT NULL,
+    trust_level   VARCHAR(20) NOT NULL DEFAULT 'UNVERIFIED',
+    confidence    FLOAT NOT NULL DEFAULT 0.0,
+    sources       JSON NULL,
+    node_id       VARCHAR(50) NOT NULL DEFAULT '',
+    version       INT NOT NULL DEFAULT 1,
+    meta          JSON NULL,
+    created_at    DATETIME NOT NULL,
+    updated_at    DATETIME NOT NULL,
+    KEY idx_kqa_tag (tag),
+    KEY idx_kqa_category (category),
+    KEY idx_kqa_trust (trust_level),
+    KEY idx_kqa_node (node_id),
+    KEY idx_kqa_updated (updated_at),
+    KEY idx_kqa_confidence (confidence)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
 # ── INSTANCE_IDENTITY ────────────────────────────────────────────────────
 # DATABASE BOOTSTRAP V1, mandate §4. Classified "A" (canonical immutable
 # identity, TABLE_CLASSIFICATION's own definition: "one row per identity,
@@ -1565,6 +1607,7 @@ ALL_TABLES_IN_ORDER = [
     ("internal_question_answer", INTERNAL_QUESTION_ANSWER),
     ("self_reflection_profile", SELF_REFLECTION_PROFILE),
     ("social_knowledge", SOCIAL_KNOWLEDGE),
+    ("knowledge_query_archive", KNOWLEDGE_QUERY_ARCHIVE),
     ("instance_identity", INSTANCE_IDENTITY),
 ]
 
@@ -1654,4 +1697,5 @@ TABLE_CLASSIFICATION = {
     "social_knowledge": "C",
     "verification_run": "D",
     "instance_identity": "A",
+    "knowledge_query_archive": "C",
 }

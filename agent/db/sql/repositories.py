@@ -2535,3 +2535,138 @@ def upsert_social_knowledge(
                 confidence, created_at, updated_at,
             ),
         )
+
+
+# ============================================================
+# KNOWLEDGE_QUERY_ARCHIVE — "точка ноль" v14, replaces agent/db/manager.
+# py's sqlite KnowledgeDB (registry/index.db + registry/knowledge/*.db).
+# ============================================================
+
+_KNOWLEDGE_QUERY_ARCHIVE_JSON_COLUMNS = ("sources", "meta")
+
+
+def _decode_knowledge_query_archive_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    for col in _KNOWLEDGE_QUERY_ARCHIVE_JSON_COLUMNS:
+        if row.get(col) is not None and isinstance(row[col], str):
+            row[col] = json.loads(row[col])
+    return row
+
+
+def record_knowledge_query(
+    conn, entry_id: str, query: str, answer: str, tag: str, category: str,
+    trust_level: str = "UNVERIFIED", confidence: float = 0.0,
+    sources: Optional[List[str]] = None, node_id: str = "",
+    meta: Optional[Dict[str, Any]] = None, created_at=None, updated_at=None,
+) -> None:
+    """Mirrors the old KnowledgeDB.save_knowledge()'s exact upsert guard:
+    a row already marked VERIFIED is never silently downgraded by a later
+    write, unless that later write is ITSELF marking it VERIFIED again
+    (e.g. re-verification). `trust_level`/`VALUES(trust_level)` inside
+    the ON DUPLICATE KEY clause read the EXISTING row / the incoming
+    value respectively — same semantics as the old sqlite WHERE clause."""
+    created_at = _coerce_datetime(created_at) or _now()
+    updated_at = _coerce_datetime(updated_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO knowledge_query_archive "
+            "(entry_id, query, answer, tag, category, trust_level, confidence, sources, "
+            " node_id, version, meta, created_at, updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE "
+            "answer = IF(trust_level != 'VERIFIED' OR VALUES(trust_level) = 'VERIFIED', VALUES(answer), answer), "
+            "trust_level = IF(trust_level != 'VERIFIED' OR VALUES(trust_level) = 'VERIFIED', VALUES(trust_level), trust_level), "
+            "confidence = IF(trust_level != 'VERIFIED' OR VALUES(trust_level) = 'VERIFIED', VALUES(confidence), confidence), "
+            "sources = IF(trust_level != 'VERIFIED' OR VALUES(trust_level) = 'VERIFIED', VALUES(sources), sources), "
+            "node_id = IF(trust_level != 'VERIFIED' OR VALUES(trust_level) = 'VERIFIED', VALUES(node_id), node_id), "
+            "meta = IF(trust_level != 'VERIFIED' OR VALUES(trust_level) = 'VERIFIED', VALUES(meta), meta), "
+            "version = IF(trust_level != 'VERIFIED' OR VALUES(trust_level) = 'VERIFIED', version + 1, version), "
+            "updated_at = IF(trust_level != 'VERIFIED' OR VALUES(trust_level) = 'VERIFIED', VALUES(updated_at), updated_at)",
+            (
+                entry_id, query, answer, tag, category, trust_level, confidence,
+                json.dumps(sources or []), node_id,
+                json.dumps(meta or {}), created_at, updated_at,
+            ),
+        )
+
+
+def get_knowledge_query(conn, entry_id: str) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM knowledge_query_archive WHERE entry_id=%s", (entry_id,))
+        row = cur.fetchone()
+    return _decode_knowledge_query_archive_json(row) if row else None
+
+
+def set_knowledge_query_verified(conn, entry_id: str, updated_at=None) -> bool:
+    updated_at = _coerce_datetime(updated_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE knowledge_query_archive SET trust_level='VERIFIED', updated_at=%s WHERE entry_id=%s",
+            (updated_at, entry_id),
+        )
+        return cur.rowcount > 0
+
+
+def update_knowledge_query_answer(
+    conn, entry_id: str, answer: str, trust_level: str = "VERIFIED", updated_at=None,
+) -> bool:
+    updated_at = _coerce_datetime(updated_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE knowledge_query_archive SET answer=%s, trust_level=%s, "
+            "version=version+1, updated_at=%s WHERE entry_id=%s",
+            (answer, trust_level, updated_at, entry_id),
+        )
+        return cur.rowcount > 0
+
+
+def delete_knowledge_query(conn, entry_id: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM knowledge_query_archive WHERE entry_id=%s", (entry_id,))
+        return cur.rowcount > 0
+
+
+def list_unverified_knowledge_queries(conn, limit: int = 30) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT entry_id, query, answer, tag, confidence, created_at "
+            "FROM knowledge_query_archive WHERE trust_level != 'VERIFIED' "
+            "ORDER BY created_at DESC LIMIT %s",
+            (limit,),
+        )
+        return cur.fetchall()
+
+
+def list_knowledge_queries_by_tag(
+    conn, tag: str, limit: int = 100, min_confidence: float = 0.0,
+) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM knowledge_query_archive WHERE (tag=%s OR tag LIKE %s) "
+            "AND confidence >= %s ORDER BY created_at DESC LIMIT %s",
+            (tag, f"{tag}:%", min_confidence, limit),
+        )
+        rows = cur.fetchall()
+    return [_decode_knowledge_query_archive_json(r) for r in rows]
+
+
+def list_knowledge_query_tags(conn) -> List[str]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT tag FROM knowledge_query_archive ORDER BY tag")
+        return [r["tag"] for r in cur.fetchall()]
+
+
+def knowledge_query_archive_stats(conn) -> Dict[str, Any]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT category FROM knowledge_query_archive ORDER BY category")
+        categories = [r["category"] for r in cur.fetchall()]
+        cur.execute("SELECT COUNT(*) AS c FROM knowledge_query_archive")
+        total = cur.fetchone()
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_query_archive WHERE trust_level='VERIFIED'"
+        )
+        verified = cur.fetchone()
+    return {
+        "categories": categories,
+        "knowledge": int(total["c"]) if total else 0,
+        "verified": int(verified["c"]) if verified else 0,
+    }
