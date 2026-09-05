@@ -66,12 +66,14 @@ def _noop_log(*a, **k):
 
 _src = inspect.getsource(status_mod)
 _pos_json_persist = _src.find("persist_verification_evidence(trace, claims_data, evidence_data")
-_pos_shadow = _src.find("shadow_record_claims_and_evidence(")
+_pos_shadow = _src.find("record_claims_and_evidence(")
 _pos_if_block = _src.find("if evidence_data is not None:")
 
 check(
-    "A: shadow_record_claims_and_evidence is called AFTER the JSON persist_verification_evidence "
-    "call, inside the same 'if evidence_data is not None' block",
+    "A: record_claims_and_evidence (\"точка ноль\" v13 PRIMARY, LOSSLESS — the old "
+    "shadow_record_claims_and_evidence is now dead code at this call site) is called "
+    "AFTER the JSON persist_verification_evidence call, inside the same "
+    "'if evidence_data is not None' block",
     -1 < _pos_if_block < _pos_json_persist < _pos_shadow,
     f"if_block={_pos_if_block} json={_pos_json_persist} shadow={_pos_shadow}",
 )
@@ -272,10 +274,19 @@ check(
 )
 
 # ============================================================
-# E. finalize_claim_trace_and_grounding()'s own behavior is unaffected
-# by the SQL wiring sitting next to its existing JSON persist call
-# (real function, real Trace, SQL genuinely unconfigured).
+# E. "точка ноль" v13 UPDATE (owner mandate, 2026-09): record_claims_and_
+# evidence() is now PRIMARY, FAIL LOUD — there is no more shadow fallback
+# for it to stay inert against. With SQL genuinely unreachable (this
+# environment's real state), finalize_claim_trace_and_grounding() now
+# correctly RAISES SqlUnavailable instead of returning its normal tuple —
+# the deliberate opposite of the old shadow-write "inert when unreachable"
+# contract this check used to verify (same update already applied to
+# db_sql_wiring_regression_test.py's checks C/D). The in-memory Trace
+# mutation (persist_verification_evidence, which runs BEFORE the SQL
+# call per check A's ordering) is still unaffected.
 # ============================================================
+
+from agent.db.sql.connection import SqlUnavailable
 
 traces_dir = Path(tempfile.mkdtemp(prefix="p10_claimshadow_"))
 with patch.object(ot, "TRACES_DIR", traces_dir):
@@ -290,15 +301,25 @@ with patch.object(ot, "TRACES_DIR", traces_dir):
     evidence_e = [{"evidence_id": "ev_e1", "route": "internet", "source_uri": "https://x.example/e1",
                     "content_excerpt": "excerpt", "observed_at": 0.0}]
 
-    result = status_mod.finalize_claim_trace_and_grounding(
-        claims_e, trace, [], 0.5, _noop_log, False, evidence_data=evidence_e,
-    )
+    _raised_e = None
+    try:
+        result = status_mod.finalize_claim_trace_and_grounding(
+            claims_e, trace, [], 0.5, _noop_log, False, evidence_data=evidence_e,
+        )
+    except SqlUnavailable as e:
+        _raised_e = e
 
 check(
-    "E: finalize_claim_trace_and_grounding() still returns its normal "
-    "(epistemic_grounding, support_grounding) tuple with the SQL wiring present",
-    isinstance(result, tuple) and len(result) == 2,
-    f"{result}",
+    "E: finalize_claim_trace_and_grounding() with SQL genuinely unreachable raises "
+    "SqlUnavailable — \"точка ноль\": no more shadow-write fallback for it to stay inert against",
+    _raised_e is not None,
+    f"{_raised_e}",
+)
+check(
+    "E: the in-memory Trace evidence build (persist_verification_evidence, which runs "
+    "BEFORE the SQL call) still happened despite the later SqlUnavailable",
+    len(trace.evidence) == 1 and trace.evidence[0].evidence_id == "ev_e1",
+    f"{trace.evidence}",
 )
 check(
     "E: the claim is still added to the trace (JSON path unaffected by the SQL wiring)",

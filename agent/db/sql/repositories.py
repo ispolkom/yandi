@@ -363,7 +363,21 @@ def record_source_observation(
     origin_observation_id: Optional[int] = None, observed_at=None,
     source_class: Optional[str] = None, quality_score: Optional[float] = None,
     content_excerpt: Optional[str] = None, rejection_reason: Optional[str] = None,
+    evidence_id: Optional[str] = None, source_title: Optional[str] = None,
+    retrieval_query: Optional[str] = None, retrieval_rank: Optional[int] = None,
+    relevance_to_query: Optional[float] = None, authority: Optional[float] = None,
+    traceability: Optional[float] = None, primaryness: Optional[float] = None,
+    is_meta_pipeline_output: bool = False, is_subject_matter_evidence: bool = True,
+    source_cluster_id: Optional[str] = None, origin_source_cluster_id: Optional[str] = None,
+    retrieval_claim_id: Optional[str] = None, route_side: Optional[str] = None,
+    subject_entities: Optional[List[str]] = None, fact_candidates: Optional[List[str]] = None,
+    supports_query_aspect: Optional[List[str]] = None,
 ) -> int:
+    """"Точка ноль" v13: captures the FULL agent.orch_schemas.
+    EvidenceRecord shape, not just the fields the pre-v13 "internet-only
+    best-effort shadow" needed — this is now the lossless, PRIMARY
+    record of one evidence observation (see agent.orch_tracer.py /
+    agent.verification_memory.py's own v13 rewrite)."""
     if rejection_reason is not None and rejection_reason not in REJECTION_REASONS:
         raise ValueError(f"rejection_reason {rejection_reason!r} not in controlled vocabulary {REJECTION_REASONS}")
     observed_at = _coerce_datetime(observed_at) or _now()
@@ -371,12 +385,273 @@ def record_source_observation(
         cur.execute(
             "INSERT INTO source_observation "
             "(resource_id, run_id, observation_route, origin_observation_id, observed_at, "
-            " source_class, quality_score, content_excerpt, rejection_reason) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            (resource_id, run_id, observation_route, origin_observation_id, observed_at,
-             source_class, quality_score, content_excerpt, rejection_reason),
+            " source_class, quality_score, content_excerpt, rejection_reason, evidence_id, "
+            " source_title, retrieval_query, retrieval_rank, relevance_to_query, authority, "
+            " traceability, primaryness, is_meta_pipeline_output, is_subject_matter_evidence, "
+            " source_cluster_id, origin_source_cluster_id, retrieval_claim_id, route_side, "
+            " subject_entities, fact_candidates, supports_query_aspect) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                resource_id, run_id, observation_route, origin_observation_id, observed_at,
+                source_class, quality_score, content_excerpt, rejection_reason, evidence_id,
+                source_title, retrieval_query, retrieval_rank, relevance_to_query, authority,
+                traceability, primaryness, is_meta_pipeline_output, is_subject_matter_evidence,
+                source_cluster_id, origin_source_cluster_id, retrieval_claim_id or None, route_side,
+                json.dumps(subject_entities) if subject_entities is not None else None,
+                json.dumps(fact_candidates) if fact_candidates is not None else None,
+                json.dumps(supports_query_aspect) if supports_query_aspect is not None else None,
+            ),
         )
         return cur.lastrowid
+
+
+def _decode_source_observation_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    for col in ("subject_entities", "fact_candidates", "supports_query_aspect"):
+        if row.get(col) is not None and isinstance(row[col], str):
+            row[col] = json.loads(row[col])
+    return row
+
+
+def get_source_observation(conn, observation_id: int) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM source_observation WHERE observation_id=%s", (observation_id,))
+        row = cur.fetchone()
+    return _decode_source_observation_json(row) if row else None
+
+
+def get_resource(conn, resource_id: int) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM source_resource WHERE resource_id=%s", (resource_id,))
+        return cur.fetchone()
+
+
+# ============================================================
+# "ТОЧКА НОЛЬ" v13 — evidence-memory LOAD path (replaces agent.
+# verification_memory.py's own byte-offset JSONL scan + claim_
+# verification_index sqlite locator table entirely).
+# ============================================================
+
+def find_claim_occurrences_by_content_hash(
+    conn, content_hash: str, limit: Optional[int] = None, exclude_run_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Every historical claim_occurrence with this exact content_hash,
+    newest-first (joins verification_run.started_at as the occurrence's
+    own timestamp — claim_occurrence carries no timestamp of its own,
+    and a claim's run start time is the same "when did this claim
+    appear" moment the old JSON locator's own `observed_at` recorded).
+    limit=None returns every historical occurrence (the OLD _query_
+    index_all()'s own "union across all past runs" contract);
+    limit=N mirrors _query_index()'s single-recent-occurrence LOAD."""
+    sql = (
+        "SELECT co.*, vr.started_at AS occurrence_observed_at FROM claim_occurrence co "
+        "JOIN verification_run vr ON vr.run_id = co.run_id "
+        "WHERE co.content_hash=%s"
+    )
+    params: List[Any] = [content_hash]
+    if exclude_run_id:
+        sql += " AND co.run_id != %s"
+        params.append(exclude_run_id)
+    sql += " ORDER BY vr.started_at DESC"
+    if limit is not None:
+        sql += " LIMIT %s"
+        params.append(limit)
+    with conn.cursor() as cur:
+        cur.execute(sql, tuple(params))
+        return cur.fetchall()
+
+
+def find_claim_occurrences_by_family(conn, family_id: str) -> List[Dict[str, Any]]:
+    """Every historical claim_occurrence ever linked into this semantic
+    family, newest-first — replaces _query_index_by_family()."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT co.*, vr.started_at AS occurrence_observed_at FROM claim_occurrence co "
+            "JOIN verification_run vr ON vr.run_id = co.run_id "
+            "WHERE co.family_id=%s ORDER BY vr.started_at DESC",
+            (family_id,),
+        )
+        return cur.fetchall()
+
+
+def _resolve_origin_chain(conn, observation_id: Optional[int], max_hops: int = 10):
+    """Walks source_observation.origin_observation_id back to the ROOT
+    (the observation with no origin_observation_id of its own) —
+    replaces the OLD JSON EvidenceRecord's own origin_route/
+    origin_trace_id/origin_observed_at/origin_source_cluster_id fields,
+    which were computed ONCE (at replay-creation time) and then just
+    carried forward unchanged on further replays-of-a-replay. Here the
+    chain is walked at READ time instead, giving the identical result
+    (the root never changes once observed) without needing to duplicate
+    those 4 fields onto every hop's own row.
+
+    Returns (root_route, root_run_id, root_observed_at,
+    root_source_cluster_id), or (None, None, None, None) if
+    observation_id is None. Bounded by max_hops (a real cycle would be a
+    data-integrity bug elsewhere, not something to hang on)."""
+    if observation_id is None:
+        return None, None, None, None
+    current_id = observation_id
+    row = None
+    for _ in range(max_hops):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT observation_id, run_id, observation_route, observed_at, "
+                "origin_observation_id, source_cluster_id FROM source_observation WHERE observation_id=%s",
+                (current_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None, None, None, None
+        if row["origin_observation_id"] is None:
+            return row["observation_route"], row["run_id"], row["observed_at"], row["source_cluster_id"]
+        current_id = row["origin_observation_id"]
+    # max_hops exhausted — return the last-seen row rather than looping forever.
+    return row["observation_route"], row["run_id"], row["observed_at"], row["source_cluster_id"]
+
+
+def list_evidence_for_claim(conn, claim_id: str) -> List[Dict[str, Any]]:
+    """Full EvidenceRecord-shaped reconstruction for every evidence_
+    relation on this claim_id — joins evidence_relation + source_
+    observation + source_resource, resolves the origin chain, and
+    returns dicts using the SAME keys agent.orch_schemas.EvidenceRecord
+    uses, so agent.verification_memory.py's callers need no reshaping.
+    Replaces _reconstruct_evidence()'s own byte-offset-JSONL-read +
+    manual dict-building."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT er.relation, er.directness, er.evidence_eligible, er.evidence_role, "
+            "so.* FROM evidence_relation er "
+            "JOIN source_observation so ON so.observation_id = er.observation_id "
+            "WHERE er.claim_id=%s",
+            (claim_id,),
+        )
+        rows = cur.fetchall()
+
+    results = []
+    for row in rows:
+        row = _decode_source_observation_json(row)
+        resource = get_resource(conn, row["resource_id"])
+        # Walk from THIS observation's own id, not row["origin_observation_id"] —
+        # a first-time (never-replayed) observation has origin_observation_id=None,
+        # and _resolve_origin_chain must still resolve it to ITSELF as root (its
+        # own route/run_id/observed_at), not short-circuit to all-None.
+        origin_route, origin_run_id, origin_observed_at, origin_cluster_id = _resolve_origin_chain(
+            conn, row["observation_id"]
+        )
+        results.append({
+            "evidence_id": row.get("evidence_id") or "",
+            "relation": row["relation"],
+            "directness": row.get("directness"),
+            "evidence_eligible": bool(row.get("evidence_eligible")),
+            "evidence_role": row.get("evidence_role"),
+            "source_type": resource["resource_type"] if resource else "web",
+            "source_uri": resource.get("canonical_uri") if resource else None,
+            "source_title": row.get("source_title") or "",
+            "content_excerpt": row.get("content_excerpt") or "",
+            "relevance_to_query": row.get("relevance_to_query") or 0.0,
+            "quality_score": row.get("quality_score") or 0.0,
+            "source_class": row.get("source_class") or "unknown",
+            "authority": row.get("authority") or 0.0,
+            "traceability": row.get("traceability") or 0.0,
+            "primaryness": row.get("primaryness") or 0.0,
+            "is_meta_pipeline_output": bool(row.get("is_meta_pipeline_output")),
+            "is_subject_matter_evidence": bool(row.get("is_subject_matter_evidence", True)),
+            "source_cluster_id": row.get("source_cluster_id"),
+            "retrieval_claim_id": row.get("retrieval_claim_id") or "",
+            "route_side": row.get("route_side") or "",
+            "route": row["observation_route"],
+            "observed_at": row.get("observed_at"),
+            "from_memory": row["observation_route"] == "local_memory",
+            "origin_route": origin_route,
+            "origin_trace_id": origin_run_id,
+            "origin_observed_at": origin_observed_at,
+            "origin_source_cluster_id": origin_cluster_id,
+            "node_id": resource.get("node_id") if resource else None,
+            "validator_id": resource.get("validator_id") if resource else None,
+            "model_id": resource.get("model_id") if resource else None,
+            "subject_entities": row.get("subject_entities") or [],
+            "fact_candidates": row.get("fact_candidates") or [],
+            "supports_query_aspect": row.get("supports_query_aspect") or [],
+        })
+    return results
+
+
+# ============================================================
+# TRACE_RECORD — "envelope" fields of agent.orch_tracer.Trace with no
+# other SQL home (question/answer/trust/claims/evidence all live
+# elsewhere already — see schema.py's own TRACE_RECORD comment).
+# ============================================================
+
+_TRACE_RECORD_JSON_COLUMNS = ("execution", "reasoning", "cost", "epistemic", "outcome", "learning", "confidence_evolution", "rejected_claims")
+
+
+def _decode_trace_record_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    for col in _TRACE_RECORD_JSON_COLUMNS:
+        if row.get(col) is not None and isinstance(row[col], str):
+            row[col] = json.loads(row[col])
+    return row
+
+
+def record_trace_record(
+    conn, run_id: str, execution=None, reasoning=None, cost=None, epistemic=None,
+    outcome=None, learning=None, confidence_evolution=None, rejected_claims=None,
+    claims_filtered_count: int = 0, claims_rejected_count: int = 0, created_at=None,
+) -> None:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO trace_record (run_id, execution, reasoning, cost, epistemic, outcome, "
+            "learning, confidence_evolution, rejected_claims, claims_filtered_count, "
+            "claims_rejected_count, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                run_id,
+                json.dumps(execution) if execution is not None else None,
+                json.dumps(reasoning) if reasoning is not None else None,
+                json.dumps(cost) if cost is not None else None,
+                json.dumps(epistemic) if epistemic is not None else None,
+                json.dumps(outcome) if outcome is not None else None,
+                json.dumps(learning) if learning is not None else None,
+                json.dumps(confidence_evolution) if confidence_evolution is not None else None,
+                json.dumps(rejected_claims) if rejected_claims is not None else None,
+                claims_filtered_count, claims_rejected_count, created_at,
+            ),
+        )
+
+
+def get_trace_record(conn, run_id: str) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM trace_record WHERE run_id=%s", (run_id,))
+        row = cur.fetchone()
+    return _decode_trace_record_json(row) if row else None
+
+
+# ============================================================
+# DELAYED_VALIDATION_EVENT
+# ============================================================
+
+def record_delayed_validation_event(
+    conn, event_id: str, run_id: Optional[str], trace_found: bool, original_trust: Optional[str],
+    source: str, verdict: str, reason: Optional[str] = None, raw: Optional[str] = None, created_at=None,
+) -> None:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO delayed_validation_event (event_id, run_id, trace_found, original_trust, "
+            "source, verdict, reason, raw, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (event_id, run_id or None, trace_found, original_trust, source, verdict,
+             (reason or "")[:500] or None, (raw or "")[:2000] or None, created_at),
+        )
+
+
+def list_delayed_validation_events(conn, run_id: str, limit: int = 30) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM delayed_validation_event WHERE run_id=%s ORDER BY created_at DESC LIMIT %s",
+            (run_id, limit),
+        )
+        rows = cur.fetchall()
+    rows.reverse()
+    return rows
 
 
 def record_evidence_relation(

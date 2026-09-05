@@ -5,23 +5,23 @@ into agent/orchestrator_v2.py (question+run start) and agent/
 orchestrator/response/writeback.py (answer+assessment+run completion).
 
 Covers:
-    A. structural: shadow_record_question_and_run is called in
+    A. structural: record_question_and_run is called in
        orchestrator_v2.py's real production source, before pre_pipeline
        runs (earliest point the raw query text + trace_id both exist).
-    B. structural: shadow_complete_run is called in writeback.py's real
+    B. structural: complete_run is called in writeback.py's real
        production source, at/after the delivered_answer_text capture
        point (same value, not a stale synthesis_result.answer).
-    C. functional: run_optimistic_respond() with no SQL configured
-       behaves byte-identically (return value, trace observations)
-       whether or not the shadow_complete_run call is present — proven
-       here by calling the REAL function (SQL genuinely unconfigured in
-       this environment) and checking nothing about its return value or
-       trace mutations differs from the pre-wiring regression suite's
-       own expectations (agent/answer_delivery_persistence_regression_
-       test.py, re-run unmodified, still green — cross-referenced here).
-    D. sql_question_id defaults to None and does not break
-       run_optimistic_respond() when omitted (backward-compatible
-       parameter addition).
+    C. functional, "точка ноль" v13 UPDATE (owner mandate, 2026-09):
+       complete_run()/DecisionTracer.save_trace() are now PRIMARY, FAIL
+       LOUD — there is no more JSON/JSONL fallback for question/answer/
+       trust/trace-envelope data to quietly degrade to. With SQL
+       genuinely unreachable, run_optimistic_respond() now correctly
+       RAISES SqlUnavailable instead of returning a normal response —
+       the deliberate opposite of the old shadow-write "inert when
+       unreachable" contract this check used to verify.
+    D. sql_question_id defaults to None and does not change WHERE the
+       SqlUnavailable comes from (still tracer.save_trace(), since
+       complete_run() itself no-ops on question_id=None either way).
 
 Run: /home/iam/venv/bin/python3 -m agent.db_sql_wiring_regression_test
 """
@@ -61,14 +61,14 @@ def _noop_log(*a, **k):
 # ============================================================
 
 _src_v2 = inspect.getsource(orch_v2_mod)
-_pos_shadow_start = _src_v2.find("_sql_question = shadow_record_question_and_run(")
+_pos_shadow_start = _src_v2.find("_sql_question = record_question_and_run(")
 _pos_decision_started = _src_v2.find('event_type="DecisionStarted"')
 _pos_pre_pipeline = _src_v2.find("run_pre_pipeline(")
 
 check(
-    "A: shadow_record_question_and_run is called BEFORE the DecisionStarted event "
+    "A: record_question_and_run is called BEFORE the DecisionStarted event "
     "AND BEFORE run_pre_pipeline ('живая память' ordering fix: decision_event.run_id "
-    "carries a real FK to the verification_run row shadow_record_question_and_run() "
+    "carries a real FK to the verification_run row record_question_and_run() "
     "creates — recording DecisionStarted first would silently lose every request's "
     "own first, most important event to a swallowed FK violation; still runs before "
     "any of pre_pipeline's ~11 early-return short-circuits)",
@@ -83,18 +83,18 @@ check(
 
 _src_wb = inspect.getsource(wb)
 _pos_observation = _src_wb.find('trace.add_observation("delivered_answer_text"')
-_pos_shadow_complete = _src_wb.find("shadow_complete_run(")
+_pos_shadow_complete = _src_wb.find("complete_run(")
 _pos_save_trace = _src_wb.find("tracer.save_trace(trace)")
 
 check(
-    "B: shadow_complete_run is called AFTER delivered_answer_text is captured "
+    "B: complete_run is called AFTER delivered_answer_text is captured "
     "AND BEFORE tracer.save_trace() (same relative position as the observation itself)",
     -1 < _pos_observation < _pos_shadow_complete < _pos_save_trace,
     f"observation={_pos_observation} shadow={_pos_shadow_complete} save={_pos_save_trace}",
 )
 
 check(
-    "B: shadow_complete_run is passed optimistic.text (the SAME delivered text captured "
+    "B: complete_run is passed optimistic.text (the SAME delivered text captured "
     "as the trace observation), not synthesis_result.answer",
     "delivered_answer_text=optimistic.text" in _src_wb,
 )
@@ -143,37 +143,44 @@ synthesis_result = SynthesisResult(
 trace = ot.Trace(trace_id="t_sqlwire", timestamp=0.0, query="q")
 tracer = ot.DecisionTracer()
 
+from agent.db.sql.connection import SqlUnavailable
+
+_raised_c = None
 with patch.object(ot, "TRACES_DIR", traces_dir), \
      patch.object(wb, "archive_query", lambda *a, **k: None), \
      patch.object(wb, "mon_record", lambda *a, **k: None):
-    resp = wb.run_optimistic_respond(
-        request=types.SimpleNamespace(session_id="s1"),
-        verbose=False, enable_validation=False, enable_cache=False, t_start=0.0,
-        query_frame={}, log=_noop_log, trace=trace, trace_id="t_sqlwire", decision_id="d1",
-        cost={"total_ms": 0.0}, cache=None, request_fetch_cache=None,
-        query_to_use="Сколько спутников известно у Юпитера?", skip_rag=False,
-        is_subjective_answer=False, epistemic_result=_make_epistemic_result(),
-        synthesis_result=synthesis_result, risk_result=None,
-        intent_result=types.SimpleNamespace(intent="science"), search_result=None,
-        web_used=True, claims_data=[], evidence_data=[],
-        self_model=None, memory=None, reflection=None, motivation=None, core_loop=None,
-        reasoning_info={}, intent_type="science", intent_confidence=0.8,
-        bad_state_prefix="", entity=None, enrich_result=None, tracer=tracer,
-        epistemic_trust_gate_label="VERIFIED",
-        sql_question_id=None,   # explicit default — see check D below for the omitted case too
-    )
+    try:
+        resp = wb.run_optimistic_respond(
+            request=types.SimpleNamespace(session_id="s1"),
+            verbose=False, enable_validation=False, enable_cache=False, t_start=0.0,
+            query_frame={}, log=_noop_log, trace=trace, trace_id="t_sqlwire", decision_id="d1",
+            cost={"total_ms": 0.0}, cache=None, request_fetch_cache=None,
+            query_to_use="Сколько спутников известно у Юпитера?", skip_rag=False,
+            is_subjective_answer=False, epistemic_result=_make_epistemic_result(),
+            synthesis_result=synthesis_result, risk_result=None,
+            intent_result=types.SimpleNamespace(intent="science"), search_result=None,
+            web_used=True, claims_data=[], evidence_data=[],
+            self_model=None, memory=None, reflection=None, motivation=None, core_loop=None,
+            reasoning_info={}, intent_type="science", intent_confidence=0.8,
+            bad_state_prefix="", entity=None, enrich_result=None, tracer=tracer,
+            epistemic_trust_gate_label="VERIFIED",
+            sql_question_id=None,   # explicit default — see check D below for the omitted case too
+        )
+    except SqlUnavailable as e:
+        _raised_c = e
 
 check(
-    "C: run_optimistic_respond() with the SQL wiring present still returns a normal "
-    "OrchestratorResponse, unaffected by the (unconfigured) shadow write",
-    resp.answer and resp.trust_level == "VERIFIED",
-    f"{resp}",
+    "C: run_optimistic_respond() with SQL genuinely unreachable raises SqlUnavailable — "
+    "\"точка ноль\": no more shadow-write fallback for it to stay inert against",
+    _raised_c is not None,
+    f"{_raised_c}",
 )
 check(
-    "C: delivered_answer_text observation is still captured correctly (P0 fix unaffected "
-    "by the SQL wiring sitting right next to it)",
-    trace._observations.get("delivered_answer_text") == resp.answer,
-    f"{trace._observations.get('delivered_answer_text')!r} vs {resp.answer!r}",
+    "C: delivered_answer_text observation was still captured onto `trace` BEFORE the "
+    "SqlUnavailable point (tracer.save_trace() runs last, after the observation) — the "
+    "in-memory Trace build itself is unaffected by the SQL layer failing later",
+    "У Юпитера известно 95 подтверждённых спутников." in (trace._observations.get("delivered_answer_text") or ""),
+    f"{trace._observations.get('delivered_answer_text')!r}",
 )
 
 # D: sql_question_id OMITTED entirely (not even passed) — confirms the
@@ -184,28 +191,33 @@ trace_d = ot.Trace(trace_id="t_sqlwire_d", timestamp=0.0, query="q")
 tracer_d = ot.DecisionTracer()
 synthesis_result_d = SynthesisResult(answer="Ответ.", confidence=0.5, sources=[], trust_level="UNVERIFIED")
 
+_raised_d = None
 with patch.object(ot, "TRACES_DIR", traces_dir_d), \
      patch.object(wb, "archive_query", lambda *a, **k: None), \
      patch.object(wb, "mon_record", lambda *a, **k: None):
-    resp_d = wb.run_optimistic_respond(
-        request=types.SimpleNamespace(session_id="s1"),
-        verbose=False, enable_validation=False, enable_cache=False, t_start=0.0,
-        query_frame={}, log=_noop_log, trace=trace_d, trace_id="t_sqlwire_d", decision_id="d1",
-        cost={"total_ms": 0.0}, cache=None, request_fetch_cache=None,
-        query_to_use="q", skip_rag=False, is_subjective_answer=False,
-        epistemic_result=_make_epistemic_result(), synthesis_result=synthesis_result_d,
-        risk_result=None, intent_result=types.SimpleNamespace(intent="general"),
-        search_result=None, web_used=False, claims_data=[], evidence_data=[],
-        self_model=None, memory=None, reflection=None, motivation=None, core_loop=None,
-        reasoning_info={}, intent_type="general", intent_confidence=0.5,
-        bad_state_prefix="", entity=None, enrich_result=None, tracer=tracer_d,
-        # sql_question_id intentionally OMITTED
-    )
+    try:
+        resp_d = wb.run_optimistic_respond(
+            request=types.SimpleNamespace(session_id="s1"),
+            verbose=False, enable_validation=False, enable_cache=False, t_start=0.0,
+            query_frame={}, log=_noop_log, trace=trace_d, trace_id="t_sqlwire_d", decision_id="d1",
+            cost={"total_ms": 0.0}, cache=None, request_fetch_cache=None,
+            query_to_use="q", skip_rag=False, is_subjective_answer=False,
+            epistemic_result=_make_epistemic_result(), synthesis_result=synthesis_result_d,
+            risk_result=None, intent_result=types.SimpleNamespace(intent="general"),
+            search_result=None, web_used=False, claims_data=[], evidence_data=[],
+            self_model=None, memory=None, reflection=None, motivation=None, core_loop=None,
+            reasoning_info={}, intent_type="general", intent_confidence=0.5,
+            bad_state_prefix="", entity=None, enrich_result=None, tracer=tracer_d,
+            # sql_question_id intentionally OMITTED
+        )
+    except SqlUnavailable as e:
+        _raised_d = e
 check(
-    "D: run_optimistic_respond() works with sql_question_id OMITTED entirely (true "
-    "backward-compatible default, callers that don't know about it are unaffected)",
-    bool(resp_d.answer),
-    f"{resp_d}",
+    "D: sql_question_id OMITTED entirely (true backward-compatible default) still raises "
+    "SqlUnavailable via tracer.save_trace() — complete_run() itself no-ops on a missing "
+    "question_id either way, so this proves save_trace() is what's actually fail-loud here",
+    _raised_d is not None,
+    f"{_raised_d}",
 )
 
 _forced_unreachable.stop()

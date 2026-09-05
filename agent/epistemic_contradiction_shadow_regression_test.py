@@ -22,20 +22,18 @@ Run: /home/iam/venv/bin/python3 -m agent.epistemic_contradiction_shadow_regressi
 from __future__ import annotations
 
 import copy
-import tempfile
-from pathlib import Path
-from unittest.mock import patch
+import contextlib
 
 import agent.orch_tracer as ot
 import agent.verification_memory as vm
 from agent.orch_schemas import EvidenceRecord
 from agent.family_dependency_graph import FamilyDependencyGraph
 import agent.family_dependency_graph as fdg_mod
-import contextlib
 from agent.epistemic_contradiction_shadow import (
     evaluate_contradiction_event,
     run_epistemic_contradiction_shadow,
 )
+from agent.db_sql_fake_fixtures import fresh_fake as _fresh_fake, record as _record
 
 PASS = 0
 FAIL = 0
@@ -154,13 +152,8 @@ def _fresh_graph():
 
 
 
-def _make_env():
-    traces_dir = Path(tempfile.mkdtemp(prefix="p10_ecs_traces_"))
-    index_db = Path(tempfile.mkdtemp(prefix="p10_ecs_index_")) / "index.db"
-    return traces_dir, index_db
-
-
 def _persist_historical(
+    conn,
     *,
     trace_id: str,
     claim_id: str,
@@ -179,11 +172,9 @@ def _persist_historical(
     retrieval_origin: str = "initial_web",
 ):
     """Persists one HISTORICAL claim+evidence occurrence through the
-    real Trace/DecisionTracer save path (must be called inside a
-    context where ot.TRACES_DIR/vm.TRACES_DIR/vm.INDEX_DB are already
-    patched to test-local paths)."""
-    trace = ot.Trace(trace_id=trace_id, timestamp=0.0, query="q")
-    trace.add_claim_raw({
+    real record_claims_and_evidence() + DecisionTracer.save_trace()
+    production sequence, against a fresh fake SQL connection."""
+    claim_data = {
         "claim_id": claim_id,
         "claim_text": f"claim text for {claim_id}",
         "claim_confidence": 0.5,
@@ -201,7 +192,21 @@ def _persist_historical(
                 "retrieval_origin": retrieval_origin,
             },
         ],
-    })
+    }
+    evidence_data = [{
+        "evidence_id": evidence_id,
+        "source_type": "web",
+        "source_uri": source_uri,
+        "content_excerpt": "some excerpt text",
+        "source_class": source_class,
+        "evidence_eligible": evidence_eligible,
+        "evidence_role": evidence_role,
+        "route": route,
+        "origin_route": origin_route,
+        "origin_trace_id": origin_trace_id,
+    }]
+    trace = ot.Trace(trace_id=trace_id, timestamp=0.0, query="q")
+    trace.add_claim_raw(claim_data)
     trace.add_evidence(EvidenceRecord(
         evidence_id=evidence_id,
         source_type="web",
@@ -214,6 +219,7 @@ def _persist_historical(
         origin_route=origin_route,
         origin_trace_id=origin_trace_id,
     ))
+    _record(conn, trace_id, [claim_data], evidence_data)
     ot.DecisionTracer().save_trace(trace)
 
 
@@ -256,7 +262,7 @@ def _current_evidence(evidence_id, source_uri, route="internet", origin_route=No
 # artifact, evidence-free).
 # ============================================================
 
-traces_apple, index_apple = _make_env()
+conn_apple = _fresh_fake()
 graph_apple = _fresh_graph()
 graph_apple.record_edge("fam_apple_1976", "fam_apple_1975", "contradicts", "claim_claim_nli:contradicts", ["cl_1976", "cl_1975"])
 graph_apple.record_edge("fam_apple_1975", "fam_apple_1976", "contradicts", "claim_claim_nli:contradicts", ["cl_1976", "cl_1975"])
@@ -269,10 +275,9 @@ claims_apple = [
 ]
 evidence_apple = []
 
-with patch.object(ot, "TRACES_DIR", traces_apple), patch.object(vm, "TRACES_DIR", traces_apple), patch.object(vm, "INDEX_DB", index_apple):
-    stats_apple = run_epistemic_contradiction_shadow(
-        claims_apple, evidence_apple, graph=graph_apple, log=_noop_log, verbose=False,
-    )
+stats_apple = run_epistemic_contradiction_shadow(
+    claims_apple, evidence_apple, graph=graph_apple, log=_noop_log, verbose=False,
+)
 
 check(
     "APPLE NEGATIVE: contradicts edge persists in the graph (untouched)",
@@ -301,23 +306,22 @@ check(
 # ============================================================
 
 def _run_positive_fixture(name, fam_a, fam_b, url_a, url_b):
-    traces_dir, index_db = _make_env()
+    conn = _fresh_fake()
     graph = _fresh_graph()
     graph.record_edge(fam_a, fam_b, "contradicts", "claim_claim_nli:contradicts", [f"cl_{name}_a", f"cl_{name}_b"])
     graph.record_edge(fam_b, fam_a, "contradicts", "claim_claim_nli:contradicts", [f"cl_{name}_a", f"cl_{name}_b"])
 
-    with patch.object(ot, "TRACES_DIR", traces_dir), patch.object(vm, "TRACES_DIR", traces_dir), patch.object(vm, "INDEX_DB", index_db):
-        _persist_historical(
-            trace_id=f"t_{name}_a", claim_id=f"cl_{name}_a_hist", content_hash=f"h_{name}_a",
-            family_id=fam_a, evidence_id=f"ev_{name}_a", source_uri=url_a,
-        )
-        claims = [
-            {"claim_id": f"cl_{name}_a", "claim_text": "x", "semantic_family_id": fam_a, "evidence_relations": []},
-            _current_claim(f"cl_{name}_b", fam_b, f"ev_{name}_b"),
-        ]
-        evidence = [_current_evidence(f"ev_{name}_b", url_b)]
+    _persist_historical(
+        conn, trace_id=f"t_{name}_a", claim_id=f"cl_{name}_a_hist", content_hash=f"h_{name}_a",
+        family_id=fam_a, evidence_id=f"ev_{name}_a", source_uri=url_a,
+    )
+    claims = [
+        {"claim_id": f"cl_{name}_a", "claim_text": "x", "semantic_family_id": fam_a, "evidence_relations": []},
+        _current_claim(f"cl_{name}_b", fam_b, f"ev_{name}_b"),
+    ]
+    evidence = [_current_evidence(f"ev_{name}_b", url_b)]
 
-        stats = run_epistemic_contradiction_shadow(claims, evidence, graph=graph, log=_noop_log, verbose=False)
+    stats = run_epistemic_contradiction_shadow(claims, evidence, graph=graph, log=_noop_log, verbose=False)
 
     return stats
 
@@ -346,7 +350,7 @@ for fixture_name, fam_a, fam_b, url_a, url_b, label in [
 # overlap=1, distinct=1 -> candidate=False. NOT 1+1=2.
 # ============================================================
 
-traces_n1, index_n1 = _make_env()
+conn_n1 = _fresh_fake()
 graph_n1 = _fresh_graph()
 graph_n1.record_edge("fam_n1_a", "fam_n1_b", "contradicts", "claim_claim_nli:contradicts", ["cl_n1_a", "cl_n1_b"])
 graph_n1.record_edge("fam_n1_b", "fam_n1_a", "contradicts", "claim_claim_nli:contradicts", ["cl_n1_a", "cl_n1_b"])
@@ -361,8 +365,7 @@ evidence_n1 = [
     _current_evidence("ev_n1_b", SAME_URL),
 ]
 
-with patch.object(ot, "TRACES_DIR", traces_n1), patch.object(vm, "TRACES_DIR", traces_n1), patch.object(vm, "INDEX_DB", index_n1):
-    stats_n1 = run_epistemic_contradiction_shadow(claims_n1, evidence_n1, graph=graph_n1, log=_noop_log, verbose=False)
+stats_n1 = run_epistemic_contradiction_shadow(claims_n1, evidence_n1, graph=graph_n1, log=_noop_log, verbose=False)
 
 ev1 = stats_n1["events"][0]
 check(
@@ -381,7 +384,7 @@ check(
 # (never relation=="supports") -> that side contributes zero roots.
 # ============================================================
 
-traces_n2, index_n2 = _make_env()
+conn_n2 = _fresh_fake()
 graph_n2 = _fresh_graph()
 graph_n2.record_edge("fam_n2_a", "fam_n2_b", "contradicts", "claim_claim_nli:contradicts", ["cl_n2_a", "cl_n2_b"])
 graph_n2.record_edge("fam_n2_b", "fam_n2_a", "contradicts", "claim_claim_nli:contradicts", ["cl_n2_a", "cl_n2_b"])
@@ -395,8 +398,7 @@ evidence_n2 = [
     _current_evidence("ev_n2_b", "https://x.example/legit"),
 ]
 
-with patch.object(ot, "TRACES_DIR", traces_n2), patch.object(vm, "TRACES_DIR", traces_n2), patch.object(vm, "INDEX_DB", index_n2):
-    stats_n2 = run_epistemic_contradiction_shadow(claims_n2, evidence_n2, graph=graph_n2, log=_noop_log, verbose=False)
+stats_n2 = run_epistemic_contradiction_shadow(claims_n2, evidence_n2, graph=graph_n2, log=_noop_log, verbose=False)
 
 ev2 = stats_n2["events"][0]
 check(
@@ -411,24 +413,23 @@ check(
 # root already counted on the OTHER side -> does not add independence.
 # ============================================================
 
-traces_n3, index_n3 = _make_env()
+conn_n3 = _fresh_fake()
 graph_n3 = _fresh_graph()
 graph_n3.record_edge("fam_n3_a", "fam_n3_b", "contradicts", "claim_claim_nli:contradicts", ["cl_n3_a", "cl_n3_b"])
 graph_n3.record_edge("fam_n3_b", "fam_n3_a", "contradicts", "claim_claim_nli:contradicts", ["cl_n3_a", "cl_n3_b"])
 
 REPLAY_URL = "https://replay.example/same-story"
-with patch.object(ot, "TRACES_DIR", traces_n3), patch.object(vm, "TRACES_DIR", traces_n3), patch.object(vm, "INDEX_DB", index_n3):
-    _persist_historical(
-        trace_id="t_n3_a", claim_id="cl_n3_a_hist", content_hash="h_n3_a",
-        family_id="fam_n3_a", evidence_id="ev_n3_a_hist", source_uri=REPLAY_URL,
-    )
-    claims_n3 = [
-        {"claim_id": "cl_n3_a", "claim_text": "x", "semantic_family_id": "fam_n3_a", "evidence_relations": []},
-        _current_claim("cl_n3_b", "fam_n3_b", "ev_n3_b"),
-    ]
-    evidence_n3 = [_current_evidence("ev_n3_b", REPLAY_URL, route="local_memory", origin_route="internet")]
+_persist_historical(
+    conn_n3, trace_id="t_n3_a", claim_id="cl_n3_a_hist", content_hash="h_n3_a",
+    family_id="fam_n3_a", evidence_id="ev_n3_a_hist", source_uri=REPLAY_URL,
+)
+claims_n3 = [
+    {"claim_id": "cl_n3_a", "claim_text": "x", "semantic_family_id": "fam_n3_a", "evidence_relations": []},
+    _current_claim("cl_n3_b", "fam_n3_b", "ev_n3_b"),
+]
+evidence_n3 = [_current_evidence("ev_n3_b", REPLAY_URL, route="local_memory", origin_route="internet")]
 
-    stats_n3 = run_epistemic_contradiction_shadow(claims_n3, evidence_n3, graph=graph_n3, log=_noop_log, verbose=False)
+stats_n3 = run_epistemic_contradiction_shadow(claims_n3, evidence_n3, graph=graph_n3, log=_noop_log, verbose=False)
 
 ev3 = stats_n3["events"][0]
 check(
@@ -444,7 +445,7 @@ check(
 # "supporting" evidence on that side.
 # ============================================================
 
-traces_n4, index_n4 = _make_env()
+conn_n4 = _fresh_fake()
 graph_n4 = _fresh_graph()
 graph_n4.record_edge("fam_n4_a", "fam_n4_b", "contradicts", "claim_claim_nli:contradicts", ["cl_n4_a", "cl_n4_b"])
 graph_n4.record_edge("fam_n4_b", "fam_n4_a", "contradicts", "claim_claim_nli:contradicts", ["cl_n4_a", "cl_n4_b"])
@@ -458,8 +459,7 @@ evidence_n4 = [
     _current_evidence("ev_n4_b", "https://y.example/real", route="internet"),
 ]
 
-with patch.object(ot, "TRACES_DIR", traces_n4), patch.object(vm, "TRACES_DIR", traces_n4), patch.object(vm, "INDEX_DB", index_n4):
-    stats_n4 = run_epistemic_contradiction_shadow(claims_n4, evidence_n4, graph=graph_n4, log=_noop_log, verbose=False)
+stats_n4 = run_epistemic_contradiction_shadow(claims_n4, evidence_n4, graph=graph_n4, log=_noop_log, verbose=False)
 
 ev4 = stats_n4["events"][0]
 check(
@@ -475,13 +475,12 @@ check(
 # by _distinct_contradicts_pairs, not filtered post-hoc).
 # ============================================================
 
-traces_n5, index_n5 = _make_env()
+conn_n5 = _fresh_fake()
 graph_n5 = _fresh_graph()
 graph_n5.record_edge("fam_n5_a", "fam_n5_b", "supports", "claim_claim_nli:supports", ["cl_n5_a", "cl_n5_b"])
 graph_n5.record_edge("fam_n5_c", "fam_n5_d", "depends_on", "contradicts", ["cl_n5_c", "cl_n5_d"])
 
-with patch.object(ot, "TRACES_DIR", traces_n5), patch.object(vm, "TRACES_DIR", traces_n5), patch.object(vm, "INDEX_DB", index_n5):
-    stats_n5 = run_epistemic_contradiction_shadow([], [], graph=graph_n5, log=_noop_log, verbose=False)
+stats_n5 = run_epistemic_contradiction_shadow([], [], graph=graph_n5, log=_noop_log, verbose=False)
 
 check(
     "NEG5: supports/depends_on edges never enter the contradiction evaluation at all",
@@ -494,7 +493,7 @@ check(
 # byte-identical before and after a run (deepcopy comparison).
 # ============================================================
 
-traces_s, index_s = _make_env()
+conn_s = _fresh_fake()
 graph_s = _fresh_graph()
 graph_s.record_edge("fam_s_a", "fam_s_b", "contradicts", "claim_claim_nli:contradicts", ["cl_s_a", "cl_s_b"])
 graph_s.record_edge("fam_s_b", "fam_s_a", "contradicts", "claim_claim_nli:contradicts", ["cl_s_a", "cl_s_b"])
@@ -511,8 +510,7 @@ claims_s_before = copy.deepcopy(claims_s)
 evidence_s_before = copy.deepcopy(evidence_s)
 edges_s_before = copy.deepcopy(graph_s.all_contradicts_edges())
 
-with patch.object(ot, "TRACES_DIR", traces_s), patch.object(vm, "TRACES_DIR", traces_s), patch.object(vm, "INDEX_DB", index_s):
-    run_epistemic_contradiction_shadow(claims_s, evidence_s, graph=graph_s, log=_noop_log, verbose=False)
+run_epistemic_contradiction_shadow(claims_s, evidence_s, graph=graph_s, log=_noop_log, verbose=False)
 
 check(
     "STRUCTURAL: claims_data unchanged after run (no mutation)",
@@ -555,16 +553,15 @@ check(
 # graph entirely) — same EU fixture, called directly.
 # ============================================================
 
-traces_u, index_u = _make_env()
-with patch.object(ot, "TRACES_DIR", traces_u), patch.object(vm, "TRACES_DIR", traces_u), patch.object(vm, "INDEX_DB", index_u):
-    _persist_historical(
-        trace_id="t_u_a", claim_id="cl_u_a_hist", content_hash="h_u_a",
-        family_id="fam_u_a", evidence_id="ev_u_a", source_uri="https://u.example/a",
-    )
-    evidence_by_id_u = {"ev_u_b": _current_evidence("ev_u_b", "https://u.example/b")}
-    claims_u = [_current_claim("cl_u_b", "fam_u_b", "ev_u_b")]
+conn_u = _fresh_fake()
+_persist_historical(
+    conn_u, trace_id="t_u_a", claim_id="cl_u_a_hist", content_hash="h_u_a",
+    family_id="fam_u_a", evidence_id="ev_u_a", source_uri="https://u.example/a",
+)
+evidence_by_id_u = {"ev_u_b": _current_evidence("ev_u_b", "https://u.example/b")}
+claims_u = [_current_claim("cl_u_b", "fam_u_b", "ev_u_b")]
 
-    event_u = evaluate_contradiction_event("fam_u_a", "fam_u_b", claims_u, evidence_by_id_u)
+event_u = evaluate_contradiction_event("fam_u_a", "fam_u_b", claims_u, evidence_by_id_u)
 
 check(
     "UNIT: evaluate_contradiction_event() callable directly (no graph needed), candidate=True",

@@ -27,20 +27,18 @@ from __future__ import annotations
 
 import copy
 import inspect
-import tempfile
-from pathlib import Path
-from unittest.mock import patch
+import contextlib
 
 import agent.orchestrator_v2 as orch_v2_mod
 import agent.verification_memory as vm
 from agent.family_dependency_graph import FamilyDependencyGraph
 import agent.family_dependency_graph as fdg_mod
-import contextlib
 from agent.dependency_recheck import apply_dependency_recheck
 from agent.epistemic_contradiction_shadow import (
     run_epistemic_contradiction_shadow,
     build_shadow_request_summary,
 )
+from agent.db_sql_fake_fixtures import fresh_fake as _fresh_fake
 
 PASS = 0
 FAIL = 0
@@ -225,8 +223,7 @@ check(
 # ============================================================
 
 def _make_fixture():
-    traces_dir = Path(tempfile.mkdtemp(prefix="p10_wire_traces_"))
-    index_db = Path(tempfile.mkdtemp(prefix="p10_wire_index_")) / "index.db"
+    _fresh_fake()  # wires vm.get_connection to a fresh, empty fake SQL store
     graph = _fresh_graph()
     graph.record_edge("fam_w_a", "fam_w_b", "contradicts", "claim_claim_nli:contradicts", ["cl_w_a", "cl_w_b"])
     graph.record_edge("fam_w_b", "fam_w_a", "contradicts", "claim_claim_nli:contradicts", ["cl_w_a", "cl_w_b"])
@@ -253,7 +250,7 @@ def _make_fixture():
         {"evidence_id": "ev_w_a", "source_uri": "https://w.example/a", "route": "internet"},
         {"evidence_id": "ev_w_b", "source_uri": "https://w.example/b", "route": "internet"},
     ]
-    return traces_dir, index_db, graph, claims_data, evidence_data
+    return graph, claims_data, evidence_data
 
 
 class _BrokenGraph:
@@ -301,17 +298,16 @@ def _run_phase12_twice(family_dependency_stats, shadow_call):
 # output.
 # ============================================================
 
-traces_c, index_c, graph_c, claims_c, evidence_c = _make_fixture()
+graph_c, claims_c, evidence_c = _make_fixture()
 fds_c = {"recheck_candidate_details": []}
 
-with patch.object(vm, "TRACES_DIR", traces_c), patch.object(vm, "INDEX_DB", index_c):
-    def _shadow_call_true():
-        stats = run_epistemic_contradiction_shadow(
-            claims_c, evidence_c, graph=graph_c, log=_noop_log, verbose=False,
-        )
-        assert stats["candidates_true"] == 1, f"fixture broken, expected candidate=True: {stats}"
+def _shadow_call_true():
+    stats = run_epistemic_contradiction_shadow(
+        claims_c, evidence_c, graph=graph_c, log=_noop_log, verbose=False,
+    )
+    assert stats["candidates_true"] == 1, f"fixture broken, expected candidate=True: {stats}"
 
-    result_without_c, result_with_c, fds_before_c, fds_after_c = _run_phase12_twice(fds_c, _shadow_call_true)
+result_without_c, result_with_c, fds_before_c, fds_after_c = _run_phase12_twice(fds_c, _shadow_call_true)
 
 check(
     "B: _family_dependency_stats unchanged after the shadow call (candidate=True case)",
@@ -328,20 +324,19 @@ check(
 # D. shadow candidate=False does not suppress Phase 12.
 # ============================================================
 
-traces_d, index_d, graph_d, claims_d, evidence_d = _make_fixture()
+graph_d, claims_d, evidence_d = _make_fixture()
 # Force candidate=False: strip one side's evidence_relations so it has
 # no eligible supporting root.
 claims_d[0]["evidence_relations"] = []
 fds_d = {"recheck_candidate_details": []}
 
-with patch.object(vm, "TRACES_DIR", traces_d), patch.object(vm, "INDEX_DB", index_d):
-    def _shadow_call_false():
-        stats = run_epistemic_contradiction_shadow(
-            claims_d, evidence_d, graph=graph_d, log=_noop_log, verbose=False,
-        )
-        assert stats["candidates_false"] == 1, f"fixture broken, expected candidate=False: {stats}"
+def _shadow_call_false():
+    stats = run_epistemic_contradiction_shadow(
+        claims_d, evidence_d, graph=graph_d, log=_noop_log, verbose=False,
+    )
+    assert stats["candidates_false"] == 1, f"fixture broken, expected candidate=False: {stats}"
 
-    result_without_d, result_with_d, fds_before_d, fds_after_d = _run_phase12_twice(fds_d, _shadow_call_false)
+result_without_d, result_with_d, fds_before_d, fds_after_d = _run_phase12_twice(fds_d, _shadow_call_false)
 
 check(
     "D: Phase 12 result identical whether or not shadow (candidate=False) ran in between "
@@ -382,9 +377,8 @@ from agent.orchestrator.epistemic.canonical_trust import compute_canonical_trust
 
 _trust_before_shadow = compute_canonical_trust("VERIFIED", "SUPPORTED", _noop_log, False)
 
-traces_f, index_f, graph_f, claims_f, evidence_f = _make_fixture()
-with patch.object(vm, "TRACES_DIR", traces_f), patch.object(vm, "INDEX_DB", index_f):
-    run_epistemic_contradiction_shadow(claims_f, evidence_f, graph=graph_f, log=_noop_log, verbose=False)
+graph_f, claims_f, evidence_f = _make_fixture()
+run_epistemic_contradiction_shadow(claims_f, evidence_f, graph=graph_f, log=_noop_log, verbose=False)
 
 _trust_after_shadow = compute_canonical_trust("VERIFIED", "SUPPORTED", _noop_log, False)
 
@@ -400,13 +394,12 @@ check(
 # through the ACTUAL wiring helper (run + build_shadow_request_summary).
 # ============================================================
 
-traces_h, index_h, graph_h, claims_h, evidence_h = _make_fixture()
+graph_h, claims_h, evidence_h = _make_fixture()
 claims_h_before = copy.deepcopy(claims_h)
 evidence_h_before = copy.deepcopy(evidence_h)
 
-with patch.object(vm, "TRACES_DIR", traces_h), patch.object(vm, "INDEX_DB", index_h):
-    _stats_h = run_epistemic_contradiction_shadow(claims_h, evidence_h, graph=graph_h, log=_noop_log, verbose=False)
-    _summary_h = build_shadow_request_summary(claims_h, _stats_h, {"recheck_candidate_details": []})
+_stats_h = run_epistemic_contradiction_shadow(claims_h, evidence_h, graph=graph_h, log=_noop_log, verbose=False)
+_summary_h = build_shadow_request_summary(claims_h, _stats_h, {"recheck_candidate_details": []})
 
 check(
     "H: claims_data unchanged after run_epistemic_contradiction_shadow + "

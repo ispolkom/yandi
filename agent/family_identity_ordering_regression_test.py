@@ -32,6 +32,7 @@ from agent.orchestrator.claims.status import classify_claim_epistemic_status
 from agent.orchestrator.claims.lifecycle import assign_claim_family_identity
 from agent.claim_family_registry import ClaimFamilyRegistry
 import agent.claim_family_registry as registry_mod
+from agent.db_sql_fake_fixtures import fresh_fake as _fresh_fake
 
 
 # "ТОЧКА НОЛЬ": ClaimFamilyRegistry is SQL-only now (no storage_file) —
@@ -250,17 +251,13 @@ check(
 # persist_verification_evidence -> index).
 # ============================================================
 
-traces_5 = Path(tempfile.mkdtemp(prefix="p10_trace_"))
-index_5 = Path(tempfile.mkdtemp(prefix="p10_index_")) / "index.db"
+_fresh_fake()
 
 claims_5, evidence_5 = _make_claims_and_evidence()
 for c in claims_5:
     c["content_hash"] = f"hash_{c['claim_id']}"
 
-with patch.object(ot, "TRACES_DIR", traces_5), \
-     patch.object(vm, "TRACES_DIR", traces_5), \
-     patch.object(vm, "INDEX_DB", index_5), \
-     patch.object(lifecycle_mod, "get_claim_family_registry", _isolated_registry):
+with patch.object(lifecycle_mod, "get_claim_family_registry", _isolated_registry):
 
     assign_claim_family_identity(claims_5, _FakeEpistemicResult(), False, {}, _noop_log, False)
     classify_claim_epistemic_status(claims_5, _noop_log, False, evidence_5)

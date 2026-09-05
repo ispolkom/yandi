@@ -13,9 +13,9 @@ Structural guarantee for that condition, not just a comment: this
 module is called ONLY from agent/orchestrator/response/writeback.py's
 run_optimistic_respond() — which agent/orchestrator_v2.py reaches ONLY
 via the STANDARD pipeline branch, never the pre_pipeline cache-hit/
-short-circuit early-return (that branch calls shadow_complete_run()
-directly and returns before writeback.py is ever imported into the
-call stack for this request). claims_data reaching this module is
+short-circuit early-return (that branch calls complete_run() directly
+and returns before writeback.py is ever imported into the call stack
+for this request). claims_data reaching this module is
 therefore always the output of THIS request's own real, fresh claim
 extraction + evidence retrieval + NLI — never a replayed/cached answer.
 

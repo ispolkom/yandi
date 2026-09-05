@@ -24,7 +24,7 @@ from agent.db.sql.schema import (
     SCHEMA_VERSION,
 )
 
-SCHEMA_VERSION_DESCRIPTION = "v12: biography/context/decision_journal/experience/secret_archive/inner_state/disagreement/trait_graph/self_reflection_profile/social_knowledge (\"точка ноль\" — remaining live JSON-backed subsystems retired)"
+SCHEMA_VERSION_DESCRIPTION = "v13: source_observation full EvidenceRecord fidelity + trace_record + delayed_validation_event (\"точка ноль\" — orch_tracer.py/verification_memory.py's JSONL trace store retired)"
 
 
 def record_schema_version(

@@ -8,27 +8,35 @@ async_pipeline.py), and the "MEMORY != TRUTH" invariants (P4 §9/§10:
 historical relations are never copied as truth, and alone can never
 skip PASS2).
 
-CRITICAL: registry/index.db and registry/dataset/orch_traces/*.jsonl
-are REAL, accumulated state — every test here patches agent.
-verification_memory.INDEX_DB/TRACES_DIR and agent.orch_tracer.TRACES_DIR
-to isolated temp paths (same discipline as orch_stoplist_regression_test.py
-after its real-file leak incident earlier this session).
+"ТОЧКА НОЛЬ" v13 (owner mandate, 2026-09): registry/index.db (sqlite
+locator) and registry/dataset/orch_traces/*.jsonl are BOTH retired, not
+migrated. claim_occurrence/source_observation/evidence_relation
+(agent.db.sql.shadow_write.record_claims_and_evidence(), now PRIMARY)
+are the real source of truth agent.verification_memory.py's LOAD path
+queries. A small fake connection stands in for the real bastion-
+protected tables. persist_verification_evidence() itself is UNCHANGED
+(still a pure in-memory trace.evidence build, no SQL/file I/O) — tests
+that only call it (A, B, I) need no SQL fixture at all; tests that also
+call tracer.save_trace() and/or lookup_historical_evidence() (C, D, F,
+J) now ALSO call record_claims_and_evidence() explicitly, matching the
+real production call sequence (agent/orchestrator/claims/status.py
+calls it separately from agent.orch_tracer.DecisionTracer.save_trace()).
 
 Run: /home/iam/venv/bin/python3 -m agent.verification_memory_regression_test
 """
 from __future__ import annotations
 
-import tempfile
 import time
-from pathlib import Path
 from unittest.mock import patch
 
 import agent.orch_tracer as ot
 import agent.verification_memory as vm
+import agent.db.sql.repositories as repo
 import agent.orchestrator.claims.async_pipeline as pipeline_mod
 from agent.orch_schemas import EvidenceRecord, ClaimRecord
 from agent.claim_identity import compute_claim_content_hash
 from agent.source_clustering import assign_source_clusters
+from agent.db_sql_fake_fixtures import fresh_fake as _fresh_fake, record as _record
 
 PASS = 0
 FAIL = 0
@@ -44,29 +52,14 @@ def check(name: str, condition: bool, detail: str = ""):
         print(f"FAIL {name} {detail}")
 
 
-def _isolated_paths():
-    traces = Path(tempfile.mkdtemp(prefix="yandi_vm_test_traces_"))
-    index = Path(tempfile.mkdtemp(prefix="yandi_vm_test_index_")) / "index.db"
-    return traces, index
-
-
-def _patches(traces_dir, index_db):
-    return (
-        patch.object(ot, "TRACES_DIR", traces_dir),
-        patch.object(vm, "TRACES_DIR", traces_dir),
-        patch.object(vm, "INDEX_DB", index_db),
-    )
-
-
 # ============================================================
 # A. FULL SAVE: retrieval_claim_id / source_cluster_id / evidence /
 #    relation all present in the persisted Trace JSON.
+#    persist_verification_evidence() is a pure in-memory trace.evidence
+#    build (no SQL/file I/O) — no fake connection needed here.
 # ============================================================
 
-traces_a, index_a = _isolated_paths()
-p1, p2, p3 = _patches(traces_a, index_a)
-
-with p1, p2, p3:
+if True:
     claim_a = {
         "claim_id": "cl_a1",
         "claim_text": "Луна вращается вокруг Земли.",
@@ -121,12 +114,10 @@ with p1, p2, p3:
 # ============================================================
 # B. PASS2 EVIDENCE PERSISTENCE: not just stage-6's first 3 snippets —
 #    evidence used by claim-specific PASS2 reaches the Trace too.
+#    Also pure in-memory — no fake connection needed.
 # ============================================================
 
-traces_b, index_b = _isolated_paths()
-p1, p2, p3 = _patches(traces_b, index_b)
-
-with p1, p2, p3:
+if True:
     # Simulate: 1 stage-6 evidence item (route=internet, global,
     # unrelated to any claim) + 5 PASS2 claim-owned items actually used
     # by claims, + 3 more PASS2-discovered items that were fetched but
@@ -173,93 +164,100 @@ with p1, p2, p3:
     )
 
 # ============================================================
-# C. RESTART: save (process/storage instance 1) -> fresh lookup
-#    (simulating a new process) -> content_hash exact match -> found.
+# C. RESTART: record_claims_and_evidence (real production sequence) ->
+#    fresh lookup (simulating a new process) -> content_hash exact
+#    match -> found.
 # ============================================================
 
-traces_c, index_c = _isolated_paths()
-p1, p2, p3 = _patches(traces_c, index_c)
+conn_c = _fresh_fake()
 
-with p1, p2, p3:
-    claim_c = {
-        "claim_id": "cl_c1",
-        "claim_text": "Вода кипит при 100 градусах Цельсия на уровне моря.",
-        "content_hash": compute_claim_content_hash("Вода кипит при 100 градусах Цельсия на уровне моря."),
-        "evidence_relations": [{"evidence_id": "ev_c1", "relation": "supports", "method": "nli"}],
-    }
-    evidence_data_c = [{
-        "evidence_id": "ev_c1", "source_uri": "https://physics.example/boiling",
-        "content_excerpt": "Вода кипит при 100°C при нормальном атмосферном давлении.",
-        "source_class": "reference", "evidence_eligible": True, "evidence_role": "direct",
-        "quality_score": 0.9,
-    }]
+claim_c = {
+    "claim_id": "cl_c1",
+    "claim_text": "Вода кипит при 100 градусах Цельсия на уровне моря.",
+    "content_hash": compute_claim_content_hash("Вода кипит при 100 градусах Цельсия на уровне моря."),
+    "evidence_relations": [{"evidence_id": "ev_c1", "relation": "supports", "method": "nli"}],
+}
+evidence_data_c = [{
+    "evidence_id": "ev_c1", "source_uri": "https://physics.example/boiling",
+    "content_excerpt": "Вода кипит при 100°C при нормальном атмосферном давлении.",
+    "source_class": "reference", "evidence_eligible": True, "evidence_role": "direct",
+    "quality_score": 0.9,
+}]
 
-    tracer_c = ot.DecisionTracer()
-    trace_c = ot.Trace(trace_id="t_c", timestamp=time.time(), query="При какой температуре кипит вода?")
-    trace_c.add_claim_raw(claim_c)
-    vm.persist_verification_evidence(trace_c, [claim_c], evidence_data_c)
-    tracer_c.save_trace(trace_c)  # this is what does the REAL append + index write
+tracer_c = ot.DecisionTracer()
+trace_c = ot.Trace(trace_id="t_c", timestamp=time.time(), query="При какой температуре кипит вода?")
+trace_c.add_claim_raw(claim_c)
+vm.persist_verification_evidence(trace_c, [claim_c], evidence_data_c)
+_record(conn_c, "t_c", [claim_c], evidence_data_c)  # real prod: status.py's record_claims_and_evidence()
+tracer_c.save_trace(trace_c)  # real prod: writeback.py's tracer.save_trace() (trace_record envelope only)
 
-    # Simulate a brand new process/request: a NEW claim occurrence,
-    # different claim_id, only content_hash matching.
-    new_claim_c = {
-        "claim_id": "cl_c2_NEW_OCCURRENCE",
-        "claim_text": "Вода кипит при 100 градусах Цельсия на уровне моря.",
-        "content_hash": compute_claim_content_hash("Вода кипит при 100 градусах Цельсия на уровне моря."),
-    }
-    hits_c = vm.lookup_historical_evidence(new_claim_c)
+# Simulate a brand new process/request: a NEW claim occurrence,
+# different claim_id, only content_hash matching.
+new_claim_c = {
+    "claim_id": "cl_c2_NEW_OCCURRENCE",
+    "claim_text": "Вода кипит при 100 градусах Цельсия на уровне моря.",
+    "content_hash": compute_claim_content_hash("Вода кипит при 100 градусах Цельсия на уровне моря."),
+}
+hits_c = vm.lookup_historical_evidence(new_claim_c)
 
-    check(
-        "C: after save_trace() (JSONL append + index write), a fresh lookup finds the evidence",
-        len(hits_c) == 1 and hits_c[0]["source_uri"] == "https://physics.example/boiling",
-        f"{hits_c}",
-    )
-    check(
-        "C: the JSONL file physically contains the trace (source of truth, not just the index)",
-        (traces_c / f"{time.strftime('%Y%m%d')}.jsonl").exists(),
-    )
+check(
+    "C: after record_claims_and_evidence(), a fresh lookup finds the evidence",
+    len(hits_c) == 1 and hits_c[0]["source_uri"] == "https://physics.example/boiling",
+    f"{hits_c}",
+)
+check(
+    "C: the claim_occurrence row physically exists in SQL (source of truth, not just returned)",
+    conn_c.claims.get("cl_c1", {}).get("content_hash") == claim_c["content_hash"],
+    f"{conn_c.claims}",
+)
+check(
+    "C: save_trace() persisted the trace_record envelope row too",
+    "t_c" in conn_c.trace_records,
+)
 
 # ============================================================
 # D. EXACT CLAIM LOOKUP: same content_hash -> hit; different claim
 #    (different content_hash) -> no exact hit.
 # ============================================================
 
-traces_d, index_d = _isolated_paths()
-p1, p2, p3 = _patches(traces_d, index_d)
+conn_d = _fresh_fake()
 
-with p1, p2, p3:
-    claim_d = {
-        "claim_id": "cl_d1",
-        "claim_text": "Скорость света в вакууме — 299792458 м/с.",
-        "content_hash": compute_claim_content_hash("Скорость света в вакууме — 299792458 м/с."),
-        "evidence_relations": [{"evidence_id": "ev_d1", "relation": "supports", "method": "nli"}],
-    }
-    evidence_data_d = [{"evidence_id": "ev_d1", "source_uri": "https://physics.example/c",
-                         "content_excerpt": "c = 299792458 м/с."}]
+claim_d = {
+    "claim_id": "cl_d1",
+    "claim_text": "Скорость света в вакууме — 299792458 м/с.",
+    "content_hash": compute_claim_content_hash("Скорость света в вакууме — 299792458 м/с."),
+    "evidence_relations": [{"evidence_id": "ev_d1", "relation": "supports", "method": "nli"}],
+}
+evidence_data_d = [{"evidence_id": "ev_d1", "source_uri": "https://physics.example/c",
+                     "content_excerpt": "c = 299792458 м/с."}]
 
-    trace_d = ot.Trace(trace_id="t_d", timestamp=time.time(), query="test D")
-    trace_d.add_claim_raw(claim_d)
-    vm.persist_verification_evidence(trace_d, [claim_d], evidence_data_d)
-    ot.DecisionTracer().save_trace(trace_d)
+trace_d = ot.Trace(trace_id="t_d", timestamp=time.time(), query="test D")
+trace_d.add_claim_raw(claim_d)
+vm.persist_verification_evidence(trace_d, [claim_d], evidence_data_d)
+_record(conn_d, "t_d", [claim_d], evidence_data_d)
+ot.DecisionTracer().save_trace(trace_d)
 
-    same_hash_claim = {"claim_id": "cl_d_other_occurrence", "claim_text": claim_d["claim_text"],
-                        "content_hash": claim_d["content_hash"]}
-    different_claim = {"claim_id": "cl_d_unrelated", "claim_text": "Совершенно другое утверждение о биологии.",
-                        "content_hash": compute_claim_content_hash("Совершенно другое утверждение о биологии.")}
+same_hash_claim = {"claim_id": "cl_d_other_occurrence", "claim_text": claim_d["claim_text"],
+                    "content_hash": claim_d["content_hash"]}
+different_claim = {"claim_id": "cl_d_unrelated", "claim_text": "Совершенно другое утверждение о биологии.",
+                    "content_hash": compute_claim_content_hash("Совершенно другое утверждение о биологии.")}
 
-    check(
-        "D: same content_hash (different occurrence) -> memory hit",
-        len(vm.lookup_historical_evidence(same_hash_claim)) == 1,
-    )
-    check(
-        "D: different claim text/content_hash -> no exact hit (memory miss, not a fabricated match)",
-        len(vm.lookup_historical_evidence(different_claim)) == 0,
-    )
+check(
+    "D: same content_hash (different occurrence) -> memory hit",
+    len(vm.lookup_historical_evidence(same_hash_claim)) == 1,
+)
+check(
+    "D: different claim text/content_hash -> no exact hit (memory miss, not a fabricated match)",
+    len(vm.lookup_historical_evidence(different_claim)) == 0,
+)
 
 # ============================================================
-# E. FAMILY FALLBACK (index-level only — no new classifier):
-#    the semantic_family_id column is populated at SAVE time and
-#    queryable via _query_index() directly, even though the LIVE
+# E. FAMILY FALLBACK (storage-level only — no new classifier):
+#    "ТОЧКА НОЛЬ" v13 — vm.index_trace()/vm._query_index() (the old
+#    sqlite locator) are RETIRED entirely; family_id is now a real
+#    column on claim_occurrence (agent.db.sql.schema.py), populated by
+#    record_claims_and_evidence() and queryable via
+#    repo.find_claim_occurrences_by_family() — even though the LIVE
 #    lookup_historical_evidence() path deliberately does not call it
 #    yet (see that function's docstring — avoiding a new embedding
 #    lookup for v1). This proves the storage layer is wired correctly
@@ -267,32 +265,27 @@ with p1, p2, p3:
 #    here.
 # ============================================================
 
-traces_e, index_e = _isolated_paths()
-p1, p2, p3 = _patches(traces_e, index_e)
+conn_e = _fresh_fake()
 
-with p1, p2, p3:
-    claim_e = ClaimRecord(
-        claim_id="cl_e1", claim_text="Family-linked claim",
-        content_hash="hash_e_does_not_matter_for_this_test",
-        semantic_family_id="fam_test123",
-    )
-    trace_e = ot.Trace(trace_id="t_e", timestamp=time.time(), query="test E")
-    trace_e.claims.append(claim_e)
+claim_e = {
+    "claim_id": "cl_e1", "claim_text": "Family-linked claim",
+    "content_hash": "hash_e_does_not_matter_for_this_test",
+    "semantic_family_id": "fam_test123",
+}
+_record(conn_e, "t_e", [claim_e], [])
 
-    vm.index_trace(trace_e, "20260101.jsonl", 0)
+rows_by_family = repo.find_claim_occurrences_by_family(conn_e, "fam_test123")
+rows_by_wrong_family = repo.find_claim_occurrences_by_family(conn_e, "fam_nonexistent")
 
-    rows_by_family = vm._query_index(None, "fam_test123")
-    rows_by_wrong_family = vm._query_index(None, "fam_nonexistent")
-
-    check(
-        "E: semantic_family_id is persisted to the index at SAVE time",
-        len(rows_by_family) == 1 and rows_by_family[0]["claim_id"] == "cl_e1",
-        f"{[dict(r) for r in rows_by_family]}",
-    )
-    check(
-        "E: a non-matching family_id yields no rows (no fabricated match)",
-        len(rows_by_wrong_family) == 0,
-    )
+check(
+    "E: family_id is persisted to claim_occurrence at SAVE time",
+    len(rows_by_family) == 1 and rows_by_family[0]["claim_id"] == "cl_e1",
+    f"{rows_by_family}",
+)
+check(
+    "E: a non-matching family_id yields no rows (no fabricated match)",
+    len(rows_by_wrong_family) == 0,
+)
 
 # ============================================================
 # F. REASSESSMENT: historical relation was 'supports'; current
@@ -300,10 +293,9 @@ with p1, p2, p3:
 #    'contradicts', never the old 'supports' copied through.
 # ============================================================
 
-traces_f, index_f = _isolated_paths()
-p1, p2, p3 = _patches(traces_f, index_f)
+conn_f = _fresh_fake()
 
-with p1, p2, p3:
+if True:
     # Save a historical claim where the evidence SUPPORTS it.
     hist_claim_f = {
         "claim_id": "cl_f_hist",
@@ -320,6 +312,7 @@ with p1, p2, p3:
     trace_f = ot.Trace(trace_id="t_f_hist", timestamp=time.time(), query="test F hist")
     trace_f.add_claim_raw(hist_claim_f)
     vm.persist_verification_evidence(trace_f, [hist_claim_f], evidence_data_f)
+    _record(conn_f, "t_f_hist", [hist_claim_f], evidence_data_f)
     ot.DecisionTracer().save_trace(trace_f)
 
     # Reconstruction itself must carry NO 'relation' field at all —
@@ -498,13 +491,10 @@ check(
 # ============================================================
 # I. SOURCE CLUSTER: persist/reload preserves the SAME source_cluster_id
 #    (tracer never recomputes it, only propagates what was already
-#    computed — P4 §4).
+#    computed — P4 §4). Pure in-memory — no fake connection needed.
 # ============================================================
 
-traces_i, index_i = _isolated_paths()
-p1, p2, p3 = _patches(traces_i, index_i)
-
-with p1, p2, p3:
+if True:
     claim_i = {
         "claim_id": "cl_i1", "claim_text": "Test claim I",
         "content_hash": compute_claim_content_hash("Test claim I"),
@@ -533,48 +523,49 @@ with p1, p2, p3:
 #    new SOURCE (P4 §12).
 # ============================================================
 
-traces_j, index_j = _isolated_paths()
-p1, p2, p3 = _patches(traces_j, index_j)
+conn_j = _fresh_fake()
 
-with p1, p2, p3:
-    claim_j = {
-        "claim_id": "cl_j1", "claim_text": "Тест J маршрута памяти.",
-        "content_hash": compute_claim_content_hash("Тест J маршрута памяти."),
-        "evidence_relations": [{"evidence_id": "ev_j1", "relation": "supports", "method": "nli"}],
-    }
-    evidence_data_j = [{"evidence_id": "ev_j1", "source_uri": "https://original.example/j",
-                         "content_excerpt": "original internet content", "route": "internet"}]
+claim_j = {
+    "claim_id": "cl_j1", "claim_text": "Тест J маршрута памяти.",
+    "content_hash": compute_claim_content_hash("Тест J маршрута памяти."),
+    "evidence_relations": [{"evidence_id": "ev_j1", "relation": "supports", "method": "nli"}],
+}
+evidence_data_j = [{"evidence_id": "ev_j1", "source_uri": "https://original.example/j",
+                     "content_excerpt": "original internet content", "route": "internet",
+                     "observed_at": 12345.0}]
 
-    trace_j = ot.Trace(trace_id="t_j_ORIGINAL", timestamp=12345.0, query="test J")
-    trace_j.add_claim_raw(claim_j)
-    vm.persist_verification_evidence(trace_j, [claim_j], evidence_data_j)
-    ot.DecisionTracer().save_trace(trace_j)
+trace_j = ot.Trace(trace_id="t_j_ORIGINAL", timestamp=12345.0, query="test J")
+trace_j.add_claim_raw(claim_j)
+vm.persist_verification_evidence(trace_j, [claim_j], evidence_data_j)
+_record(conn_j, "t_j_ORIGINAL", [claim_j], evidence_data_j, started_at=12345.0)
+ot.DecisionTracer().save_trace(trace_j)
 
-    loaded_j = vm.lookup_historical_evidence({
-        "claim_id": "cl_j2", "claim_text": claim_j["claim_text"], "content_hash": claim_j["content_hash"],
-    })
+loaded_j = vm.lookup_historical_evidence({
+    "claim_id": "cl_j2", "claim_text": claim_j["claim_text"], "content_hash": claim_j["content_hash"],
+})
 
-    check(
-        "J: loaded evidence has CURRENT route=local_memory",
-        len(loaded_j) == 1 and loaded_j[0]["route"] == "local_memory",
-        f"{loaded_j}",
-    )
-    check(
-        "J: source_uri is UNCHANGED (same original URL, not a new source)",
-        loaded_j[0]["source_uri"] == "https://original.example/j",
-    )
-    check(
-        "J: origin_route preserves what the channel ORIGINALLY was (internet)",
-        loaded_j[0]["origin_route"] == "internet",
-    )
-    check(
-        "J: origin_trace_id points back to the ORIGINAL trace",
-        loaded_j[0]["origin_trace_id"] == "t_j_ORIGINAL",
-    )
-    check(
-        "J: origin_observed_at preserves the ORIGINAL observation time (12345.0), not now",
-        loaded_j[0]["origin_observed_at"] == 12345.0,
-    )
+check(
+    "J: loaded evidence has CURRENT route=local_memory",
+    len(loaded_j) == 1 and loaded_j[0]["route"] == "local_memory",
+    f"{loaded_j}",
+)
+check(
+    "J: source_uri is UNCHANGED (same original URL, not a new source)",
+    loaded_j[0]["source_uri"] == "https://original.example/j",
+)
+check(
+    "J: origin_route preserves what the channel ORIGINALLY was (internet)",
+    loaded_j[0]["origin_route"] == "internet",
+)
+check(
+    "J: origin_trace_id points back to the ORIGINAL trace",
+    loaded_j[0]["origin_trace_id"] == "t_j_ORIGINAL",
+)
+check(
+    "J: origin_observed_at preserves the ORIGINAL observation time (12345.0), not now",
+    loaded_j[0]["origin_observed_at"] == 12345.0,
+    f"{loaded_j[0]['origin_observed_at']}",
+)
 
 # ============================================================
 # K. NO DOUBLE INDEPENDENCE: evidence A saved yesterday, loaded today

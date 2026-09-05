@@ -307,14 +307,14 @@ check(
 
 
 # ============================================================
-# D. THE ORDERING FIX — static proof shadow_record_question_and_run()
+# D. THE ORDERING FIX — static proof record_question_and_run()
 # runs BEFORE the first add_decision_event() call.
 # ============================================================
 _lines = _orch_src.splitlines()
-_run_created_idx = next(i for i, l in enumerate(_lines) if "_sql_question = shadow_record_question_and_run(" in l)
+_run_created_idx = next(i for i, l in enumerate(_lines) if "_sql_question = record_question_and_run(" in l)
 _first_decision_event_idx = next(i for i, l in enumerate(_lines) if l.strip() == "add_decision_event(")
 check(
-    "D1. THE ORDERING FIX: shadow_record_question_and_run() (creates the "
+    "D1. THE ORDERING FIX: record_question_and_run() (creates the "
     "verification_run row decision_event.run_id's FK depends on) now runs BEFORE "
     "the first add_decision_event() call in orchestrator_v2.py",
     _run_created_idx < _first_decision_event_idx,

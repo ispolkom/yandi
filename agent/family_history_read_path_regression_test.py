@@ -25,10 +25,6 @@ Run: /home/iam/venv/bin/python3 -m agent.family_history_read_path_regression_tes
 """
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
-from unittest.mock import patch
-
 import agent.orch_tracer as ot
 import agent.verification_memory as vm
 from agent.orch_schemas import EvidenceRecord
@@ -36,6 +32,7 @@ from agent.verification_memory import (
     compute_stable_root,
     get_family_historical_evidence,
 )
+from agent.db_sql_fake_fixtures import fresh_fake as _fresh_fake, record as _record
 
 PASS = 0
 FAIL = 0
@@ -51,13 +48,8 @@ def check(name: str, condition: bool, detail: str = ""):
         print(f"FAIL {name} {detail}")
 
 
-def _make_env():
-    traces_dir = Path(tempfile.mkdtemp(prefix="p10_fh_traces_"))
-    index_db = Path(tempfile.mkdtemp(prefix="p10_fh_index_")) / "index.db"
-    return traces_dir, index_db
-
-
 def _persist_claim_with_evidence(
+    conn,
     *,
     trace_id: str,
     claim_id: str,
@@ -76,8 +68,7 @@ def _persist_claim_with_evidence(
     linked evidence item, through the EXISTING Trace/DecisionTracer
     save path (same pattern as family_identity_ordering_regression_
     test.py's item 5) — not a hand-rolled JSONL shape."""
-    trace = ot.Trace(trace_id=trace_id, timestamp=0.0, query="q")
-    trace.add_claim_raw({
+    claim_data = {
         "claim_id": claim_id,
         "claim_text": f"claim text for {claim_id}",
         "claim_confidence": 0.5,
@@ -94,7 +85,23 @@ def _persist_claim_with_evidence(
                 "directness": "direct",
             },
         ],
-    })
+    }
+    evidence_data = [{
+        "evidence_id": evidence_id,
+        "source_type": "web",
+        "source_uri": source_uri,
+        "content_excerpt": "some excerpt text",
+        "source_class": "reference",
+        "evidence_eligible": True,
+        "route": route,
+        "origin_route": origin_route,
+        "origin_trace_id": origin_trace_id,
+        "origin_observed_at": origin_observed_at,
+        "origin_source_cluster_id": origin_source_cluster_id,
+        "source_cluster_id": source_cluster_id,
+    }]
+    trace = ot.Trace(trace_id=trace_id, timestamp=0.0, query="q")
+    trace.add_claim_raw(claim_data)
     trace.add_evidence(EvidenceRecord(
         evidence_id=evidence_id,
         source_type="web",
@@ -109,6 +116,7 @@ def _persist_claim_with_evidence(
         origin_source_cluster_id=origin_source_cluster_id,
         source_cluster_id=source_cluster_id,
     ))
+    _record(conn, trace_id, [claim_data], evidence_data)
     ot.DecisionTracer().save_trace(trace)
 
 
@@ -116,23 +124,20 @@ def _persist_claim_with_evidence(
 # A. Two occurrences of ONE family, from DIFFERENT traces, both found.
 # ============================================================
 
-traces_a, index_a = _make_env()
-with patch.object(ot, "TRACES_DIR", traces_a), \
-     patch.object(vm, "TRACES_DIR", traces_a), \
-     patch.object(vm, "INDEX_DB", index_a):
+conn_a = _fresh_fake()
 
-    _persist_claim_with_evidence(
-        trace_id="t_a1", claim_id="cl_a1", content_hash="h_a1",
-        semantic_family_id="fam_A", evidence_id="ev_a1",
-        source_uri="https://a.example/one",
-    )
-    _persist_claim_with_evidence(
-        trace_id="t_a2", claim_id="cl_a2", content_hash="h_a2",
-        semantic_family_id="fam_A", evidence_id="ev_a2",
-        source_uri="https://a.example/two",
-    )
+_persist_claim_with_evidence(
+    conn_a, trace_id="t_a1", claim_id="cl_a1", content_hash="h_a1",
+    semantic_family_id="fam_A", evidence_id="ev_a1",
+    source_uri="https://a.example/one",
+)
+_persist_claim_with_evidence(
+    conn_a, trace_id="t_a2", claim_id="cl_a2", content_hash="h_a2",
+    semantic_family_id="fam_A", evidence_id="ev_a2",
+    source_uri="https://a.example/two",
+)
 
-    obs_a = get_family_historical_evidence("fam_A")
+obs_a = get_family_historical_evidence("fam_A")
 
 check(
     "A: both occurrences of fam_A found, from two different traces (union across traces)",
@@ -151,18 +156,14 @@ check(
 # query must not leak into a fam_B query or vice versa.)
 # ============================================================
 
-with patch.object(ot, "TRACES_DIR", traces_a), \
-     patch.object(vm, "TRACES_DIR", traces_a), \
-     patch.object(vm, "INDEX_DB", index_a):
+_persist_claim_with_evidence(
+    conn_a, trace_id="t_f1", claim_id="cl_f1", content_hash="h_f1",
+    semantic_family_id="fam_B_other", evidence_id="ev_f1",
+    source_uri="https://b.example/unrelated",
+)
 
-    _persist_claim_with_evidence(
-        trace_id="t_f1", claim_id="cl_f1", content_hash="h_f1",
-        semantic_family_id="fam_B_other", evidence_id="ev_f1",
-        source_uri="https://b.example/unrelated",
-    )
-
-    obs_a_after_b_written = get_family_historical_evidence("fam_A")
-    obs_b = get_family_historical_evidence("fam_B_other")
+obs_a_after_b_written = get_family_historical_evidence("fam_A")
+obs_b = get_family_historical_evidence("fam_B_other")
 
 check(
     "F: querying fam_A still returns exactly its own 2 observations, "

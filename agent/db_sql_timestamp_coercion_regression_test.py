@@ -9,7 +9,7 @@ no live DB has ever existed to fail against):
 
   BUG 1: agent.orch_tracer.Trace.timestamp is a Unix-epoch float
   (`time.time()`), forwarded UNCHANGED as started_at/asked_at from
-  orchestrator_v2.py's shadow_record_question_and_run() call, all the
+  orchestrator_v2.py's record_question_and_run() call, all the
   way to repositories.py's resolve_question()/start_run(), which bind
   it directly as a query parameter for a DATETIME column. A bare float
   is not a valid MySQL datetime literal — every single question/
@@ -18,7 +18,7 @@ no live DB has ever existed to fail against):
   agent.db.sql.repositories._coerce_datetime(), applied at every
   `X = X or _now()` call site in that module.
 
-  BUG 2: agent/orchestrator/response/writeback.py's shadow_complete_run
+  BUG 2: agent/orchestrator/response/writeback.py's complete_run
   call used `datetime.now()` (naive LOCAL time) for completed_at, while
   every other repositories.py timestamp defaults to `datetime.utcnow()`
   (_now()). On a server not in UTC, a run's completed_at could sort
@@ -31,7 +31,7 @@ Covers:
     B. resolve_question()/start_run() bind a real datetime object (not
        a float) to their DATETIME columns when given Trace.timestamp's
        actual float shape — FakeConnection param inspection.
-    C. structural: writeback.py's shadow_complete_run call uses
+    C. structural: writeback.py's complete_run call uses
        datetime.utcnow(), not datetime.now().
     D. every `X or _now()` timestamp default in repositories.py is
        preceded by `_coerce_datetime(X)` — no call site was missed.
@@ -156,16 +156,16 @@ check(
 
 # ============================================================
 # C. Structural: writeback.py uses datetime.utcnow(), not datetime.now(),
-# for shadow_complete_run's completed_at (UTC-consistency with _now()).
+# for complete_run's completed_at (UTC-consistency with _now()).
 # ============================================================
 
 _src = inspect.getsource(writeback_mod)
-_call_start = _src.find("shadow_complete_run(")
+_call_start = _src.find("complete_run(")
 _call_end = _src.find(")", _src.find("log=log, verbose=verbose", _call_start))
 _call_block = _src[_call_start:_call_end]
 
 check(
-    "C: shadow_complete_run's completed_at uses datetime.utcnow() "
+    "C: complete_run's completed_at uses datetime.utcnow() "
     "(matches repositories.py's _now() = datetime.utcnow(), not local time)",
     "completed_at=datetime.utcnow()" in _call_block,
     f"{_call_block}",

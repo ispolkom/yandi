@@ -62,7 +62,7 @@ from agent.dataset_builder import get_dataset_builder
 from agent.orchestrator.epistemic.trust_gate import _calculate_delta_factors
 from agent.orchestrator.epistemic.canonical_trust import compute_canonical_trust
 from agent.orchestrator.runtime.profiling import report_pipeline_profile
-from agent.db.sql.shadow_write import shadow_complete_run
+from agent.db.sql.shadow_write import complete_run
 from agent.claim_history_note import build_claim_history_notes, format_history_note_block
 from agent.contrarian_check import check_for_alternative_theory, format_alternative_note
 
@@ -753,10 +753,9 @@ def run_optimistic_respond(
     # regression test for a concrete case where they diverge.
     trace.add_observation("delivered_answer_text", optimistic.text)
 
-    # Этап 5 (SQL shadow write): fail-open, never touches the JSON path
-    # above or below it — see agent/db/sql/shadow_write.py's module
-    # docstring and agent/db_sql_shadow_write_regression_test.py.
-    shadow_complete_run(
+    # "Точка ноль" v13: PRIMARY, FAIL LOUD — see agent/orchestrator_v2.py's
+    # own record_question_and_run()/complete_run() call sites for why.
+    complete_run(
         run_id=trace_id,
         question_id=sql_question_id,
         delivered_answer_text=optimistic.text,
@@ -767,7 +766,6 @@ def run_optimistic_respond(
         diverged=(_canonical_result["diverged"] if synthesis_result else False),
         stricter_strand=(_canonical_result.get("stricter_strand") if synthesis_result else None),
         reason=(_canonical_result.get("reason") if synthesis_result else None),
-        log=log, verbose=verbose,
     )
 
     tracer.save_trace(trace)
