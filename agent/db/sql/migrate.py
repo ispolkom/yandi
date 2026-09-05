@@ -24,7 +24,7 @@ from agent.db.sql.schema import (
     SCHEMA_VERSION,
 )
 
-SCHEMA_VERSION_DESCRIPTION = "v13: source_observation full EvidenceRecord fidelity + trace_record + delayed_validation_event (\"точка ноль\" — orch_tracer.py/verification_memory.py's JSONL trace store retired)"
+SCHEMA_VERSION_DESCRIPTION = "v14: knowledge_query_archive (\"точка ноль\" — agent/db/manager.py's sqlite KnowledgeDB query-log/moderation-queue retired)"
 
 
 def record_schema_version(
