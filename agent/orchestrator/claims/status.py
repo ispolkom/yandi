@@ -674,13 +674,13 @@ def finalize_claim_trace_and_grounding(claims_data, trace, rejected_structural_c
             if verbose:
                 log(f"[VerificationMemory] Ошибка сохранения evidence: {e}")
 
-        # Этап 5 (SQL shadow write): same SAVE point as the JSON write
-        # just above, fail-open, never affects it either way — see
-        # agent/db/sql/shadow_write.py's module docstring.
-        from agent.db.sql.shadow_write import shadow_record_claims_and_evidence
-        shadow_record_claims_and_evidence(
+        # "Точка ноль" v13 (owner mandate, 2026-09): same SAVE point as
+        # the in-memory Trace build just above — now the PRIMARY,
+        # LOSSLESS record of this run's claims+evidence, FAIL LOUD (see
+        # agent/db/sql/shadow_write.py::record_claims_and_evidence()).
+        from agent.db.sql.shadow_write import record_claims_and_evidence
+        record_claims_and_evidence(
             run_id=trace.trace_id, claims_data=claims_data, evidence_data=evidence_data,
-            log=log, verbose=verbose,
         )
 
     if verbose:

@@ -14,57 +14,52 @@ Scope, deliberately minimal (per the customer's own Phase 4C decision,
 and "НЕ ТРОГАТЬ ПОКА: ... Self-learning"): this records the delayed event
 and links it to the original trace by trace_id, capturing the original
 canonical Trust for later before/after comparison. It does NOT recompute
-canonical Trust automatically and does NOT mutate the original trace
-file - that is roadmap Phase I-2/I-3 (Delayed Supervision / Outcome
-Revision) territory, explicitly out of scope here. "Trust не меняется
-только ради consensus" (the customer's own words) is satisfied trivially
-in this minimal version: nothing in this module ever changes Trust: it
-only appends an immutable, trace-linked observation for a future,
-separately-scoped Delayed Supervision mechanism to consume.
+canonical Trust automatically and does NOT mutate the original trace -
+that is roadmap Phase I-2/I-3 (Delayed Supervision / Outcome Revision)
+territory, explicitly out of scope here. "Trust не меняется только ради
+consensus" (the customer's own words) is satisfied trivially in this
+minimal version: nothing in this module ever changes Trust: it only
+appends an immutable, trace-linked observation for a future, separately-
+scoped Delayed Supervision mechanism to consume.
+
+"ТОЧКА НОЛЬ" v13 (owner mandate, 2026-09): registry/dataset/
+delayed_validation/{day}.jsonl is retired, not migrated. State now lives
+in delayed_validation_event (class B, append-only) — agent/db/sql/
+schema.py. find_trace_by_id() now queries verification_run/question_
+occurrence directly instead of linearly scanning JSONL day-files.
+
+FAIL LOUD, not fail-open: SqlUnavailable propagates out of every
+function here.
 """
 from __future__ import annotations
 
-import json
 import time
 import uuid
-from pathlib import Path
 from typing import Optional
 
-BASE       = Path(__file__).parent.parent
-TRACES_DIR = BASE / "registry" / "dataset" / "orch_traces"
-EVENTS_DIR = BASE / "registry" / "dataset" / "delayed_validation"
-EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+from agent.db.sql.connection import get_connection
+import agent.db.sql.repositories as repo
 
 
-def find_trace_by_id(trace_id: str, max_files: int = 14) -> Optional[dict]:
-    """Найти persisted trace по trace_id.
-
-    Сканирует последние `max_files` day-bucketed файлов
-    (registry/dataset/orch_traces/*.jsonl), самые свежие первыми -
-    delayed evidence обычно приходит минуты/часы, редко дни спустя.
-    Линейный скан, без индекса: приемлемо для текущего объёма
-    (сотни записей на файл); если объём вырастет на порядки, потребуется
-    отдельный index - не строится здесь заранее без доказанной нужды.
-    """
+def find_trace_by_id(trace_id: str) -> Optional[dict]:
+    """Find the persisted run + its question text by trace_id (== SQL
+    run_id). Returns a small dict shaped like the OLD JSONL trace's own
+    top-level fields (trace_id, trust) — the only two fields this
+    module's own caller (record_delayed_validation) ever read off it."""
     if not trace_id:
         return None
-    files = sorted(TRACES_DIR.glob("*.jsonl"), reverse=True)[:max_files]
-    for f in files:
-        try:
-            text = f.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            if d.get("trace_id") == trace_id:
-                return d
-    return None
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT vr.run_id, aa.canonical_trust FROM verification_run vr "
+                "LEFT JOIN answer_assessment aa ON aa.run_id = vr.run_id "
+                "WHERE vr.run_id=%s ORDER BY aa.created_at DESC LIMIT 1",
+                (trace_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    return {"trace_id": row["run_id"], "trust": row.get("canonical_trust")}
 
 
 def record_delayed_validation(
@@ -76,19 +71,19 @@ def record_delayed_validation(
 ) -> dict:
     """Persist a delayed external validation event, linked to its
     originating trace by id (if found - trace_id may be empty or the
-    trace may have aged out of the scanned window; both are recorded
-    honestly via trace_found, not silently dropped or faked).
+    run may not exist; both are recorded honestly via trace_found, not
+    silently dropped or faked).
 
-    Never mutates the original trace file and never recomputes canonical
-    Trust - see this module's docstring for why that boundary is
-    deliberate, not an oversight.
+    Never mutates the original run/Trust - see this module's docstring
+    for why that boundary is deliberate, not an oversight.
 
     Returns the recorded event dict, so the caller (pet) can project it
     into a UI without re-deriving anything or computing its own verdict.
     """
     trace = find_trace_by_id(trace_id)
+    event_id = f"dv_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     event = {
-        "event_id":       f"dv_{int(time.time())}_{uuid.uuid4().hex[:8]}",
+        "event_id":       event_id,
         "trace_id":       trace_id,
         "trace_found":    trace is not None,
         "original_trust": trace.get("trust") if trace else None,
@@ -99,10 +94,12 @@ def record_delayed_validation(
         "recorded_at":    time.time(),
     }
 
-    day      = time.strftime("%Y%m%d")
-    out_file = EVENTS_DIR / f"{day}.jsonl"
-    with open(out_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    with get_connection() as conn:
+        repo.record_delayed_validation_event(
+            conn, event_id, trace_id or None, trace is not None,
+            trace.get("trust") if trace else None, source, verdict, reason=reason, raw=raw,
+        )
+        conn.commit()
 
     return event
 
@@ -110,24 +107,17 @@ def record_delayed_validation(
 def get_delayed_validations(trace_id: str, max_files: int = 30) -> list[dict]:
     """Вернуть все delayed-validation события для данного trace_id
     (для UI/будущего self-learning: 'что происходило с этой трассой
-    после того, как ответ был отдан')."""
+    после того, как ответ был отдан'). `max_files` kept as a parameter
+    name for call-site compatibility — now just the row limit."""
     if not trace_id:
         return []
-    out: list[dict] = []
-    files = sorted(EVENTS_DIR.glob("*.jsonl"), reverse=True)[:max_files]
-    for f in files:
-        try:
-            text = f.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            if d.get("trace_id") == trace_id:
-                out.append(d)
-    return out
+    with get_connection() as conn:
+        rows = repo.list_delayed_validation_events(conn, trace_id, limit=max_files)
+    return [
+        {
+            "event_id": r["event_id"], "trace_id": r["run_id"], "trace_found": bool(r["trace_found"]),
+            "original_trust": r.get("original_trust"), "source": r["source"], "verdict": r["verdict"],
+            "reason": r.get("reason"), "raw": r.get("raw"), "recorded_at": r["created_at"],
+        }
+        for r in rows
+    ]

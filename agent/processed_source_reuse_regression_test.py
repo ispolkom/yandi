@@ -19,10 +19,13 @@ to genuinely new candidates. Covers:
   - route_side (WebSnippet.origin -> runtime evidence -> Trace ->
     memory reconstruction) surviving the full round trip (Finding 2).
 
-CRITICAL: registry/index.db and registry/dataset/orch_traces/*.jsonl
-are REAL, accumulated state — every test here patches agent.
-verification_memory.INDEX_DB/TRACES_DIR and agent.orch_tracer.
-TRACES_DIR to isolated temp paths.
+"ТОЧКА НОЛЬ" v13 (owner mandate, 2026-09): registry/index.db (sqlite
+locator) and registry/dataset/orch_traces/*.jsonl are BOTH retired, not
+migrated. Every test here uses a fake SQL connection
+(agent.db_sql_fake_fixtures) standing in for claim_occurrence/
+source_observation/evidence_relation/trace_record, and calls
+record_claims_and_evidence() explicitly (mirroring agent/orchestrator/
+claims/status.py's real production sequence) before save_trace().
 
 Run: /home/iam/venv/bin/python3 -m agent.processed_source_reuse_regression_test
 """
@@ -40,6 +43,7 @@ import agent.transport_memory as tm
 from agent.orch_schemas import EvidenceRecord, ClaimRecord
 from agent.orch_web_scraper import SharedFetchCache, _budgeted_side_candidates, scrape_budgeted
 from agent.claim_identity import compute_claim_content_hash
+from agent.db_sql_fake_fixtures import fresh_fake as _fresh_fake, record as _record
 
 PASS = 0
 FAIL = 0
@@ -55,29 +59,16 @@ def check(name: str, condition: bool, detail: str = ""):
         print(f"FAIL {name} {detail}")
 
 
-def _isolated_paths():
-    traces = Path(tempfile.mkdtemp(prefix="yandi_p6_traces_"))
-    index = Path(tempfile.mkdtemp(prefix="yandi_p6_index_")) / "index.db"
-    return traces, index
-
-
-def _vm_patches(traces_dir, index_db):
-    return (
-        patch.object(ot, "TRACES_DIR", traces_dir),
-        patch.object(vm, "TRACES_DIR", traces_dir),
-        patch.object(vm, "INDEX_DB", index_db),
-    )
-
-
 def _transport_patches():
     d = Path(tempfile.mkdtemp(prefix="yandi_p6_transport_"))
     f = d / "transport_memory.json"
     return patch.object(tm, "REGISTRY_DIR", d), patch.object(tm, "MEMORY_FILE", f)
 
 
-def _save_claim(trace, evidence_data, claim):
+def _save_claim(conn, trace, evidence_data, claim, started_at=None):
     trace.add_claim_raw(claim)
     vm.persist_verification_evidence(trace, [claim], evidence_data)
+    _record(conn, trace.trace_id, [claim], evidence_data, started_at=started_at)
     ot.DecisionTracer().save_trace(trace)
 
 
@@ -109,142 +100,126 @@ check(
 # 3. Exact content_hash scope: claim X processed A does not block claim Y.
 # ============================================================
 
-traces_3, index_3 = _isolated_paths()
-p1, p2, p3 = _vm_patches(traces_3, index_3)
+conn_3 = _fresh_fake()
 
-with p1, p2, p3:
-    claim_x = {"claim_id": "cl_x", "claim_text": "Утверждение X про планету Юпитер.",
-               "content_hash": compute_claim_content_hash("Утверждение X про планету Юпитер."),
-               "evidence_relations": [{"evidence_id": "ev_x", "relation": "supports", "method": "nli"}]}
-    ev_data_x = [{"evidence_id": "ev_x", "source_uri": "https://shared.example/page",
-                  "content_excerpt": "shared content"}]
-    trace_x = ot.Trace(trace_id="t_x", timestamp=time.time(), query="q")
-    _save_claim(trace_x, ev_data_x, claim_x)
+claim_x = {"claim_id": "cl_x", "claim_text": "Утверждение X про планету Юпитер.",
+           "content_hash": compute_claim_content_hash("Утверждение X про планету Юпитер."),
+           "evidence_relations": [{"evidence_id": "ev_x", "relation": "supports", "method": "nli"}]}
+ev_data_x = [{"evidence_id": "ev_x", "source_uri": "https://shared.example/page",
+              "content_excerpt": "shared content"}]
+trace_x = ot.Trace(trace_id="t_x", timestamp=time.time(), query="q")
+_save_claim(conn_3, trace_x, ev_data_x, claim_x)
 
-    urls_x, _ = vm.get_historical_web_urls(claim_x["content_hash"])
-    urls_y, occ_y = vm.get_historical_web_urls(
-        compute_claim_content_hash("Совершенно другое утверждение Y про биологию клетки.")
-    )
+urls_x, _ = vm.get_historical_web_urls(claim_x["content_hash"])
+urls_y, occ_y = vm.get_historical_web_urls(
+    compute_claim_content_hash("Совершенно другое утверждение Y про биологию клетки.")
+)
 
-    check(
-        "3: claim X's processed set contains the shared URL",
-        "https://shared.example/page" in urls_x,
-    )
-    check(
-        "3: claim Y (different content_hash) has an EMPTY processed set — "
-        "the same URL remains available to it",
-        len(urls_y) == 0 and occ_y == 0,
-        f"urls_y={urls_y} occ_y={occ_y}",
-    )
+check(
+    "3: claim X's processed set contains the shared URL",
+    "https://shared.example/page" in urls_x,
+)
+check(
+    "3: claim Y (different content_hash) has an EMPTY processed set — "
+    "the same URL remains available to it",
+    len(urls_y) == 0 and occ_y == 0,
+    f"urls_y={urls_y} occ_y={occ_y}",
+)
 
 # ============================================================
 # 4. Multiple historical traces UNION: RUN1{A,B} + RUN2{C,D} -> {A,B,C,D}.
 # ============================================================
 
-traces_4, index_4 = _isolated_paths()
-p1, p2, p3 = _vm_patches(traces_4, index_4)
+conn_4 = _fresh_fake()
+CH4 = compute_claim_content_hash("Claim повторяющееся утверждение про историю.")
 
-with p1, p2, p3:
-    CH4 = compute_claim_content_hash("Claim повторяющееся утверждение про историю.")
+claim_r1 = {"claim_id": "cl_r1", "claim_text": "Claim повторяющееся утверждение про историю.",
+            "content_hash": CH4,
+            "evidence_relations": [{"evidence_id": "ev_a", "relation": "supports", "method": "nli"},
+                                    {"evidence_id": "ev_b", "relation": "uncertain", "method": "nli"}]}
+ev_data_r1 = [{"evidence_id": "ev_a", "source_uri": "https://union.example/A", "content_excerpt": "a"},
+              {"evidence_id": "ev_b", "source_uri": "https://union.example/B", "content_excerpt": "b"}]
+trace_r1 = ot.Trace(trace_id="RUN1", timestamp=1000.0, query="q")
+_save_claim(conn_4, trace_r1, ev_data_r1, claim_r1, started_at=1000.0)
 
-    claim_r1 = {"claim_id": "cl_r1", "claim_text": "Claim повторяющееся утверждение про историю.",
-                "content_hash": CH4,
-                "evidence_relations": [{"evidence_id": "ev_a", "relation": "supports", "method": "nli"},
-                                        {"evidence_id": "ev_b", "relation": "uncertain", "method": "nli"}]}
-    ev_data_r1 = [{"evidence_id": "ev_a", "source_uri": "https://union.example/A", "content_excerpt": "a"},
-                  {"evidence_id": "ev_b", "source_uri": "https://union.example/B", "content_excerpt": "b"}]
-    trace_r1 = ot.Trace(trace_id="RUN1", timestamp=1000.0, query="q")
-    _save_claim(trace_r1, ev_data_r1, claim_r1)
+claim_r2 = {"claim_id": "cl_r2", "claim_text": "Claim повторяющееся утверждение про историю.",
+            "content_hash": CH4,
+            "evidence_relations": [{"evidence_id": "ev_c", "relation": "contradicts", "method": "nli"},
+                                    {"evidence_id": "ev_d", "relation": "unrelated", "method": "nli"}]}
+ev_data_r2 = [{"evidence_id": "ev_c", "source_uri": "https://union.example/C", "content_excerpt": "c"},
+              {"evidence_id": "ev_d", "source_uri": "https://union.example/D", "content_excerpt": "d"}]
+trace_r2 = ot.Trace(trace_id="RUN2", timestamp=2000.0, query="q")
+_save_claim(conn_4, trace_r2, ev_data_r2, claim_r2, started_at=2000.0)
 
-    claim_r2 = {"claim_id": "cl_r2", "claim_text": "Claim повторяющееся утверждение про историю.",
-                "content_hash": CH4,
-                "evidence_relations": [{"evidence_id": "ev_c", "relation": "contradicts", "method": "nli"},
-                                        {"evidence_id": "ev_d", "relation": "unrelated", "method": "nli"}]}
-    ev_data_r2 = [{"evidence_id": "ev_c", "source_uri": "https://union.example/C", "content_excerpt": "c"},
-                  {"evidence_id": "ev_d", "source_uri": "https://union.example/D", "content_excerpt": "d"}]
-    trace_r2 = ot.Trace(trace_id="RUN2", timestamp=2000.0, query="q")
-    _save_claim(trace_r2, ev_data_r2, claim_r2)
+urls_union, occurrences = vm.get_historical_web_urls(CH4)
 
-    urls_union, occurrences = vm.get_historical_web_urls(CH4)
-
-    check(
-        "4: union across RUN1{A,B} + RUN2{C,D} = {A,B,C,D}, not just the latest run's {C,D}",
-        urls_union == {"https://union.example/A", "https://union.example/B",
-                        "https://union.example/C", "https://union.example/D"},
-        f"{urls_union}",
-    )
-    check("4: historical_occurrences counts BOTH runs", occurrences == 2, f"{occurrences}")
+check(
+    "4: union across RUN1{A,B} + RUN2{C,D} = {A,B,C,D}, not just the latest run's {C,D}",
+    urls_union == {"https://union.example/A", "https://union.example/B",
+                    "https://union.example/C", "https://union.example/D"},
+    f"{urls_union}",
+)
+check("4: historical_occurrences counts BOTH runs", occurrences == 2, f"{occurrences}")
 
 # ============================================================
 # 5. Restart persistence: fresh lookup after simulated process restart.
 # ============================================================
 
-traces_5, index_5 = _isolated_paths()
-p1, p2, p3 = _vm_patches(traces_5, index_5)
+conn_5 = _fresh_fake()
+CH5 = compute_claim_content_hash("Claim для проверки survival после restart.")
+claim_5 = {"claim_id": "cl_5", "claim_text": "Claim для проверки survival после restart.",
+           "content_hash": CH5,
+           "evidence_relations": [{"evidence_id": "ev_5", "relation": "supports", "method": "nli"}]}
+ev_data_5 = [{"evidence_id": "ev_5", "source_uri": "https://restart.example/x", "content_excerpt": "x"}]
+trace_5 = ot.Trace(trace_id="t_5", timestamp=time.time(), query="q")
+_save_claim(conn_5, trace_5, ev_data_5, claim_5)
 
-with p1, p2, p3:
-    CH5 = compute_claim_content_hash("Claim для проверки survival после restart.")
-    claim_5 = {"claim_id": "cl_5", "claim_text": "Claim для проверки survival после restart.",
-               "content_hash": CH5,
-               "evidence_relations": [{"evidence_id": "ev_5", "relation": "supports", "method": "nli"}]}
-    ev_data_5 = [{"evidence_id": "ev_5", "source_uri": "https://restart.example/x", "content_excerpt": "x"}]
-    trace_5 = ot.Trace(trace_id="t_5", timestamp=time.time(), query="q")
-    _save_claim(trace_5, ev_data_5, claim_5)
-
-    # Simulate restart: nothing in-process is reused, only the isolated
-    # on-disk paths (same patches, representing "the files are still
-    # there after a restart" — a fresh DecisionTracer()/module state
-    # would behave identically since nothing here is held in memory
-    # across calls other than the files themselves).
-    urls_after_restart, _ = vm.get_historical_web_urls(CH5)
-    check(
-        "5: processed URL survives a simulated restart (on-disk index + JSONL, no in-memory state)",
-        "https://restart.example/x" in urls_after_restart,
-    )
+# Simulate restart: nothing in-process is reused except the fake SQL
+# connection itself, standing in for "the database still has the rows
+# after a restart" — a fresh DecisionTracer()/module state would behave
+# identically since nothing here is held in memory across calls other
+# than the persisted rows themselves.
+urls_after_restart, _ = vm.get_historical_web_urls(CH5)
+check(
+    "5: processed URL survives a simulated restart (SQL-persisted rows, no in-memory state)",
+    "https://restart.example/x" in urls_after_restart,
+)
 
 # ============================================================
-# 6. get_historical_web_urls uses index locators, not a full JSONL scan.
+# 6. get_historical_web_urls filters by content_hash exactly (a real SQL
+#    WHERE clause on claim_occurrence.content_hash) — "ТОЧКА НОЛЬ" v13
+#    retired the byte-offset JSONL locator this test originally proved
+#    against (vm._read_trace_line() no longer exists); the equivalent
+#    guarantee now is that a WHERE-filtered query never leaks unrelated
+#    rows even when many exist in the same table.
 # ============================================================
 
-traces_6, index_6 = _isolated_paths()
-p1, p2, p3 = _vm_patches(traces_6, index_6)
+conn_6 = _fresh_fake()
+CH6 = compute_claim_content_hash("Claim locator-only lookup test уникальный.")
+claim_6 = {"claim_id": "cl_6", "claim_text": "Claim locator-only lookup test уникальный.",
+           "content_hash": CH6,
+           "evidence_relations": [{"evidence_id": "ev_6", "relation": "supports", "method": "nli"}]}
+ev_data_6 = [{"evidence_id": "ev_6", "source_uri": "https://locator.example/x", "content_excerpt": "x"}]
+trace_6 = ot.Trace(trace_id="t_6", timestamp=time.time(), query="q")
+_save_claim(conn_6, trace_6, ev_data_6, claim_6)
 
-with p1, p2, p3:
-    CH6 = compute_claim_content_hash("Claim locator-only lookup test уникальный.")
-    claim_6 = {"claim_id": "cl_6", "claim_text": "Claim locator-only lookup test уникальный.",
-               "content_hash": CH6,
-               "evidence_relations": [{"evidence_id": "ev_6", "relation": "supports", "method": "nli"}]}
-    ev_data_6 = [{"evidence_id": "ev_6", "source_uri": "https://locator.example/x", "content_excerpt": "x"}]
-    trace_6 = ot.Trace(trace_id="t_6", timestamp=time.time(), query="q")
-    _save_claim(trace_6, ev_data_6, claim_6)
+# 50 NOISE claim_occurrence rows, unrelated (different content_hash),
+# in the SAME fake table — a broken WHERE clause / accidental full
+# scan would leak or miscount against CH6.
+for i in range(50):
+    noise_claim = {"claim_id": f"cl_noise{i}", "claim_text": "noise",
+                   "content_hash": f"noise_hash_{i}"}
+    _record(conn_6, f"t_noise{i}", [noise_claim], [])
 
-    # Add a bunch of NOISE lines to the SAME day-file, unrelated to CH6,
-    # that are NOT indexed (simulating other claims/traces with
-    # different content_hash sharing the file) — a full-scan
-    # implementation would still work, but a locator-based one reads
-    # ONLY the byte offsets the index actually points to.
-    day_file = traces_6 / f"{time.strftime('%Y%m%d')}.jsonl"
-    with day_file.open("a", encoding="utf-8") as f:
-        for i in range(50):
-            f.write('{"trace_id": "noise", "claims": [], "evidence": []}\n')
+urls_6, occ_6 = vm.get_historical_web_urls(CH6)
 
-    read_calls = []
-    _orig_read = vm._read_trace_line
-
-    def _counting_read(jsonl_file, byte_offset):
-        read_calls.append(byte_offset)
-        return _orig_read(jsonl_file, byte_offset)
-
-    with patch.object(vm, "_read_trace_line", _counting_read):
-        urls_6, occ_6 = vm.get_historical_web_urls(CH6)
-
-    check(
-        "6: exactly ONE seek+readline was performed (one locator row for CH6), "
-        "not 51 lines scanned",
-        len(read_calls) == 1,
-        f"read_calls={read_calls}",
-    )
-    check("6: the correct URL was still found via its locator", "https://locator.example/x" in urls_6)
+check(
+    "6: exactly ONE occurrence found for CH6 despite 50 unrelated noise "
+    "rows in the same table (WHERE content_hash=%s, not a full scan/leak)",
+    occ_6 == 1,
+    f"occ_6={occ_6}",
+)
+check("6: the correct URL was still found", "https://locator.example/x" in urls_6, f"{urls_6}")
 
 # ============================================================
 # 7-10. supports/contradicts/uncertain/unrelated all count as processed
@@ -252,39 +227,36 @@ with p1, p2, p3:
 #       "was this a persisted EvidenceRecord linked to this claim").
 # ============================================================
 
-traces_7, index_7 = _isolated_paths()
-p1, p2, p3 = _vm_patches(traces_7, index_7)
+conn_7 = _fresh_fake()
+CH7 = compute_claim_content_hash("Claim для проверки всех типов relation.")
+claim_7 = {
+    "claim_id": "cl_7", "claim_text": "Claim для проверки всех типов relation.",
+    "content_hash": CH7,
+    "evidence_relations": [
+        {"evidence_id": "ev_supports", "relation": "supports", "method": "nli"},
+        {"evidence_id": "ev_contradicts", "relation": "contradicts", "method": "nli"},
+        {"evidence_id": "ev_uncertain", "relation": "uncertain", "method": "nli"},
+        {"evidence_id": "ev_unrelated", "relation": "unrelated", "method": "nli"},
+    ],
+}
+ev_data_7 = [
+    {"evidence_id": "ev_supports", "source_uri": "https://rel.example/supports", "content_excerpt": "s"},
+    {"evidence_id": "ev_contradicts", "source_uri": "https://rel.example/contradicts", "content_excerpt": "c"},
+    {"evidence_id": "ev_uncertain", "source_uri": "https://rel.example/uncertain", "content_excerpt": "u"},
+    {"evidence_id": "ev_unrelated", "source_uri": "https://rel.example/unrelated", "content_excerpt": "un"},
+]
+trace_7 = ot.Trace(trace_id="t_7", timestamp=time.time(), query="q")
+_save_claim(conn_7, trace_7, ev_data_7, claim_7)
 
-with p1, p2, p3:
-    CH7 = compute_claim_content_hash("Claim для проверки всех типов relation.")
-    claim_7 = {
-        "claim_id": "cl_7", "claim_text": "Claim для проверки всех типов relation.",
-        "content_hash": CH7,
-        "evidence_relations": [
-            {"evidence_id": "ev_supports", "relation": "supports", "method": "nli"},
-            {"evidence_id": "ev_contradicts", "relation": "contradicts", "method": "nli"},
-            {"evidence_id": "ev_uncertain", "relation": "uncertain", "method": "nli"},
-            {"evidence_id": "ev_unrelated", "relation": "unrelated", "method": "nli"},
-        ],
-    }
-    ev_data_7 = [
-        {"evidence_id": "ev_supports", "source_uri": "https://rel.example/supports", "content_excerpt": "s"},
-        {"evidence_id": "ev_contradicts", "source_uri": "https://rel.example/contradicts", "content_excerpt": "c"},
-        {"evidence_id": "ev_uncertain", "source_uri": "https://rel.example/uncertain", "content_excerpt": "u"},
-        {"evidence_id": "ev_unrelated", "source_uri": "https://rel.example/unrelated", "content_excerpt": "un"},
-    ]
-    trace_7 = ot.Trace(trace_id="t_7", timestamp=time.time(), query="q")
-    _save_claim(trace_7, ev_data_7, claim_7)
+urls_7, _ = vm.get_historical_web_urls(CH7)
 
-    urls_7, _ = vm.get_historical_web_urls(CH7)
-
-    for label, url in [
-        ("7: supports", "https://rel.example/supports"),
-        ("8: contradicts", "https://rel.example/contradicts"),
-        ("9: uncertain", "https://rel.example/uncertain"),
-        ("10: unrelated (IF persisted as verification evidence)", "https://rel.example/unrelated"),
-    ]:
-        check(f"{label} URL counts as processed regardless of relation type", url in urls_7, f"{urls_7}")
+for label, url in [
+    ("7: supports", "https://rel.example/supports"),
+    ("8: contradicts", "https://rel.example/contradicts"),
+    ("9: uncertain", "https://rel.example/uncertain"),
+    ("10: unrelated (IF persisted as verification evidence)", "https://rel.example/unrelated"),
+]:
+    check(f"{label} URL counts as processed regardless of relation type", url in urls_7, f"{urls_7}")
 
 # ============================================================
 # 11/12/13/14/15/16/17/18/19. End-to-end scrape_budgeted() with a
@@ -294,11 +266,10 @@ with p1, p2, p3:
 # selection do not trigger a reserve fetch.
 # ============================================================
 
-traces_e2e, index_e2e = _isolated_paths()
-p1, p2, p3 = _vm_patches(traces_e2e, index_e2e)
+conn_e2e = _fresh_fake()
 pt1, pt2 = _transport_patches()
 
-with p1, p2, p3, pt1, pt2:
+with pt1, pt2:
     CH_E2E = compute_claim_content_hash("End to end claim про повторный web cycle.")
 
     # RUN1: claim gets evidence at https://e2e.example/OLD1 and OLD2.
@@ -315,7 +286,7 @@ with p1, p2, p3, pt1, pt2:
         {"evidence_id": "ev_old2", "source_uri": "https://e2e.example/OLD2", "content_excerpt": "old2"},
     ]
     trace_run1 = ot.Trace(trace_id="t_e2e_run1", timestamp=time.time(), query="q")
-    _save_claim(trace_run1, ev_data_run1, claim_run1)
+    _save_claim(conn_e2e, trace_run1, ev_data_run1, claim_run1)
 
     # Also stoplist a THIRD, always-broken URL — independent mechanism.
     tm.stoplist_url("https://e2e.example/BANNED", "http_403", "proxy_http_403")
@@ -381,11 +352,9 @@ with p1, p2, p3, pt1, pt2:
 #     1 budget slot) even with processed exclusion active.
 # ============================================================
 
-traces_17, index_17 = _isolated_paths()
-p1, p2, p3 = _vm_patches(traces_17, index_17)
 pt1, pt2 = _transport_patches()
 
-with p1, p2, p3, pt1, pt2:
+with pt1, pt2:
     def _fake_ddgs_17(query, max_results=10, fetch_cache=None):
         return ["https://proxy17.example/x"], []
 
@@ -445,117 +414,121 @@ check(
 # still point to the TRUE original (RUN1), not the intermediate hop.
 # ============================================================
 
-traces_mh, index_mh = _isolated_paths()
-p1, p2, p3 = _vm_patches(traces_mh, index_mh)
+conn_mh = _fresh_fake()
+CH_MH = compute_claim_content_hash("Multi hop provenance test claim про цепочку.")
 
-with p1, p2, p3:
-    CH_MH = compute_claim_content_hash("Multi hop provenance test claim про цепочку.")
+claim_mh1 = {
+    "claim_id": "cl_mh1", "claim_text": "Multi hop provenance test claim про цепочку.",
+    "content_hash": CH_MH,
+    "evidence_relations": [{"evidence_id": "ev_mh", "relation": "supports", "method": "nli"}],
+}
+ev_data_mh1 = [{
+    "evidence_id": "ev_mh", "source_type": "web", "source_uri": "https://mh.example/original",
+    "content_excerpt": "original observation", "route": "internet", "from_memory": False,
+    "source_cluster_id": "sc_mh_ORIGINAL",
+}]
+trace_mh1 = ot.Trace(trace_id="MH_RUN1", timestamp=1000.0, query="q")
+trace_mh1.claims.append(ClaimRecord(
+    claim_id="cl_mh1", claim_text="Multi hop provenance test claim про цепочку.",
+    content_hash=CH_MH,
+    evidence_relations=[{"evidence_id": "ev_mh", "relation": "supports", "method": "nli"}],
+))
+trace_mh1.evidence.append(EvidenceRecord(
+    evidence_id="ev_mh", source_type="web", source_uri="https://mh.example/original",
+    content_excerpt="original observation", route="internet", from_memory=False,
+    source_cluster_id="sc_mh_ORIGINAL",
+))
+_record(conn_mh, "MH_RUN1", [claim_mh1], ev_data_mh1, started_at=1000.0)
+ot.DecisionTracer().save_trace(trace_mh1)
 
-    trace_mh1 = ot.Trace(trace_id="MH_RUN1", timestamp=1000.0, query="q")
-    trace_mh1.claims.append(ClaimRecord(
-        claim_id="cl_mh1", claim_text="Multi hop provenance test claim про цепочку.",
-        content_hash=CH_MH,
-        evidence_relations=[{"evidence_id": "ev_mh", "relation": "supports", "method": "nli"}],
-    ))
-    trace_mh1.evidence.append(EvidenceRecord(
-        evidence_id="ev_mh", source_type="web", source_uri="https://mh.example/original",
-        content_excerpt="original observation", route="internet", from_memory=False,
-        source_cluster_id="sc_mh_ORIGINAL",
-    ))
-    ot.DecisionTracer().save_trace(trace_mh1)
+reconstructed_mh2 = vm.lookup_historical_evidence({
+    "claim_id": "cl_mh2", "claim_text": "Multi hop provenance test claim про цепочку.",
+    "content_hash": CH_MH,
+})
+claim_mh2 = {
+    "claim_id": "cl_mh2", "claim_text": "Multi hop provenance test claim про цепочку.",
+    "content_hash": CH_MH,
+    "evidence_relations": [{"evidence_id": "ev_mh", "relation": "contradicts", "method": "nli"}],
+}
+trace_mh2 = ot.Trace(trace_id="MH_RUN2", timestamp=2000.0, query="q")
+_save_claim(conn_mh, trace_mh2, reconstructed_mh2, claim_mh2, started_at=2000.0)
 
-    reconstructed_mh2 = vm.lookup_historical_evidence({
-        "claim_id": "cl_mh2", "claim_text": "Multi hop provenance test claim про цепочку.",
-        "content_hash": CH_MH,
-    })
-    claim_mh2 = {
-        "claim_id": "cl_mh2", "claim_text": "Multi hop provenance test claim про цепочку.",
-        "content_hash": CH_MH,
-        "evidence_relations": [{"evidence_id": "ev_mh", "relation": "contradicts", "method": "nli"}],
-    }
-    trace_mh2 = ot.Trace(trace_id="MH_RUN2", timestamp=2000.0, query="q")
-    _save_claim(trace_mh2, reconstructed_mh2, claim_mh2)
+reconstructed_mh3 = vm.lookup_historical_evidence({
+    "claim_id": "cl_mh3", "claim_text": "Multi hop provenance test claim про цепочку.",
+    "content_hash": CH_MH,
+})
 
-    reconstructed_mh3 = vm.lookup_historical_evidence({
-        "claim_id": "cl_mh3", "claim_text": "Multi hop provenance test claim про цепочку.",
-        "content_hash": CH_MH,
-    })
-
-    check(
-        "22: after a THIRD generation reuse (RUN3 <- RUN2 <- RUN1), origin_route still = internet, not local_memory",
-        len(reconstructed_mh3) == 1 and reconstructed_mh3[0]["origin_route"] == "internet",
-        f"{reconstructed_mh3}",
-    )
-    check(
-        "22: origin_trace_id still points to the TRUE original (MH_RUN1), not the intermediate MH_RUN2",
-        reconstructed_mh3[0]["origin_trace_id"] == "MH_RUN1",
-        f"{reconstructed_mh3}",
-    )
-    check(
-        "23: origin_source_cluster_id remains stable (the ORIGINAL cluster) across both reuse hops",
-        reconstructed_mh3[0]["origin_source_cluster_id"] == "sc_mh_ORIGINAL",
-        f"{reconstructed_mh3}",
-    )
+check(
+    "22: after a THIRD generation reuse (RUN3 <- RUN2 <- RUN1), origin_route still = internet, not local_memory",
+    len(reconstructed_mh3) == 1 and reconstructed_mh3[0]["origin_route"] == "internet",
+    f"{reconstructed_mh3}",
+)
+check(
+    "22: origin_trace_id still points to the TRUE original (MH_RUN1), not the intermediate MH_RUN2",
+    reconstructed_mh3[0]["origin_trace_id"] == "MH_RUN1",
+    f"{reconstructed_mh3}",
+)
+check(
+    "23: origin_source_cluster_id remains stable (the ORIGINAL cluster) across both reuse hops",
+    reconstructed_mh3[0]["origin_source_cluster_id"] == "sc_mh_ORIGINAL",
+    f"{reconstructed_mh3}",
+)
 
 # ============================================================
 # 24. Processed set is a URL SET — the same URL appearing across 3
 # traces (original + 2 reuse hops) counts ONCE, not 3 times.
 # ============================================================
 
-with p1, p2, p3:
-    urls_mh_final, occ_mh_final = vm.get_historical_web_urls(CH_MH)
-    check(
-        "24: processed set is a SET — the same URL across 3 traces (RUN1 original, "
-        "RUN2 reuse) counts once, not duplicated",
-        urls_mh_final == {"https://mh.example/original"},
-        f"{urls_mh_final}",
-    )
-    check("24: historical_occurrences correctly counts 2 distinct traces", occ_mh_final == 2, f"{occ_mh_final}")
+urls_mh_final, occ_mh_final = vm.get_historical_web_urls(CH_MH)
+check(
+    "24: processed set is a SET — the same URL across 3 traces (RUN1 original, "
+    "RUN2 reuse) counts once, not duplicated",
+    urls_mh_final == {"https://mh.example/original"},
+    f"{urls_mh_final}",
+)
+check("24: historical_occurrences correctly counts 2 distinct traces", occ_mh_final == 2, f"{occ_mh_final}")
 
 # ============================================================
 # 25. direct/counter origin (route_side) survives: WebSnippet -> runtime
 # evidence -> Trace -> reconstruction.
 # ============================================================
 
-traces_25, index_25 = _isolated_paths()
-p1, p2, p3 = _vm_patches(traces_25, index_25)
+conn_25 = _fresh_fake()
+CH_25 = compute_claim_content_hash("Route side survival test claim уникальный.")
+claim_25 = {
+    "claim_id": "cl_25", "claim_text": "Route side survival test claim уникальный.",
+    "content_hash": CH_25,
+    "evidence_relations": [{"evidence_id": "ev_direct25", "relation": "supports", "method": "nli"},
+                            {"evidence_id": "ev_counter25", "relation": "contradicts", "method": "nli"}],
+}
+ev_data_25 = [
+    {"evidence_id": "ev_direct25", "source_uri": "https://rs.example/direct",
+     "content_excerpt": "direct side content", "route_side": "direct"},
+    {"evidence_id": "ev_counter25", "source_uri": "https://rs.example/counter",
+     "content_excerpt": "counter side content", "route_side": "counter"},
+]
+trace_25 = ot.Trace(trace_id="t_25", timestamp=time.time(), query="q")
+_save_claim(conn_25, trace_25, ev_data_25, claim_25)
 
-with p1, p2, p3:
-    CH_25 = compute_claim_content_hash("Route side survival test claim уникальный.")
-    claim_25 = {
-        "claim_id": "cl_25", "claim_text": "Route side survival test claim уникальный.",
-        "content_hash": CH_25,
-        "evidence_relations": [{"evidence_id": "ev_direct25", "relation": "supports", "method": "nli"},
-                                {"evidence_id": "ev_counter25", "relation": "contradicts", "method": "nli"}],
-    }
-    ev_data_25 = [
-        {"evidence_id": "ev_direct25", "source_uri": "https://rs.example/direct",
-         "content_excerpt": "direct side content", "route_side": "direct"},
-        {"evidence_id": "ev_counter25", "source_uri": "https://rs.example/counter",
-         "content_excerpt": "counter side content", "route_side": "counter"},
-    ]
-    trace_25 = ot.Trace(trace_id="t_25", timestamp=time.time(), query="q")
-    _save_claim(trace_25, ev_data_25, claim_25)
+saved_25 = trace_25.to_dict()
+saved_route_sides = {e["source_uri"]: e["route_side"] for e in saved_25["evidence"]}
+check(
+    "25a: route_side persisted correctly in Trace (direct/counter, not overwritten)",
+    saved_route_sides.get("https://rs.example/direct") == "direct"
+    and saved_route_sides.get("https://rs.example/counter") == "counter",
+    f"{saved_route_sides}",
+)
 
-    saved_25 = trace_25.to_dict()
-    saved_route_sides = {e["source_uri"]: e["route_side"] for e in saved_25["evidence"]}
-    check(
-        "25a: route_side persisted correctly in Trace (direct/counter, not overwritten)",
-        saved_route_sides.get("https://rs.example/direct") == "direct"
-        and saved_route_sides.get("https://rs.example/counter") == "counter",
-        f"{saved_route_sides}",
-    )
-
-    reconstructed_25 = vm.lookup_historical_evidence({
-        "claim_id": "cl_25_new", "claim_text": claim_25["claim_text"], "content_hash": CH_25,
-    })
-    reconstructed_route_sides = {e["source_uri"]: e["route_side"] for e in reconstructed_25}
-    check(
-        "25b: route_side survives reconstruction from memory too",
-        reconstructed_route_sides.get("https://rs.example/direct") == "direct"
-        and reconstructed_route_sides.get("https://rs.example/counter") == "counter",
-        f"{reconstructed_route_sides}",
-    )
+reconstructed_25 = vm.lookup_historical_evidence({
+    "claim_id": "cl_25_new", "claim_text": claim_25["claim_text"], "content_hash": CH_25,
+})
+reconstructed_route_sides = {e["source_uri"]: e["route_side"] for e in reconstructed_25}
+check(
+    "25b: route_side survives reconstruction from memory too",
+    reconstructed_route_sides.get("https://rs.example/direct") == "direct"
+    and reconstructed_route_sides.get("https://rs.example/counter") == "counter",
+    f"{reconstructed_route_sides}",
+)
 
 # ============================================================
 # 26. Old regression suite (44/45-file) GREEN enforcement happens

@@ -40,15 +40,13 @@ Run: /home/iam/venv/bin/python3 -m agent.claim_history_note_regression_test
 from __future__ import annotations
 
 import inspect
-import tempfile
-from pathlib import Path
-from unittest.mock import patch
 
 import agent.orch_tracer as ot
 import agent.verification_memory as vm
 from agent.orch_schemas import EvidenceRecord
 from agent.claim_history_note import build_claim_history_notes, format_history_note_block
 from agent.verification_memory import get_family_historical_claims
+from agent.db_sql_fake_fixtures import fresh_fake as _fresh_fake, record as _record
 
 PASS = 0
 FAIL = 0
@@ -64,20 +62,14 @@ def check(name: str, condition: bool, detail: str = ""):
         print(f"FAIL {name} {detail}")
 
 
-def _make_env():
-    traces_dir = Path(tempfile.mkdtemp(prefix="chn_traces_"))
-    index_db = Path(tempfile.mkdtemp(prefix="chn_index_")) / "index.db"
-    return traces_dir, index_db
-
-
 def _persist_claim(
-    *, trace_id: str, claim_id: str, content_hash: str, semantic_family_id: str,
+    conn, *, trace_id: str, claim_id: str, content_hash: str, semantic_family_id: str,
     query: str = "q", claim_text: str = "default placeholder claim text", verification_status: str = "supported",
     claim_confidence: float = 0.7, evidence_id: str = None, source_uri: str = "https://x.example/a",
 ):
-    """Same established pattern as family_history_read_path_regression_
-    test.py: a real Trace, saved through the real DecisionTracer path —
-    not a hand-rolled JSONL line."""
+    """Real production sequence (record_claims_and_evidence() then
+    save_trace()), against a fresh fake SQL connection — same
+    established pattern as verification_memory_regression_test.py."""
     trace = ot.Trace(trace_id=trace_id, timestamp=0.0, query=query)
     claim_data = {
         "claim_id": claim_id,
@@ -87,6 +79,7 @@ def _persist_claim(
         "semantic_family_id": semantic_family_id,
         "verification_status": verification_status,
     }
+    evidence_data = []
     if evidence_id:
         claim_data["derived_from_evidence_ids"] = [evidence_id]
         claim_data["evidence_relations"] = [{
@@ -94,12 +87,18 @@ def _persist_claim(
             "evidence_role": "direct", "evidence_eligible": True,
             "source_class": "reference", "directness": "direct",
         }]
+        evidence_data.append({
+            "evidence_id": evidence_id, "source_type": "web", "source_uri": source_uri,
+            "content_excerpt": "excerpt", "source_class": "reference", "evidence_eligible": True,
+            "route": "internet",
+        })
         trace.add_evidence(EvidenceRecord(
             evidence_id=evidence_id, source_type="web", source_uri=source_uri,
             content_excerpt="excerpt", source_class="reference", evidence_eligible=True,
             route="internet",
         ))
     trace.add_claim_raw(claim_data)
+    _record(conn, trace_id, [claim_data], evidence_data, query_text=query)
     ot.DecisionTracer().save_trace(trace)
 
 
@@ -107,26 +106,23 @@ def _persist_claim(
 # A. get_family_historical_claims() — claim-level history.
 # ============================================================
 
-traces_a, index_a = _make_env()
-with patch.object(ot, "TRACES_DIR", traces_a), \
-     patch.object(vm, "TRACES_DIR", traces_a), \
-     patch.object(vm, "INDEX_DB", index_a):
+conn_a = _fresh_fake()
 
-    _persist_claim(
-        trace_id="t_mars1", claim_id="cl_mars1", content_hash="h_mars1",
-        semantic_family_id="fam_mars_moons", query="Сколько спутников у Марса?",
-        claim_text="У Марса два спутника: Фобос и Деймос.",
-        verification_status="supported",
-    )
-    _persist_claim(
-        trace_id="t_other", claim_id="cl_other", content_hash="h_other",
-        semantic_family_id="fam_unrelated", query="Какая планета ближе всего к Солнцу?",
-        claim_text="Меркурий ближе всего к Солнцу.",
-        verification_status="supported",
-    )
+_persist_claim(
+    conn_a, trace_id="t_mars1", claim_id="cl_mars1", content_hash="h_mars1",
+    semantic_family_id="fam_mars_moons", query="Сколько спутников у Марса?",
+    claim_text="У Марса два спутника: Фобос и Деймос.",
+    verification_status="supported",
+)
+_persist_claim(
+    conn_a, trace_id="t_other", claim_id="cl_other", content_hash="h_other",
+    semantic_family_id="fam_unrelated", query="Какая планета ближе всего к Солнцу?",
+    claim_text="Меркурий ближе всего к Солнцу.",
+    verification_status="supported",
+)
 
-    hist_mars = get_family_historical_claims("fam_mars_moons")
-    hist_unrelated = get_family_historical_claims("fam_unrelated")
+hist_mars = get_family_historical_claims("fam_mars_moons")
+hist_unrelated = get_family_historical_claims("fam_unrelated")
 
 check(
     "A1: get_family_historical_claims() finds the persisted Mars-moons claim",
@@ -156,20 +152,17 @@ check(
 # ============================================================
 
 # B1: fresh family (only this request's own claim exists) -> no note.
-traces_b1, index_b1 = _make_env()
-with patch.object(ot, "TRACES_DIR", traces_b1), \
-     patch.object(vm, "TRACES_DIR", traces_b1), \
-     patch.object(vm, "INDEX_DB", index_b1):
+conn_b1 = _fresh_fake()
 
-    _persist_claim(
-        trace_id="t_fresh_now", claim_id="cl_fresh_now", content_hash="h_fresh",
-        semantic_family_id="fam_fresh", query="Новый вопрос?",
-        claim_text="Свежее утверждение.", verification_status="supported",
-    )
-    notes_fresh = build_claim_history_notes([{
-        "claim_id": "cl_fresh_now", "claim_text": "Свежее утверждение.",
-        "semantic_family_id": "fam_fresh", "verification_status": "supported",
-    }])
+_persist_claim(
+    conn_b1, trace_id="t_fresh_now", claim_id="cl_fresh_now", content_hash="h_fresh",
+    semantic_family_id="fam_fresh", query="Новый вопрос?",
+    claim_text="Свежее утверждение.", verification_status="supported",
+)
+notes_fresh = build_claim_history_notes([{
+    "claim_id": "cl_fresh_now", "claim_text": "Свежее утверждение.",
+    "semantic_family_id": "fam_fresh", "verification_status": "supported",
+}])
 
 check(
     "B1: a genuinely fresh family (no OTHER occurrence) produces NO note "
@@ -179,21 +172,18 @@ check(
 )
 
 # B2: prior claim exists, SAME verification_status -> changed=False (reinforced).
-traces_b2, index_b2 = _make_env()
-with patch.object(ot, "TRACES_DIR", traces_b2), \
-     patch.object(vm, "TRACES_DIR", traces_b2), \
-     patch.object(vm, "INDEX_DB", index_b2):
+conn_b2 = _fresh_fake()
 
-    _persist_claim(
-        trace_id="t_mars_week1", claim_id="cl_mars_week1", content_hash="h_w1",
-        semantic_family_id="fam_mars_moons2", query="Сколько спутников у Марса?",
-        claim_text="У Марса два спутника.", verification_status="supported",
-    )
-    current_claims_reinforced = [{
-        "claim_id": "cl_mars_week2", "claim_text": "У Марса есть спутники.",
-        "semantic_family_id": "fam_mars_moons2", "verification_status": "supported",
-    }]
-    notes_reinforced = build_claim_history_notes(current_claims_reinforced)
+_persist_claim(
+    conn_b2, trace_id="t_mars_week1", claim_id="cl_mars_week1", content_hash="h_w1",
+    semantic_family_id="fam_mars_moons2", query="Сколько спутников у Марса?",
+    claim_text="У Марса два спутника.", verification_status="supported",
+)
+current_claims_reinforced = [{
+    "claim_id": "cl_mars_week2", "claim_text": "У Марса есть спутники.",
+    "semantic_family_id": "fam_mars_moons2", "verification_status": "supported",
+}]
+notes_reinforced = build_claim_history_notes(current_claims_reinforced)
 
 check(
     "B2: a prior claim in the SAME family with the SAME verification_status "
@@ -210,21 +200,18 @@ check(
 )
 
 # B3: prior claim exists, DIFFERENT verification_status -> changed=True.
-traces_b3, index_b3 = _make_env()
-with patch.object(ot, "TRACES_DIR", traces_b3), \
-     patch.object(vm, "TRACES_DIR", traces_b3), \
-     patch.object(vm, "INDEX_DB", index_b3):
+conn_b3 = _fresh_fake()
 
-    _persist_claim(
-        trace_id="t_changed_prior", claim_id="cl_changed_prior", content_hash="h_cp",
-        semantic_family_id="fam_changed", query="Есть ли спутники у Марса?",
-        claim_text="Неясно, есть ли у Марса спутники.", verification_status="unverified",
-    )
-    current_claims_changed = [{
-        "claim_id": "cl_changed_now", "claim_text": "У Марса точно есть спутники.",
-        "semantic_family_id": "fam_changed", "verification_status": "supported",
-    }]
-    notes_changed = build_claim_history_notes(current_claims_changed)
+_persist_claim(
+    conn_b3, trace_id="t_changed_prior", claim_id="cl_changed_prior", content_hash="h_cp",
+    semantic_family_id="fam_changed", query="Есть ли спутники у Марса?",
+    claim_text="Неясно, есть ли у Марса спутники.", verification_status="unverified",
+)
+current_claims_changed = [{
+    "claim_id": "cl_changed_now", "claim_text": "У Марса точно есть спутники.",
+    "semantic_family_id": "fam_changed", "verification_status": "supported",
+}]
+notes_changed = build_claim_history_notes(current_claims_changed)
 
 check(
     "B3: a prior claim with a DIFFERENT verification_status produces changed=True",
@@ -235,22 +222,19 @@ check(
 )
 
 # B4: two of THIS request's own claims share a family -> exactly ONE note (dedup by family).
-traces_b4, index_b4 = _make_env()
-with patch.object(ot, "TRACES_DIR", traces_b4), \
-     patch.object(vm, "TRACES_DIR", traces_b4), \
-     patch.object(vm, "INDEX_DB", index_b4):
+conn_b4 = _fresh_fake()
 
-    _persist_claim(
-        trace_id="t_dedup_prior", claim_id="cl_dedup_prior", content_hash="h_dp",
-        semantic_family_id="fam_dedup", query="Исходный вопрос про дедупликацию",
-        claim_text="Утверждение из прошлого запроса, достаточно длинное.",
-        verification_status="supported",
-    )
-    current_claims_dedup = [
-        {"claim_id": "cl_dedup_a", "claim_text": "a", "semantic_family_id": "fam_dedup", "verification_status": "supported"},
-        {"claim_id": "cl_dedup_b", "claim_text": "b", "semantic_family_id": "fam_dedup", "verification_status": "supported"},
-    ]
-    notes_dedup = build_claim_history_notes(current_claims_dedup)
+_persist_claim(
+    conn_b4, trace_id="t_dedup_prior", claim_id="cl_dedup_prior", content_hash="h_dp",
+    semantic_family_id="fam_dedup", query="Исходный вопрос про дедупликацию",
+    claim_text="Утверждение из прошлого запроса, достаточно длинное.",
+    verification_status="supported",
+)
+current_claims_dedup = [
+    {"claim_id": "cl_dedup_a", "claim_text": "a", "semantic_family_id": "fam_dedup", "verification_status": "supported"},
+    {"claim_id": "cl_dedup_b", "claim_text": "b", "semantic_family_id": "fam_dedup", "verification_status": "supported"},
+]
+notes_dedup = build_claim_history_notes(current_claims_dedup)
 
 check(
     "B4: two of this request's own claims sharing one family produce exactly "
@@ -337,9 +321,9 @@ check(
 check(
     "D4: the cache-hit/short-circuit branch NEVER calls run_optimistic_respond() "
     "or imports writeback — structurally proving a cached/replayed answer can "
-    "never carry a history note (it calls shadow_complete_run + returns directly)",
+    "never carry a history note (it calls complete_run + returns directly)",
     "run_optimistic_respond" not in _early_return_block
-    and "shadow_complete_run" in _early_return_block,
+    and "complete_run" in _early_return_block,
     _early_return_block,
 )
 

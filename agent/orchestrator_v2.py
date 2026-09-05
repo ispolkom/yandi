@@ -77,7 +77,7 @@ from agent.epistemic_contradiction_shadow import (
     build_shadow_request_summary,
 )
 from agent.dependency_recheck import apply_dependency_recheck
-from agent.db.sql.shadow_write import shadow_record_question_and_run, shadow_complete_run, pipeline_version
+from agent.db.sql.shadow_write import record_question_and_run, complete_run, pipeline_version
 from agent.orchestrator.synthesis import build_frame_and_synthesize
 from agent.orchestrator.pre_pipeline import run_pre_pipeline
 from agent.orchestrator.pipeline import run_standard_pipeline
@@ -272,18 +272,11 @@ def process(
     )
     cost = {}
 
-    # Этап 5 (SQL persistence migration): shadow-only question+run
-    # identity, ahead of the JSON canonical write path (unaffected
-    # either way — see agent/db/sql/shadow_write.py's fail-open
-    # contract, proven without a live DB in agent/db_sql_shadow_write_
-    # regression_test.py). _sql_question is None whenever the SQL layer
-    # isn't configured/reachable — every downstream shadow call already
-    # handles that silently. NOTE (documented limitation, not silently
-    # papered over): none of pre_pipeline's ~11 early-return short-
-    # circuit points call shadow_complete_run() — a run started here
-    # that exits early stays "running" in SQL until agent.db.sql.
-    # repositories.reconcile_stale_running_runs() is invoked (not yet
-    # wired into any daemon startup path — see the final report).
+    # "Точка ноль" v13 (owner mandate, 2026-09): question+run identity is
+    # now the PRIMARY record of this request's existence — FAIL LOUD, no
+    # more JSON/JSONL fallback for it to quietly degrade to (agent.
+    # orch_tracer.py's trace file is retired). A SqlUnavailable here
+    # propagates out of the whole request, by design.
     #
     # MUST run BEFORE the first add_decision_event() call below ("живая
     # память" fix, live-confirmed ordering trap): decision_event.run_id
@@ -291,14 +284,12 @@ def process(
     # statement that creates that row. Calling add_decision_event()
     # first (the ORIGINAL order) would have made the very first, most
     # important event of every single request — "DecisionStarted" —
-    # silently fail its FK and never persist (shadow writes fail open),
-    # exactly the same class of ordering bug already fixed twice this
-    # mandate for the SQL bootstrap's own GRANT/USE sequencing.
-    _sql_question = shadow_record_question_and_run(
+    # fail its FK, exactly the same class of ordering bug already fixed
+    # twice this mandate for the SQL bootstrap's own GRANT/USE sequencing.
+    _sql_question = record_question_and_run(
         raw_text=query, run_id=trace_id, started_at=trace.timestamp,
         web_enabled=enable_web, validation_enabled=enable_validation,
         pipeline_version=pipeline_version(), session_id=request.session_id or None,
-        log=log, verbose=verbose,
     )
     _sql_question_id = _sql_question["question_id"] if _sql_question else None
 
@@ -322,21 +313,18 @@ def process(
         request, verbose, t_start, query, log, trace, cost, _tracer
     )
     if early_response is not None:
-        # Этап 5 (SQL persistence migration, MIGRATION_STATUS.md §41 gap
-        # closed): without this, a run that exits via one of
-        # run_pre_pipeline's 11 short-circuits stayed status='running' in
-        # SQL forever (until reconcile_stale_running_runs() eventually
-        # marks it 'aborted', which is also wrong — this run DID
-        # complete, with a real delivered answer). early_response.answer/
-        # trust_level are the literal delivered text and the trust label
-        # this SAME branch already decided (e.g. trace.trust set right
-        # above it) — reused, not invented; matches shadow_complete_run's
-        # existing use in agent/orchestrator/response/writeback.py.
-        shadow_complete_run(
+        # Without this, a run that exits via one of run_pre_pipeline's 11
+        # short-circuits stayed status='running' in SQL forever. early_
+        # response.answer/trust_level are the literal delivered text and
+        # the trust label this SAME branch already decided (e.g. trace.
+        # trust set right above it) — reused, not invented; matches
+        # complete_run()'s own use in agent/orchestrator/response/
+        # writeback.py. FAIL LOUD (see record_question_and_run() above).
+        complete_run(
             run_id=trace_id, question_id=_sql_question_id,
             delivered_answer_text=early_response.answer, completed_at=datetime.utcnow(),
             canonical_trust=early_response.trust_level,
-            reason="pre_pipeline_short_circuit", log=log, verbose=verbose,
+            reason="pre_pipeline_short_circuit",
         )
         return early_response
 
@@ -392,11 +380,11 @@ def process(
         # run_standard_pipeline() has its own early-return short-circuits
         # (e.g. cache-hit direct answer) with the identical "stuck at
         # status='running' forever" gap otherwise.
-        shadow_complete_run(
+        complete_run(
             run_id=trace_id, question_id=_sql_question_id,
             delivered_answer_text=early_response.answer, completed_at=datetime.utcnow(),
             canonical_trust=early_response.trust_level,
-            reason="standard_pipeline_short_circuit", log=log, verbose=verbose,
+            reason="standard_pipeline_short_circuit",
         )
         return early_response
 

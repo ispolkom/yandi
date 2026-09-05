@@ -2,7 +2,7 @@
 agent/db_sql_early_return_completion_regression_test.py — Этап 5 (SQL
 persistence migration) regression: MIGRATION_STATUS.md §41 gap closed —
 "pre_pipeline.py's ~11 early-return short-circuits do not call
-shadow_complete_run() — a run that exits early via one of those paths
+complete_run() — a run that exits early via one of those paths
 stays status='running' in SQL until reconciled."
 
 Fix scope, widened beyond the literal §41 wording after re-checking the
@@ -26,13 +26,13 @@ regression_test.py's checks A/B already established for exactly this
 class of "call graph position in the real production source" claim.
 
 Covers:
-    A. shadow_complete_run( appears AFTER the run_pre_pipeline() early-
+    A. complete_run( appears AFTER the run_pre_pipeline() early-
        return check, BEFORE `return early_response`.
     B. that call passes early_response.answer/trust_level (the SAME
        values this branch already decided) — not fabricated ones.
     C. same two checks for the run_standard_pipeline() early-return
        point.
-    D. sanity: shadow_complete_run is passed run_id=trace_id and
+    D. sanity: complete_run is passed run_id=trace_id and
        question_id=_sql_question_id — the same identity pair used at
        every other SQL call site in this file (no parallel identity
        scheme invented for this fix).
@@ -67,11 +67,11 @@ _src = inspect.getsource(orch_v2_mod)
 
 _pos_pre_pipeline_call = _src.find("early_response, _pre_pipeline_state = run_pre_pipeline(")
 _pos_pre_pipeline_if = _src.find("if early_response is not None:", _pos_pre_pipeline_call)
-_pos_pre_pipeline_shadow = _src.find("shadow_complete_run(", _pos_pre_pipeline_if)
+_pos_pre_pipeline_shadow = _src.find("complete_run(", _pos_pre_pipeline_if)
 _pos_pre_pipeline_return = _src.find("return early_response", _pos_pre_pipeline_if)
 
 check(
-    "A: shadow_complete_run( is called between run_pre_pipeline()'s "
+    "A: complete_run( is called between run_pre_pipeline()'s "
     "`if early_response is not None:` and its `return early_response`",
     -1 < _pos_pre_pipeline_if < _pos_pre_pipeline_shadow < _pos_pre_pipeline_return,
     f"if={_pos_pre_pipeline_if} shadow={_pos_pre_pipeline_shadow} return={_pos_pre_pipeline_return}",
@@ -92,11 +92,11 @@ check(
 
 _pos_std_call = _src.find("early_response, _pipeline_state = run_standard_pipeline(")
 _pos_std_if = _src.find("if early_response is not None:", _pos_std_call)
-_pos_std_shadow = _src.find("shadow_complete_run(", _pos_std_if)
+_pos_std_shadow = _src.find("complete_run(", _pos_std_if)
 _pos_std_return = _src.find("return early_response", _pos_std_if)
 
 check(
-    "C: shadow_complete_run( is ALSO called between run_standard_pipeline()'s "
+    "C: complete_run( is ALSO called between run_standard_pipeline()'s "
     "`if early_response is not None:` and its `return early_response` "
     "(same gap the mandate documented only for pre_pipeline, found to apply here too)",
     _pos_std_call > _pos_pre_pipeline_call  # sanity: really the second call site
@@ -114,18 +114,18 @@ check(
 
 # ============================================================
 # D. Identity consistency: run_id=trace_id, question_id=_sql_question_id
-# — the same pair shadow_record_question_and_run() established earlier
+# — the same pair record_question_and_run() established earlier
 # in this same function, not a parallel identity scheme.
 # ============================================================
 
 check(
-    "D: pre_pipeline branch's shadow_complete_run uses run_id=trace_id, "
+    "D: pre_pipeline branch's complete_run uses run_id=trace_id, "
     "question_id=_sql_question_id (the identity pair already established earlier)",
     "run_id=trace_id, question_id=_sql_question_id" in _pre_pipeline_block,
     f"{_pre_pipeline_block}",
 )
 check(
-    "D: standard_pipeline branch's shadow_complete_run ALSO uses the same identity pair",
+    "D: standard_pipeline branch's complete_run ALSO uses the same identity pair",
     "run_id=trace_id, question_id=_sql_question_id" in _std_block,
     f"{_std_block}",
 )

@@ -513,6 +513,25 @@ class Trace:
 
 
 class DecisionTracer:
+    """"Точка ноль" v13 (owner mandate, 2026-09): registry/dataset/
+    orch_traces/*.jsonl is retired, not migrated. Question/answer/trust
+    already live in question/answer_version/answer_assessment
+    (Этап 5); claims/evidence already live in claim_occurrence/
+    source_observation/evidence_relation (agent.db.sql.shadow_write.
+    record_claims_and_evidence(), called from agent/orchestrator/claims/
+    status.py BEFORE save_trace() runs). What save_trace() persists here
+    is the remaining "envelope" — execution/reasoning/cost/epistemic/
+    outcome/learning/confidence_evolution/rejected_claims — to
+    trace_record, keyed by the SAME run_id every other piece of this
+    request already used (agent.db.sql.shadow_write.
+    record_question_and_run() always runs first, at the very top of
+    agent/orchestrator_v2.py, so the verification_run FK this needs is
+    always already there).
+
+    FAIL LOUD: SqlUnavailable propagates. There is no JSONL fallback
+    left to quietly succeed against.
+    """
+
     def __init__(self):
         self._traces: List[Dict[str, Any]] = []
 
@@ -520,40 +539,25 @@ class DecisionTracer:
         data = trace.to_dict()
         self._traces.append(data)
 
-        locator = None
+        from agent.db.sql.connection import get_connection
+        import agent.db.sql.repositories as repo
 
-        try:
-            day_file_name = f"{datetime.now().strftime('%Y%m%d')}.jsonl"
-            day_file = TRACES_DIR / day_file_name
-            line = json.dumps(data, ensure_ascii=False) + "\n"
-
-            with day_file.open("a", encoding="utf-8") as f:
-                # P5 (verification memory): 'a' mode is always
-                # positioned at EOF on open (POSIX append semantics) —
-                # this offset is exactly where THIS trace's line starts,
-                # used as registry/index.db's locator (agent.
-                # verification_memory.index_trace) so a future LOAD is
-                # one seek+readline, not a full-file scan.
-                byte_offset = f.tell()
-                f.write(line)
-
-            locator = (day_file_name, byte_offset)
-        except Exception as e:
-            print(f"[tracer] Ошибка сохранения: {e}")
-
-        if locator:
-            # Deferred import: agent.verification_memory imports
-            # TRACES_DIR from this module, so a module-level import here
-            # would be circular. Failure here must never affect the
-            # trace itself already being safely on disk — it only means
-            # the lookup accelerator doesn't know about this trace yet
-            # (the JSONL source of truth is unaffected, still fully
-            # scannable as a fallback).
-            try:
-                from agent.verification_memory import index_trace
-                index_trace(trace, locator[0], locator[1])
-            except Exception as e:
-                print(f"[tracer] Ошибка индексации verification memory: {e}")
+        with get_connection() as conn:
+            repo.record_trace_record(
+                conn, trace.trace_id,
+                execution=data.get("execution"),
+                reasoning=data.get("reasoning"),
+                cost=data.get("cost"),
+                epistemic=data.get("epistemic"),
+                outcome=data.get("outcome"),
+                learning=data.get("learning"),
+                confidence_evolution=data.get("confidence_evolution"),
+                rejected_claims=data.get("rejected_claims"),
+                claims_filtered_count=data.get("claims_filtered_count", 0),
+                claims_rejected_count=data.get("claims_rejected_count", 0),
+                created_at=trace.timestamp,
+            )
+            conn.commit()
 
         return data
 

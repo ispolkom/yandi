@@ -43,12 +43,14 @@ from unittest.mock import patch
 
 import agent.orch_tracer as ot
 import agent.verification_memory as vm
+import agent.db.sql.repositories as repo
 import agent.orchestrator.claims.lifecycle as lifecycle_mod
 import agent.orchestrator_v2 as orch_v2_mod
 import agent.claim_semantic_identity_hardening as hardening_mod
 from agent.claim_family_registry import ClaimFamilyRegistry
 import agent.claim_family_registry as registry_mod
 from agent.claim_identity import extract_subject_anchors
+from agent.db_sql_fake_fixtures import fresh_fake as _fresh_fake, record as _record
 
 
 # "ТОЧКА НОЛЬ": ClaimFamilyRegistry is SQL-only now (no storage_file) —
@@ -266,18 +268,9 @@ check(
 )
 
 
-def _isolated_paths():
-    traces = Path(tempfile.mkdtemp(prefix="yandi_p7_traces_"))
-    index = Path(tempfile.mkdtemp(prefix="yandi_p7_index_")) / "index.db"
-    return traces, index
+conn_a = _fresh_fake()
 
-
-traces_a, index_a = _isolated_paths()
-
-with patch.object(ot, "TRACES_DIR", traces_a), \
-     patch.object(vm, "TRACES_DIR", traces_a), \
-     patch.object(vm, "INDEX_DB", index_a), \
-     patch.object(lifecycle_mod, "get_claim_family_registry", _isolated_registry):
+with patch.object(lifecycle_mod, "get_claim_family_registry", _isolated_registry):
 
     claims_data_a = [{
         "claim_id": "cl_p7_a1",
@@ -302,6 +295,7 @@ with patch.object(ot, "TRACES_DIR", traces_a), \
     trace_a = ot.Trace(trace_id="t_p7_a", timestamp=time.time(), query="q")
     trace_a.add_claim_raw(claims_data_a[0])
     vm.persist_verification_evidence(trace_a, claims_data_a, [])
+    _record(conn_a, "t_p7_a", claims_data_a, [])
     tracer_a = ot.DecisionTracer()
     tracer_a.save_trace(trace_a)
 
@@ -313,12 +307,12 @@ with patch.object(ot, "TRACES_DIR", traces_a), \
         f"{saved_a['claims'][0]}",
     )
 
-    rows_a = vm._query_index_all("hash_p7_a1")
+    rows_a = repo.find_claim_occurrences_by_content_hash(conn_a, "hash_p7_a1")
     check(
-        "Finding A (index): claim_verification_index.semantic_family_id "
-        "!= null for this claim",
-        len(rows_a) == 1 and rows_a[0]["semantic_family_id"] is not None,
-        f"{[dict(r) for r in rows_a] if rows_a else rows_a}",
+        "Finding A (SQL): claim_occurrence.family_id != null for this claim "
+        "(\"точка ноль\" v13 — replaces the old claim_verification_index locator)",
+        len(rows_a) == 1 and rows_a[0]["family_id"] is not None,
+        f"{rows_a}",
     )
 
 # ============================================================

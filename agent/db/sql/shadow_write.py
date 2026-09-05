@@ -121,6 +121,49 @@ def shadow_complete_run(
     _shadow(log, verbose, "complete_run", _do)
 
 
+def record_question_and_run(
+    *, raw_text: str, run_id: str, started_at, web_enabled: bool,
+    validation_enabled: bool, pipeline_version: Optional[str],
+    anonymized_text: Optional[str] = None, session_id: Optional[str] = None,
+) -> dict:
+    """"Точка ноль" v13 (owner mandate, 2026-09) PRIMARY equivalent of
+    shadow_record_question_and_run() — FAIL LOUD, no `_shadow()` swallow.
+    Now that agent.orch_tracer.py's JSONL trace file is retired, the
+    question/run record has no other home at all; a shadow write's
+    "silently skip this time" contract would mean genuinely losing the
+    request's own identity, not just missing a redundant copy. Call
+    sites: agent/orchestrator_v2.py, replacing its own shadow_record_
+    question_and_run call."""
+    with get_connection() as conn:
+        ids = repo.resolve_question(conn, raw_text, anonymized_text, started_at, session_id)
+        repo.start_run(
+            conn, run_id, ids["occurrence_id"], started_at,
+            web_enabled, validation_enabled, pipeline_version,
+        )
+        conn.commit()
+        return ids
+
+
+def complete_run(
+    *, run_id: str, question_id: Optional[int], delivered_answer_text: str,
+    completed_at, canonical_trust: str, synthesizer_strand: Optional[str] = None,
+    trust_gate_strand: Optional[str] = None, diverged: bool = False,
+    stricter_strand: Optional[str] = None, reason: Optional[str] = None,
+) -> None:
+    """"Точка ноль" v13 PRIMARY equivalent of shadow_complete_run() —
+    FAIL LOUD. See record_question_and_run()'s own docstring for why."""
+    if question_id is None:
+        return
+    with get_connection() as conn:
+        answer_id = repo.record_answer_version(conn, question_id, delivered_answer_text, run_id, completed_at)
+        repo.record_answer_assessment(
+            conn, answer_id, run_id, canonical_trust,
+            synthesizer_strand, trust_gate_strand, diverged, stricter_strand, reason, completed_at,
+        )
+        repo.complete_run(conn, run_id, completed_at, final_answer_id=answer_id)
+        conn.commit()
+
+
 def shadow_fail_run(*, run_id: str, failed_stage: str, error_class: str, log=None, verbose: bool = False) -> None:
     def _do(conn):
         repo.fail_run(conn, run_id, failed_stage, error_class, outcome="failed")
@@ -292,6 +335,106 @@ def shadow_record_claims_and_evidence(
                 )
 
     _shadow(log, verbose, "record_claims_and_evidence", _do)
+
+
+def record_claims_and_evidence(*, run_id: str, claims_data: list, evidence_data: list) -> None:
+    """"Точка ноль" v13 (owner mandate, 2026-09) PRIMARY, LOSSLESS
+    equivalent of shadow_record_claims_and_evidence() — FAIL LOUD, no
+    `_shadow()` swallow, and captures every agent.orch_schemas.
+    EvidenceRecord field (source_title/retrieval_query/retrieval_rank/
+    relevance_to_query/authority/traceability/primaryness/
+    is_meta_pipeline_output/is_subject_matter_evidence/source_cluster_id/
+    origin_source_cluster_id/retrieval_claim_id/route_side/
+    subject_entities/fact_candidates/supports_query_aspect/evidence_id),
+    not just the subset the old best-effort shadow needed. This is what
+    lets agent.verification_memory.py's evidence-memory LOAD path query
+    SQL directly instead of byte-seeking into agent.orch_tracer.py's
+    now-retired JSONL trace file — see agent.db.sql.repositories.
+    list_evidence_for_claim().
+
+    The internet-only resource_type restriction is UNCHANGED from the
+    old shadow version — confirmed not currently lossy: network_node/
+    ai_chat/local_model resources are schema-prepared but not activated
+    anywhere in this codebase yet (no live evidence has ever had a
+    non-internet ultimate origin), so this restriction drops nothing
+    that exists in practice today. Widening it is a separate, future
+    decision for whenever those channels actually activate.
+    """
+    with get_connection() as conn:
+        evidence_by_id = {
+            ev.get("evidence_id"): ev for ev in (evidence_data or []) if ev.get("evidence_id")
+        }
+
+        for claim in claims_data or []:
+            claim_id = claim.get("claim_id")
+            if not claim_id:
+                continue
+
+            repo.record_claim_occurrence(
+                conn, claim_id, run_id, claim.get("claim_text", ""),
+                claim.get("content_hash"), claim.get("claim_type"),
+                claim.get("claim_confidence"), claim.get("verification_status"),
+                claim.get("semantic_family_id"), claim.get("query_context"),
+                claim.get("support_count", 0), claim.get("contradiction_count", 0),
+            )
+
+            for rel in claim.get("evidence_relations", []) or []:
+                ev = evidence_by_id.get(rel.get("evidence_id"))
+                if not ev:
+                    continue
+
+                route = ev.get("route") or "internet"
+                resource_type = ev.get("origin_route") if route == "local_memory" else route
+                if resource_type != "internet":
+                    continue  # V1 scope: only internet resources have canonical identity
+                canonical_uri = ev.get("source_uri")
+                if not canonical_uri:
+                    continue
+
+                resource_id = repo.get_or_create_resource(
+                    conn, "internet", canonical_uri=canonical_uri, observed_at=ev.get("observed_at"),
+                )
+                origin_observation_id = (
+                    repo.find_observation_id_for_replay(conn, resource_id, ev.get("origin_trace_id"))
+                    if route == "local_memory" else None
+                )
+                observation_id = repo.record_source_observation(
+                    conn, resource_id, run_id, route,
+                    origin_observation_id=origin_observation_id,
+                    observed_at=ev.get("observed_at"),
+                    source_class=ev.get("source_class"),
+                    quality_score=ev.get("quality_score"),
+                    content_excerpt=(ev.get("content_excerpt") or "")[:2000],
+                    evidence_id=ev.get("evidence_id"),
+                    source_title=(ev.get("source_title") or "")[:500] or None,
+                    retrieval_query=(ev.get("retrieval_query") or "")[:500] or None,
+                    retrieval_rank=ev.get("retrieval_rank") or None,
+                    relevance_to_query=ev.get("relevance_to_query"),
+                    authority=ev.get("authority"),
+                    traceability=ev.get("traceability"),
+                    primaryness=ev.get("primaryness"),
+                    is_meta_pipeline_output=bool(ev.get("is_meta_pipeline_output", False)),
+                    is_subject_matter_evidence=bool(ev.get("is_subject_matter_evidence", True)),
+                    source_cluster_id=ev.get("source_cluster_id"),
+                    origin_source_cluster_id=ev.get("origin_source_cluster_id"),
+                    retrieval_claim_id=ev.get("retrieval_claim_id") or None,
+                    route_side=ev.get("route_side") or None,
+                    subject_entities=ev.get("subject_entities"),
+                    fact_candidates=ev.get("fact_candidates"),
+                    supports_query_aspect=ev.get("supports_query_aspect"),
+                )
+                relation = rel.get("relation")
+                if relation not in ("supports", "contradicts", "uncertain", "unrelated"):
+                    continue
+                repo.record_evidence_relation(
+                    conn, claim_id, observation_id, relation,
+                    directness=rel.get("directness"),
+                    evidence_eligible=bool(rel.get("evidence_eligible", False)),
+                    evidence_role=rel.get("evidence_role"),
+                    counted_via=rel.get("counted_via"),
+                )
+
+        conn.commit()
 
 
 def shadow_record_claim_family(

@@ -46,7 +46,7 @@ DESIGN NOTES (read before changing a table):
    no HTTP retry chatter. RUN_ERROR is 5 columns, not a log warehouse.
 """
 
-SCHEMA_VERSION = 12  # v12: biography/context/decision_journal/experience/secret_archive/inner_state/disagreement/trait_graph/self_reflection_profile/social_knowledge ("точка ноль" — remaining live JSON-backed subsystems retired, not migrated)
+SCHEMA_VERSION = 13  # v13: source_observation gains full EvidenceRecord fidelity + trace_record + delayed_validation_event ("точка ноль" — the live evidence-memory/trace system, orch_tracer.py + verification_memory.py, retired from its JSONL source of truth)
 
 SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -299,6 +299,32 @@ CREATE TABLE IF NOT EXISTS source_observation (
     content_excerpt         TEXT NULL,     -- excerpt only, NEVER full raw HTML
     rejection_reason         VARCHAR(60) NULL,  -- controlled vocabulary, see
                                                  -- repositories.py::REJECTION_REASONS
+    -- "Точка ноль" v13 (owner mandate, 2026-09): the rest of agent.
+    -- orch_schemas.EvidenceRecord's own fields — this table used to
+    -- capture only enough for the OLD "internet-only, best-effort
+    -- shadow" write; agent.orch_tracer.py's registry/dataset/
+    -- orch_traces/*.jsonl was the actual lossless source these were
+    -- always missing from. Retiring that file means this table must
+    -- be able to reconstruct an EvidenceRecord losslessly on its own —
+    -- see agent.verification_memory.py's own rewrite, which now reads
+    -- FROM here instead of byte-seeking into that file.
+    evidence_id             VARCHAR(20) NULL,   -- the original runtime ev_ id (exact-identity lookup)
+    source_title            VARCHAR(500) NULL,
+    retrieval_query         VARCHAR(500) NULL,
+    retrieval_rank          INT NULL,
+    relevance_to_query      FLOAT NULL,
+    authority               FLOAT NULL,
+    traceability            FLOAT NULL,
+    primaryness             FLOAT NULL,
+    is_meta_pipeline_output BOOLEAN NOT NULL DEFAULT FALSE,
+    is_subject_matter_evidence BOOLEAN NOT NULL DEFAULT TRUE,
+    source_cluster_id       VARCHAR(40) NULL,
+    origin_source_cluster_id VARCHAR(40) NULL,
+    retrieval_claim_id      VARCHAR(20) NULL,   -- "" in the old JSON meant "shared/unowned" — NULL here means the same
+    route_side              VARCHAR(20) NULL,
+    subject_entities        JSON NULL,
+    fact_candidates         JSON NULL,
+    supports_query_aspect   JSON NULL,
     CONSTRAINT fk_so_resource FOREIGN KEY (resource_id)
         REFERENCES source_resource(resource_id),
     CONSTRAINT fk_so_run FOREIGN KEY (run_id)
@@ -306,7 +332,8 @@ CREATE TABLE IF NOT EXISTS source_observation (
     CONSTRAINT fk_so_origin FOREIGN KEY (origin_observation_id)
         REFERENCES source_observation(observation_id),
     KEY idx_so_resource (resource_id, observed_at),
-    KEY idx_so_run (run_id)
+    KEY idx_so_run (run_id),
+    KEY idx_so_evidence_id (evidence_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
@@ -327,6 +354,69 @@ CREATE TABLE IF NOT EXISTS evidence_relation (
         REFERENCES source_observation(observation_id),
     KEY idx_er_claim (claim_id),
     KEY idx_er_observation (observation_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# ── TRACE_RECORD ──────────────────────────────────────────────────────────
+# "Точка ноль" v13 (owner mandate, 2026-09): the "envelope" fields of
+# agent.orch_tracer.Trace that have no other SQL home. Most of a Trace
+# already does: query/answer/trust live in question/question_occurrence/
+# answer_version/answer_assessment (Этап 5), claims in claim_occurrence,
+# evidence in source_observation/evidence_relation (this same v13 pass).
+# What's left — execution steps, reasoning steps, cost timings, the
+# outcome/learning/confidence_evolution records, the epistemic dict, and
+# the rejected-claims list — are all small, PER-REQUEST, already-bounded
+# structures (never an unbounded growing history), so JSON columns on
+# one row per run_id is the right shape here, same precedent as
+# decision_event.delta_factors/grievance.context. `goal` is NOT stored —
+# confirmed it is a hardcoded constant in >99% of real traces, never
+# meaningfully varying; not worth a column for a value that never
+# differs.
+#
+# APPEND-ONLY (class B) — a trace, once the request it describes has
+# finished, is a historical record of what happened and why; like
+# decision_event, it is never corrected in place.
+TRACE_RECORD = """
+CREATE TABLE IF NOT EXISTS trace_record (
+    run_id                 VARCHAR(40) PRIMARY KEY,  -- reuses verification_run.run_id, same trace_id
+    execution               JSON NULL,
+    reasoning                JSON NULL,
+    cost                      JSON NULL,
+    epistemic                 JSON NULL,
+    outcome                    JSON NULL,
+    learning                    JSON NULL,
+    confidence_evolution         JSON NULL,
+    rejected_claims                JSON NULL,
+    claims_filtered_count           INT NOT NULL DEFAULT 0,
+    claims_rejected_count            INT NOT NULL DEFAULT 0,
+    created_at                        DATETIME NOT NULL,
+    CONSTRAINT fk_tr_run FOREIGN KEY (run_id)
+        REFERENCES verification_run(run_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# ── DELAYED_VALIDATION_EVENT ─────────────────────────────────────────────
+# "Точка ноль" v13: SQL-backed replacement for agent/orch_external_
+# evidence.py's registry/dataset/delayed_validation/{day}.jsonl. A
+# post-hoc external validation (DeepSeek/P2P/local-model, arriving after
+# the original response was already returned) linked to its originating
+# trace by run_id. APPEND-ONLY (class B) — never mutates the original
+# trace/Trust, per that module's own explicit, deliberate scope limit
+# (Delayed Supervision/Outcome Revision is separate, future roadmap
+# territory — this table changes nothing about that boundary, only
+# where the observation is written).
+DELAYED_VALIDATION_EVENT = """
+CREATE TABLE IF NOT EXISTS delayed_validation_event (
+    event_id         VARCHAR(40) PRIMARY KEY,  -- reuses existing dv_ ids
+    run_id           VARCHAR(40) NULL,  -- NULL, not FK-enforced: trace_id may legitimately be empty or unresolvable (trace_found=FALSE) — never faked to satisfy a constraint
+    trace_found      BOOLEAN NOT NULL,
+    original_trust   VARCHAR(30) NULL,
+    source           VARCHAR(40) NOT NULL,
+    verdict          VARCHAR(40) NOT NULL,
+    reason           VARCHAR(500) NULL,
+    raw              TEXT NULL,
+    created_at       DATETIME NOT NULL,
+    KEY idx_dve_run (run_id, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
@@ -1395,6 +1485,8 @@ ALL_TABLES_IN_ORDER = [
     ("source_resource", SOURCE_RESOURCE),
     ("source_observation", SOURCE_OBSERVATION),
     ("evidence_relation", EVIDENCE_RELATION),
+    ("trace_record", TRACE_RECORD),
+    ("delayed_validation_event", DELAYED_VALIDATION_EVENT),
     ("belief", BELIEF),
     ("belief_assessment_history", BELIEF_ASSESSMENT_HISTORY),
     ("semantic_edge", SEMANTIC_EDGE),
@@ -1480,6 +1572,8 @@ TABLE_CLASSIFICATION = {
     "claim_occurrence": "B",
     "source_observation": "B",
     "evidence_relation": "B",
+    "trace_record": "B",
+    "delayed_validation_event": "B",
     "belief_assessment_history": "B",
     "recheck_event": "B",
     "epistemic_contradiction_observation": "B",
