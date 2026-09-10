@@ -15,17 +15,14 @@ from datetime import datetime
 from typing import Optional
 
 import redis as _redis_lib
-import requests as _requests
 
-OLLAMA     = "http://127.0.0.1:11434"
+from llm_gateway import complete as llm_complete
+
 MODEL      = "heretic:q8"
 REDIS_HOST = "127.0.0.1"
 REDIS_PORT = 6379
 SESSION_TTL = 1800   # 30 минут
 MAX_ROUNDS  = 3
-
-_session = _requests.Session()
-_session.trust_env = False
 
 _SKIP_HINTS = frozenset({"не знаю", "нет", "skip", "пропустить", "хз", "без разницы", "любой", "не важно"})
 
@@ -96,17 +93,7 @@ def clear_state(session_id: str):
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
 def _call_llm(prompt: str) -> str:
-    resp = _session.post(
-        f"{OLLAMA}/api/generate",
-        json={
-            "model": MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.1, "num_predict": 3000},
-        },
-        timeout=120,
-    )
-    return resp.json().get("response", "")
+    return llm_complete(prompt, model=MODEL, temperature=0.1, max_tokens=3000, timeout=120)
 
 
 def _extract_first_json(text: str) -> dict:

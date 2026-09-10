@@ -41,18 +41,15 @@ import re
 import time
 from typing import Any, Dict, Optional
 
-import requests as _requests
+from llm_gateway import complete as llm_complete
 
 from agent.orch_config import (
-    OLLAMA_BASE as OLLAMA, MODEL, TEMP_CONDUCTOR, MAX_TOKENS_CONDUCTOR, GENERATION_SEMAPHORE,
+    MODEL, TEMP_CONDUCTOR, MAX_TOKENS_CONDUCTOR, GENERATION_SEMAPHORE,
 )
 from agent.claim_evidence_retriever import retrieve_for_claims
 from agent.claim_relation import ClaimRelation, classify_relation
 
 TIMEOUT = 60
-
-_session = _requests.Session()
-_session.trust_env = False
 
 _GATE_PROMPT = """Тема вопроса: "{query}"
 
@@ -85,21 +82,21 @@ _VERDICT_PHRASES = {
 
 
 def _call_ollama(prompt: str) -> str:
+    """Имя оставлено как есть — единственный вызывающий код (ниже) уже
+    ловит любое исключение (fail-open), так что смена бэкенда внутри
+    llm_gateway ничего тут не меняет."""
     _wait_started = time.time()
     with GENERATION_SEMAPHORE:
         _waited = time.time() - _wait_started
         if _waited > 0.05:
             print(f"[ContrarianCheck] generation queue wait={_waited:.2f}s")
-        resp = _session.post(
-            f"{OLLAMA}/api/generate",
-            json={
-                "model": MODEL, "prompt": prompt, "stream": False,
-                "options": {"temperature": TEMP_CONDUCTOR, "num_predict": MAX_TOKENS_CONDUCTOR},
-            },
+        return llm_complete(
+            prompt,
+            model=MODEL,
+            temperature=TEMP_CONDUCTOR,
+            max_tokens=MAX_TOKENS_CONDUCTOR,
             timeout=TIMEOUT,
         )
-        resp.raise_for_status()
-        return resp.json().get("response", "").strip()
 
 
 def _extract_json(text: str) -> dict:

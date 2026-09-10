@@ -7,16 +7,12 @@ from __future__ import annotations
 import json
 import re
 
-import requests as _requests
+from llm_gateway import complete as llm_complete
 
 from agent.orch_schemas import ValidationResult, ArbiterResult
 
-OLLAMA  = "http://127.0.0.1:11434"
 MODEL   = "qwen3:14b"
 TIMEOUT = 90
-
-_session = _requests.Session()
-_session.trust_env = False
 
 SYSTEM_PROMPT = """Ты арбитр качества ответов. Проанализируй результаты проверки ответа несколькими нодами.
 
@@ -36,14 +32,9 @@ SYSTEM_PROMPT = """Ты арбитр качества ответов. Проан
 
 
 def _call_ollama(prompt: str) -> str:
-    resp = _session.post(
-        f"{OLLAMA}/api/generate",
-        json={"model": MODEL, "prompt": prompt, "stream": False,
-              "options": {"temperature": 0.1, "num_predict": 400}},
-        timeout=TIMEOUT,
+    return llm_complete(
+        prompt, model=MODEL, temperature=0.1, max_tokens=400, timeout=TIMEOUT,
     )
-    resp.raise_for_status()
-    return resp.json().get("response", "").strip()
 
 
 def _extract_json(text: str) -> dict:
