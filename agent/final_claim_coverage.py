@@ -36,6 +36,8 @@ from typing import Any, Dict, List
 
 import requests as _requests
 
+from llm_gateway import complete_with_meta
+
 from agent.orch_config import (
     OLLAMA_BASE,
     MODEL,
@@ -48,6 +50,9 @@ from agent.claim_relation import (
     infer_claim_relations_batch,
 )
 
+# _session — только для /api/embed ниже (embeddings, вне области
+# llm_gateway; см. council_analyzer.py/claim_evidence_retriever.py для
+# того же разделения).
 _session = _requests.Session()
 _session.trust_env = False
 
@@ -56,15 +61,16 @@ _EXTRACTION_TIMEOUT = 180  # same order as orch_synthesizer's analyst-role calls
 
 def _call_ollama_for_extraction(prompt: str) -> Dict[str, Any]:
     """
-    P0-B: dedicated Ollama call for extract_final_claims() — deliberately
+    P0-B: dedicated LLM call for extract_final_claims() — deliberately
     NOT the shared orch_web_query._call_ollama(), whose num_predict is
     hardcoded to MAX_TOKENS_CONDUCTOR (500, sized for short 2-3-query
     formulation, not for a variable-size JSON array of every claim in a
     final answer). Uses its own FINAL_CLAIM_EXTRACTION_MAX_TOKENS budget
     without touching the web-query conductor's budget at all.
 
-    Returns metadata (done_reason/eval_count) alongside the text so the
-    caller can tell a token-limit cutoff apart from a genuine formatting
+    Returns metadata (done_reason/eval_count, via llm_gateway's
+    backend-agnostic CompletionResult) alongside the text so the caller
+    can tell a token-limit cutoff apart from a genuine formatting
     failure, instead of collapsing both into the same generic parse
     error.
     """
@@ -78,26 +84,15 @@ def _call_ollama_for_extraction(prompt: str) -> Dict[str, Any]:
                 f"[Final Claim Extraction LLM] generation queue wait={_waited:.2f}s"
             )
 
-        resp = _session.post(
-            f"{OLLAMA_BASE}/api/generate",
-            json={
-                "model": MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": TEMP_ANALYST,
-                    "num_predict": FINAL_CLAIM_EXTRACTION_MAX_TOKENS,
-                },
-            },
-            timeout=_EXTRACTION_TIMEOUT,
+        result = complete_with_meta(
+            prompt, model=MODEL, temperature=TEMP_ANALYST,
+            max_tokens=FINAL_CLAIM_EXTRACTION_MAX_TOKENS, timeout=_EXTRACTION_TIMEOUT,
         )
-        resp.raise_for_status()
-        data = resp.json()
 
     return {
-        "response": (data.get("response") or "").strip(),
-        "done_reason": data.get("done_reason"),
-        "eval_count": data.get("eval_count"),
+        "response": result.text,
+        "done_reason": "length" if result.truncated else "stop",
+        "eval_count": result.token_count,
         "num_predict": FINAL_CLAIM_EXTRACTION_MAX_TOKENS,
     }
 
