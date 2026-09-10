@@ -36,16 +36,14 @@ from pathlib import Path
 from typing import Optional
 
 import redis
-import requests
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from agent.local_http import local_post
+from llm_gateway import complete as llm_complete
 
 BASE       = Path(__file__).parent.parent
 CHAINS_DIR = BASE / "registry" / "dataset" / "council_chains"
 CACHE_FILE = CHAINS_DIR / "processed.json"
 CHAINS_DIR.mkdir(parents=True, exist_ok=True)
 
-OLLAMA_URL     = "http://127.0.0.1:11434"
 ANALYSIS_MODEL = "qwen3:14b"
 
 REDIS_HOST   = "127.0.0.1"
@@ -146,17 +144,7 @@ ANALYSIS_PROMPT_TPL = """Ты получил вопрос и ответы трё
 
 def _call_qwen(prompt: str, timeout: int = 180) -> Optional[str]:
     try:
-        r = local_post(
-            f"{OLLAMA_URL}/api/chat",
-            json={
-                "model":    ANALYSIS_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream":   False,
-            },
-            timeout=timeout,
-        )
-        raw = r.json()["message"]["content"].strip()
-        return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        return llm_complete(prompt, model=ANALYSIS_MODEL, timeout=timeout)
     except Exception:
         return None
 

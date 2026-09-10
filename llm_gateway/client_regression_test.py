@@ -135,6 +135,24 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             check("network failure raises LLMError", False, f"raised {type(e).__name__}: {e}")
 
+    # 5b. complete_with_meta(): truncated=True когда done_reason="length",
+    #     token_count берётся из eval_count.
+    with patch.object(client._session, "post") as mock_post:
+        mock_post.return_value = _fake_response(
+            {"message": {"content": "обрублен"}, "done_reason": "length", "eval_count": 512}
+        )
+        result = client.complete_with_meta("q", model="m")
+        check("complete_with_meta detects truncation", result.truncated is True, repr(result))
+        check("complete_with_meta reports token_count", result.token_count == 512, repr(result))
+        check("complete_with_meta still strips/returns text", result.text == "обрублен", repr(result))
+
+    with patch.object(client._session, "post") as mock_post:
+        mock_post.return_value = _fake_response(
+            {"message": {"content": "нормально завершилось"}, "done_reason": "stop", "eval_count": 40}
+        )
+        result = client.complete_with_meta("q", model="m")
+        check("complete_with_meta: done_reason=stop is not truncated", result.truncated is False, repr(result))
+
     # 6. Неожиданный формат ответа (нет message.content) -> LLMError,
     #    не голый KeyError наружу.
     with patch.object(client._session, "post") as mock_post:
