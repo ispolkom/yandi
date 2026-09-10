@@ -25,7 +25,9 @@ from dataclasses import dataclass
 
 import requests
 
+from . import config as node_config
 from . import llamacpp_backend
+from . import remote_backend
 
 # HTTP_PROXY/HTTPS_PROXY выставлены в системе глобально и по умолчанию
 # заворачивают даже localhost-трафик — тот же самый источник багов,
@@ -39,7 +41,9 @@ _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 DEFAULT_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_TIMEOUT = 180
 
-# Локальный движок — opt-in, не opt-out. Причина: десятки существующих
+# Локальный движок (встроенный дефолт ИЛИ то, что владелец узла сам
+# настроил через llm_gateway.setup/config — локальный файл или свой
+# удалённый сервер) — opt-in, не opt-out. Причина: десятки существующих
 # regression-тестов по всему agent/ мокают requests.Session.post
 # напрямую для тех же имён моделей (heretic:q8, qwen3:14b), что теперь
 # зарегистрированы в llamacpp_backend — если бы движок пробовался по
@@ -115,6 +119,49 @@ def _do_complete_ollama(
     return text, raw
 
 
+def _try_configured_backend(
+    model: str,
+    prompt: str,
+    *,
+    system: str | None,
+    temperature: float | None,
+    max_tokens: int | None,
+    response_format: str | None,
+    extra_options: dict[str, object] | None,
+) -> tuple[str, dict] | None:
+    """Владелец узла сам настроил эту модель (llm_gateway.setup) —
+    локальный файл в СВОЕЙ папке или свой удалённый сервер (свой Клод,
+    свой OpenAI-совместимый сервер, что угодно). Проверяется ПЕРЕД
+    встроенным дефолтом — явный выбор владельца узла всегда важнее
+    зашитого в код примера. None, если для этого имени ничего не
+    настроено (не ошибка — просто нечего пробовать)."""
+    entry = node_config.get_model_entry(model)
+    if entry is None:
+        return None
+
+    backend = entry.get("backend")
+    if backend == "llamacpp":
+        spec = llamacpp_backend.ModelSpec(
+            path=entry["path"],
+            n_ctx=entry.get("n_ctx", 8192),
+            n_gpu_layers=entry.get("n_gpu_layers", -1),
+        )
+        return llamacpp_backend.generate_at_spec(
+            prompt, spec=spec, system=system, temperature=temperature,
+            max_tokens=max_tokens, response_format=response_format,
+            extra_options=extra_options,
+        )
+    if backend == "remote":
+        return remote_backend.generate(
+            prompt,
+            base_url=entry["base_url"], protocol=entry.get("protocol", "openai"),
+            model=entry.get("model", model), api_key_env=entry.get("api_key_env"),
+            system=system, temperature=temperature, max_tokens=max_tokens,
+            response_format=response_format,
+        )
+    raise RuntimeError(f"неизвестный backend {backend!r} в настройке узла для модели {model!r}")
+
+
 def _do_complete(
     prompt: str,
     *,
@@ -128,22 +175,32 @@ def _do_complete(
     extra_options: dict[str, object] | None,
     response_format: str | None,
 ) -> tuple[str, dict]:
-    """Общая часть complete()/complete_with_meta(). Пробует локальный
-    llama.cpp движок первым (только для локального base_url — удалённые
-    ноды валидатора всегда идут в Ollama, у своего движка нет их
-    адресов), при любой проблеме молча откатывается на Ollama HTTP.
-    Возвращает очищенный текст и сырой словарь метаданных (для тех, кому
-    нужны метаданные генерации)."""
+    """Общая часть complete()/complete_with_meta(). Порядок: 1) то, что
+    владелец узла сам настроил под это имя модели, 2) встроенный
+    дефолт (llama.cpp со своим реестром), 3) Ollama HTTP — фоллбэк,
+    если первые два недоступны, не настроены или упали. Всё это только
+    для локального base_url — удалённые ноды валидатора всегда идут в
+    Ollama напрямую, у своего движка нет их адресов. Возвращает
+    очищенный текст и сырой словарь метаданных (для тех, кому нужны
+    метаданные генерации)."""
     text: str | None = None
     raw: dict = {}
 
-    if _LOCAL_ENABLED and base_url == DEFAULT_BASE_URL and llamacpp_backend.has_model(model):
+    if _LOCAL_ENABLED and base_url == DEFAULT_BASE_URL:
         try:
-            text, raw = llamacpp_backend.generate(
-                prompt, model=model, system=system, temperature=temperature,
+            result = _try_configured_backend(
+                model, prompt, system=system, temperature=temperature,
                 max_tokens=max_tokens, response_format=response_format,
                 extra_options=extra_options,
             )
+            if result is not None:
+                text, raw = result
+            elif llamacpp_backend.has_model(model):
+                text, raw = llamacpp_backend.generate(
+                    prompt, model=model, system=system, temperature=temperature,
+                    max_tokens=max_tokens, response_format=response_format,
+                    extra_options=extra_options,
+                )
         except Exception as e:
             print(f"[llm_gateway] локальный движок не справился с {model!r} ({e}), откат на Ollama")
 

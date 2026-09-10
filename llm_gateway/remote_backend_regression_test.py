@@ -1,0 +1,175 @@
+"""
+llm_gateway/remote_backend_regression_test.py
+
+Дешёвый offline suite для remote_backend — весь HTTP замокан, ни один
+реальный запрос никуда не уходит. Проверяет оба протокола (OpenAI-
+совместимый и родной Anthropic Messages API) отдельно, поскольку у них
+реально разные форматы запроса/ответа/заголовков.
+
+Запуск: python3 -m llm_gateway.remote_backend_regression_test
+"""
+from __future__ import annotations
+
+import sys
+from unittest.mock import MagicMock, patch
+
+FAILURES: list[str] = []
+
+
+def check(name: str, condition: bool, detail: str = "") -> None:
+    status = "OK" if condition else "FAIL"
+    print(f"[{status}] {name}" + (f" — {detail}" if detail and not condition else ""))
+    if not condition:
+        FAILURES.append(name)
+
+
+def _fake_response(json_body: dict, status_code: int = 200):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = json_body
+    if status_code >= 400:
+        import requests
+        resp.raise_for_status.side_effect = requests.HTTPError(f"{status_code}")
+    else:
+        resp.raise_for_status.side_effect = None
+    return resp
+
+
+def main() -> int:
+    from llm_gateway import remote_backend as rb
+
+    # ── OpenAI-совместимый протокол ──────────────────────────────────
+    with patch.object(rb._session, "post") as mock_post, \
+         patch.dict("os.environ", {"MY_KEY": "sk-secret-123"}):
+        mock_post.return_value = _fake_response({
+            "choices": [{"message": {"content": "привет"}, "finish_reason": "stop"}],
+            "usage": {"completion_tokens": 5},
+        })
+        text, meta = rb.generate(
+            "скажи привет", base_url="https://my-server.example/v1", protocol="openai",
+            model="my-model", api_key_env="MY_KEY", system="будь краток",
+        )
+        check("openai: returns text", text == "привет", repr(text))
+        check("openai: done_reason=stop maps to not-truncated", meta["done_reason"] == "stop", repr(meta))
+        check("openai: token count from usage.completion_tokens", meta["eval_count"] == 5, repr(meta))
+
+        url = mock_post.call_args.args[0]
+        sent = mock_post.call_args.kwargs["json"]
+        headers = mock_post.call_args.kwargs["headers"]
+        check("openai: hits {base_url}/chat/completions", url == "https://my-server.example/v1/chat/completions", url)
+        check(
+            "openai: messages carry system first, then user",
+            sent["messages"] == [{"role": "system", "content": "будь краток"}, {"role": "user", "content": "скажи привет"}],
+            repr(sent["messages"]),
+        )
+        check("openai: api key goes in Authorization: Bearer", headers.get("Authorization") == "Bearer sk-secret-123", repr(headers))
+        check("openai: real key value never lands in the JSON body", "sk-secret-123" not in str(sent))
+
+    # response_format="json" -> OpenAI-style response_format object.
+    with patch.object(rb._session, "post") as mock_post:
+        mock_post.return_value = _fake_response({"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]})
+        rb.generate("q", base_url="https://x", protocol="openai", model="m", response_format="json")
+        check(
+            "openai: response_format='json' becomes {'type': 'json_object'}",
+            mock_post.call_args.kwargs["json"].get("response_format") == {"type": "json_object"},
+            repr(mock_post.call_args.kwargs["json"]),
+        )
+
+    # done_reason="length" -> truncated.
+    with patch.object(rb._session, "post") as mock_post:
+        mock_post.return_value = _fake_response({"choices": [{"message": {"content": "обрубл"}, "finish_reason": "length"}]})
+        _, meta = rb.generate("q", base_url="https://x", protocol="openai", model="m")
+        check("openai: finish_reason='length' maps to done_reason='length'", meta["done_reason"] == "length", repr(meta))
+
+    # No api_key_env at all -> no Authorization header sent (self-hosted, no auth needed).
+    with patch.object(rb._session, "post") as mock_post:
+        mock_post.return_value = _fake_response({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
+        rb.generate("q", base_url="https://x", protocol="openai", model="m", api_key_env=None)
+        check("openai: no api_key_env -> no Authorization header", "Authorization" not in mock_post.call_args.kwargs["headers"])
+
+    # ── Anthropic Messages API ───────────────────────────────────────
+    with patch.object(rb._session, "post") as mock_post, \
+         patch.dict("os.environ", {"CLAUDE_KEY": "ant-secret-456"}):
+        mock_post.return_value = _fake_response({
+            "content": [{"type": "text", "text": "Париж"}],
+            "stop_reason": "end_turn",
+            "usage": {"output_tokens": 3},
+        })
+        text, meta = rb.generate(
+            "столица Франции?", base_url="https://api.anthropic.com", protocol="anthropic",
+            model="claude-sonnet-5", api_key_env="CLAUDE_KEY", system="отвечай одним словом",
+            max_tokens=20,
+        )
+        check("anthropic: returns text extracted from content blocks", text == "Париж", repr(text))
+        check("anthropic: stop_reason=end_turn maps to not-truncated", meta["done_reason"] == "stop", repr(meta))
+        check("anthropic: token count from usage.output_tokens", meta["eval_count"] == 3, repr(meta))
+
+        url = mock_post.call_args.args[0]
+        sent = mock_post.call_args.kwargs["json"]
+        headers = mock_post.call_args.kwargs["headers"]
+        check("anthropic: hits {base_url}/v1/messages", url == "https://api.anthropic.com/v1/messages", url)
+        check("anthropic: system is a top-level field, not a message", sent.get("system") == "отвечай одним словом", repr(sent))
+        check("anthropic: messages carry only the user turn", sent["messages"] == [{"role": "user", "content": "столица Франции?"}], repr(sent["messages"]))
+        check("anthropic: api key goes in x-api-key, not Authorization", headers.get("x-api-key") == "ant-secret-456", repr(headers))
+        check("anthropic: anthropic-version header present", "anthropic-version" in headers, repr(headers))
+        check("anthropic: max_tokens is required and passed through", sent.get("max_tokens") == 20, repr(sent))
+
+    # stop_reason="max_tokens" -> truncated.
+    with patch.object(rb._session, "post") as mock_post:
+        mock_post.return_value = _fake_response({"content": [{"type": "text", "text": "x"}], "stop_reason": "max_tokens"})
+        _, meta = rb.generate("q", base_url="https://x", protocol="anthropic", model="m")
+        check("anthropic: stop_reason='max_tokens' maps to done_reason='length'", meta["done_reason"] == "length", repr(meta))
+
+    # max_tokens omitted entirely -> Anthropic still gets a sane default (its API requires the field).
+    with patch.object(rb._session, "post") as mock_post:
+        mock_post.return_value = _fake_response({"content": [{"type": "text", "text": "x"}], "stop_reason": "end_turn"})
+        rb.generate("q", base_url="https://x", protocol="anthropic", model="m")
+        check(
+            "anthropic: max_tokens always present even when caller didn't pass one (API requires it)",
+            isinstance(mock_post.call_args.kwargs["json"].get("max_tokens"), int),
+            repr(mock_post.call_args.kwargs["json"]),
+        )
+
+    # ── Errors ────────────────────────────────────────────────────────
+    with patch.object(rb._session, "post") as mock_post:
+        import requests
+        mock_post.side_effect = requests.ConnectionError("сервер недоступен")
+        try:
+            rb.generate("q", base_url="https://x", protocol="openai", model="m")
+            check("network failure raises RemoteBackendError", False, "no exception raised")
+        except rb.RemoteBackendError:
+            check("network failure raises RemoteBackendError", True)
+        except Exception as e:  # noqa: BLE001
+            check("network failure raises RemoteBackendError", False, f"raised {type(e).__name__}: {e}")
+
+    with patch.object(rb._session, "post") as mock_post:
+        mock_post.return_value = _fake_response({"unexpected": "shape"})
+        try:
+            rb.generate("q", base_url="https://x", protocol="openai", model="m")
+            check("malformed openai response raises RemoteBackendError", False, "no exception raised")
+        except rb.RemoteBackendError:
+            check("malformed openai response raises RemoteBackendError", True)
+        except Exception as e:  # noqa: BLE001
+            check("malformed openai response raises RemoteBackendError", False, f"raised {type(e).__name__}: {e}")
+
+    try:
+        rb.generate("q", base_url="https://x", protocol="carrier-pigeon", model="m")
+        check("unknown protocol raises RemoteBackendError", False, "no exception raised")
+    except rb.RemoteBackendError:
+        check("unknown protocol raises RemoteBackendError", True)
+    except Exception as e:  # noqa: BLE001
+        check("unknown protocol raises RemoteBackendError", False, f"raised {type(e).__name__}: {e}")
+
+    print()
+    print("=" * 72)
+    if FAILURES:
+        print(f"РЕЗУЛЬТАТ: {len(FAILURES)} провал(ов): {FAILURES}")
+    else:
+        print("РЕЗУЛЬТАТ: все проверки пройдены")
+    print("=" * 72)
+
+    return 1 if FAILURES else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

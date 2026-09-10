@@ -27,6 +27,12 @@ fi
 # упадёт. См. память ollama-decoupling-plan.
 export LLM_GATEWAY_ENABLE_LOCAL=1
 
+# Спросить про выбор модели, только если это реальный терминал и модель
+# ещё не настроена — в headless/systemd-запуске (нет TTY) ничего не
+# спросит и не заблокирует старт, просто напечатает подсказку. || true
+# — сбой этого шага никогда не должен мешать запуску самой ноды.
+"$PYTHON" -c "from llm_gateway.setup import maybe_prompt_first_run; maybe_prompt_first_run()" || true
+
 REQUIRED_SQL_GROUP="yandi-db"
 CURRENT_USER="$(id -un)"
 if getent group "$REQUIRED_SQL_GROUP" >/dev/null \
