@@ -7,13 +7,9 @@ from __future__ import annotations
 import json
 import re
 
-import requests as _requests
+from llm_gateway import complete as llm_complete
 
-OLLAMA = "http://127.0.0.1:11434"
 MODEL  = "heretic:q8"
-
-_session = _requests.Session()
-_session.trust_env = False
 
 _PROMPT = """\
 Ты классификатор контента. Определи категории для записи в базу знаний.
@@ -67,17 +63,13 @@ def auto_tag(question: str, answer: str) -> list[str]:
         answer_snippet=answer.strip()[:600],
     )
     try:
-        resp = _session.post(
-            f"{OLLAMA}/api/generate",
-            json={
-                "model": MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.1, "num_predict": 300},
-            },
-            timeout=90,
+        # strip_think=False: _extract_tags() deliberately searches for the
+        # JSON tag block even inside <think>...</think> (see its own
+        # docstring) — stripping it here would defeat that on purpose.
+        raw = llm_complete(
+            prompt, model=MODEL, temperature=0.1, max_tokens=300, timeout=90,
+            strip_think=False,
         )
-        raw = resp.json().get("response", "")
         tags = _extract_tags(raw)
         return tags if len(tags) >= 2 else []
     except Exception:

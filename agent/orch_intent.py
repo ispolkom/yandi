@@ -14,14 +14,11 @@ import re
 import time
 from pathlib import Path
 
-import requests as _requests
+from llm_gateway import complete as llm_complete
 
 from agent.orch_schemas import IntentResult
 
-_session = _requests.Session()
-_session.trust_env = False
-
-from agent.orch_config import OLLAMA_BASE as OLLAMA, MODEL, MAX_TOKENS_CONDUCTOR, TEMP_CONDUCTOR
+from agent.orch_config import MODEL, MAX_TOKENS_CONDUCTOR, TEMP_CONDUCTOR
 TIMEOUT  = 90
 
 # Известные домены для нормализации intent
@@ -79,14 +76,10 @@ SYSTEM_PROMPT = """Ты анализатор запросов. Твоя зада
 
 
 def _call_ollama(prompt: str) -> str:
-    resp = _session.post(
-        f"{OLLAMA}/api/generate",
-        json={"model": MODEL, "prompt": prompt, "stream": False,
-              "options": {"temperature": TEMP_CONDUCTOR, "num_predict": MAX_TOKENS_CONDUCTOR}},
-        timeout=TIMEOUT,
+    return llm_complete(
+        prompt, model=MODEL, temperature=TEMP_CONDUCTOR,
+        max_tokens=MAX_TOKENS_CONDUCTOR, timeout=TIMEOUT,
     )
-    resp.raise_for_status()
-    return resp.json().get("response", "").strip()
 
 
 def _extract_json(text: str) -> dict:
