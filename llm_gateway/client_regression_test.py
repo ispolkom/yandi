@@ -38,9 +38,13 @@ def _fake_response(json_body: dict, status_code: int = 200):
     return resp
 
 
-def main() -> int:
-    from llm_gateway import client
-
+def _run_ollama_wire_format_checks(client) -> None:
+    """Всё, что здесь проверялось до Phase 3 (свой движок) — то, как
+    строится и парсится HTTP-запрос к Ollama. Локальный движок по
+    умолчанию выключен (_LOCAL_ENABLED — opt-in через
+    LLM_GATEWAY_ENABLE_LOCAL), поэтому эти тесты используют реальные
+    имена моделей вроде "qwen3:14b" безопасно — движок даже не
+    попытается их поднять, если явно не включён."""
     # 1. Голый prompt (бывший /api/generate-стиль вызывающего кода) —
     #    должен уйти одним user-сообщением, без system.
     with patch.object(client._session, "post") as mock_post:
@@ -190,6 +194,76 @@ def main() -> int:
 
         mock_get.side_effect = requests.ConnectionError("down")
         check("is_available False when backend unreachable", client.is_available() is False)
+
+
+def _run_backend_dispatch_checks(client) -> None:
+    """Phase 3: локальный движок первым, Ollama — тихий фоллбэк, ЕСЛИ
+    явно включено (_LOCAL_ENABLED — opt-in, по умолчанию выключено ради
+    десятков существующих regression-тестов по всему agent/, которые
+    мокают requests.Session.post напрямую для тех же имён моделей).
+    Мокает llamacpp_backend напрямую (не сам llama_cpp) — эти тесты про
+    ЛОГИКУ ПЕРЕКЛЮЧЕНИЯ в client.py, а не про сам движок (у него будет
+    свой отдельный, требующий реальной GGUF, живой smoke-тест)."""
+    from llm_gateway import llamacpp_backend
+
+    # По умолчанию (_LOCAL_ENABLED=False, ничего не патчим) движок не
+    # трогается вообще, даже если модель зарегистрирована — именно это
+    # держит все остальные regression-тесты в agent/ рабочими без
+    # единой правки с их стороны.
+    with patch.object(llamacpp_backend, "has_model", return_value=True), \
+         patch.object(llamacpp_backend, "generate") as mock_gen, \
+         patch.object(client, "_do_complete_ollama", return_value=("ответ ollama", {})) as mock_ollama:
+        out = client.complete("q", model="heretic:q8")
+        check("local engine untouched by default (opt-in, not opt-out)", mock_gen.call_count == 0)
+        check("default behavior still goes through Ollama", out == "ответ ollama")
+
+    # LLM_GATEWAY_ENABLE_LOCAL включён + модель есть в реестре -> движок
+    # используется, Ollama даже не трогаем.
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(llamacpp_backend, "has_model", return_value=True), \
+         patch.object(llamacpp_backend, "generate", return_value=("ответ движка", {})) as mock_gen, \
+         patch.object(client, "_do_complete_ollama") as mock_ollama:
+        out = client.complete("q", model="heretic:q8")
+        check("local engine used when enabled and has_model() is True", out == "ответ движка", repr(out))
+        check("Ollama path never called when local engine succeeds", mock_ollama.call_count == 0)
+        check("local engine received the model name", mock_gen.call_args.kwargs["model"] == "heretic:q8")
+
+    # Включён, но модели нет в реестре движка -> прямиком в Ollama.
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(llamacpp_backend, "has_model", return_value=False), \
+         patch.object(llamacpp_backend, "generate") as mock_gen, \
+         patch.object(client, "_do_complete_ollama", return_value=("ответ ollama", {})) as mock_ollama:
+        out = client.complete("q", model="unknown-model")
+        check("unregistered model skips local engine entirely", mock_gen.call_count == 0)
+        check("unregistered model falls through to Ollama", out == "ответ ollama")
+
+    # Включён, модель есть, но движок падает при генерации -> тихий
+    # откат на Ollama, без исключения наружу.
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(llamacpp_backend, "has_model", return_value=True), \
+         patch.object(llamacpp_backend, "generate", side_effect=RuntimeError("GPU OOM")), \
+         patch.object(client, "_do_complete_ollama", return_value=("ответ ollama", {})) as mock_ollama:
+        out = client.complete("q", model="heretic:q8")
+        check("local engine failure falls back to Ollama silently", out == "ответ ollama")
+        check("Ollama is actually called on fallback", mock_ollama.call_count == 1)
+
+    # Включён, модель есть, но base_url нелокальный (валидатор чужой
+    # ноды) -> локальный движок не трогаем вообще.
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(llamacpp_backend, "has_model", return_value=True), \
+         patch.object(llamacpp_backend, "generate") as mock_gen, \
+         patch.object(client, "_do_complete_ollama", return_value=("ответ удалённой ноды", {})) as mock_ollama:
+        out = client.complete("q", model="heretic:q8", base_url="http://10.0.0.9:11434")
+        check("non-default base_url skips local engine even if model is registered", mock_gen.call_count == 0)
+        check("non-default base_url goes straight to Ollama", out == "ответ удалённой ноды")
+
+
+def main() -> int:
+    from llm_gateway import client
+
+    _run_ollama_wire_format_checks(client)
+
+    _run_backend_dispatch_checks(client)
 
     print()
     print("=" * 72)

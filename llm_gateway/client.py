@@ -5,16 +5,27 @@ llm_gateway.client — единая точка вызова языковой м�
 своей копией OLLAMA="http://127.0.0.1:11434", каждый сам решал, бить в
 /api/chat или /api/generate, каждый сам парсил ответ. Теперь вся эта
 логика тут, за одной функцией complete() — call-сайты больше не знают
-и не должны знать, что за бэкендом она стоит. Сегодня внутри всё ещё
-Ollama; когда появится свой движок (см. память ollama-decoupling-plan),
-поменяется только этот файл, а не десятки мест, которые его вызывают.
+и не должны знать, что за бэкендом она стоит.
+
+Phase 3 (см. память ollama-decoupling-plan): свой движок (llama.cpp,
+см. llamacpp_backend.py — те же GGUF-веса, что были скачаны для Ollama,
+просто без HTTP-сервера Ollama между нами и моделью) пробуется ПЕРВЫМ
+для локальных вызовов, когда явно включён через LLM_GATEWAY_ENABLE_LOCAL
+(см. _LOCAL_ENABLED ниже — opt-in, не opt-out, ради существующего
+тестового набора). Ollama остаётся автоматическим фоллбэком — если
+своего движка нет, модели нет в его реестре, или он упал по любой
+причине, тихо откатываемся на тот же HTTP-путь, что был всегда. Ни один
+call-сайт этого не видит и не должен видеть.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 
 import requests
+
+from . import llamacpp_backend
 
 # HTTP_PROXY/HTTPS_PROXY выставлены в системе глобально и по умолчанию
 # заворачивают даже localhost-трафик — тот же самый источник багов,
@@ -27,6 +38,17 @@ _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 DEFAULT_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_TIMEOUT = 180
+
+# Локальный движок — opt-in, не opt-out. Причина: десятки существующих
+# regression-тестов по всему agent/ мокают requests.Session.post
+# напрямую для тех же имён моделей (heretic:q8, qwen3:14b), что теперь
+# зарегистрированы в llamacpp_backend — если бы движок пробовался по
+# умолчанию, эти тесты молча перестали бы проверять то, что думают, что
+# проверяют (мок никогда не вызовется, вместо этого поднимется реальная
+# 10ГБ модель на реальном GPU). Явное включение через переменную
+# окружения защищает весь существующий тестовый набор бесплатно, ценой
+# одной строчки при реальном запуске демона.
+_LOCAL_ENABLED = os.environ.get("LLM_GATEWAY_ENABLE_LOCAL", "") not in ("", "0")
 
 
 class LLMError(RuntimeError):
@@ -48,7 +70,7 @@ class CompletionResult:
     token_count: int | None
 
 
-def _do_complete(
+def _do_complete_ollama(
     prompt: str,
     *,
     model: str,
@@ -57,13 +79,10 @@ def _do_complete(
     max_tokens: int | None,
     timeout: int,
     base_url: str,
-    strip_think: bool,
     extra_options: dict[str, object] | None,
     response_format: str | None,
 ) -> tuple[str, dict]:
-    """Общая часть complete()/complete_with_meta() — один HTTP-вызов,
-    возвращает и очищенный текст, и сырой JSON-ответ (для тех, кому
-    нужны метаданные генерации)."""
+    """HTTP-путь через Ollama — оригинальный бэкенд, теперь фоллбэк."""
     messages: list[dict[str, str]] = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -92,6 +111,48 @@ def _do_complete(
         text = raw["message"]["content"]
     except (KeyError, ValueError, TypeError) as e:
         raise LLMError(f"{model}: неожиданный формат ответа: {e}") from e
+
+    return text, raw
+
+
+def _do_complete(
+    prompt: str,
+    *,
+    model: str,
+    system: str | None,
+    temperature: float | None,
+    max_tokens: int | None,
+    timeout: int,
+    base_url: str,
+    strip_think: bool,
+    extra_options: dict[str, object] | None,
+    response_format: str | None,
+) -> tuple[str, dict]:
+    """Общая часть complete()/complete_with_meta(). Пробует локальный
+    llama.cpp движок первым (только для локального base_url — удалённые
+    ноды валидатора всегда идут в Ollama, у своего движка нет их
+    адресов), при любой проблеме молча откатывается на Ollama HTTP.
+    Возвращает очищенный текст и сырой словарь метаданных (для тех, кому
+    нужны метаданные генерации)."""
+    text: str | None = None
+    raw: dict = {}
+
+    if _LOCAL_ENABLED and base_url == DEFAULT_BASE_URL and llamacpp_backend.has_model(model):
+        try:
+            text, raw = llamacpp_backend.generate(
+                prompt, model=model, system=system, temperature=temperature,
+                max_tokens=max_tokens, response_format=response_format,
+                extra_options=extra_options,
+            )
+        except Exception as e:
+            print(f"[llm_gateway] локальный движок не справился с {model!r} ({e}), откат на Ollama")
+
+    if text is None:
+        text, raw = _do_complete_ollama(
+            prompt, model=model, system=system, temperature=temperature,
+            max_tokens=max_tokens, timeout=timeout, base_url=base_url,
+            extra_options=extra_options, response_format=response_format,
+        )
 
     if strip_think:
         text = _THINK_TAG_RE.sub("", text)
