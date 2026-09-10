@@ -258,12 +258,76 @@ def _run_backend_dispatch_checks(client) -> None:
         check("non-default base_url goes straight to Ollama", out == "ответ удалённой ноды")
 
 
+def _run_node_config_dispatch_checks(client) -> None:
+    """Настройка владельца узла (llm_gateway.config) — приоритет НАД
+    встроенным дефолтом llamacpp_backend, и работает для обоих типов
+    (свой локальный файл, свой удалённый сервер)."""
+    from llm_gateway import config as node_config
+    from llm_gateway import llamacpp_backend, remote_backend
+
+    # Своя локальная модель (владелец узла указал СВОЙ путь) побеждает
+    # встроенный дефолт для того же имени — даже если has_model()
+    # тоже сказал бы True для встроенного реестра.
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(node_config, "get_model_entry", return_value={"backend": "llamacpp", "path": "/своя/папка/модель.gguf"}), \
+         patch.object(llamacpp_backend, "generate_at_spec", return_value=("ответ своей модели", {})) as mock_spec, \
+         patch.object(llamacpp_backend, "generate") as mock_builtin, \
+         patch.object(client, "_do_complete_ollama") as mock_ollama:
+        out = client.complete("heretic:q8", model="heretic:q8")
+        check("user-configured local model wins over the built-in default", out == "ответ своей модели", repr(out))
+        check("built-in registry never consulted when user config exists", mock_builtin.call_count == 0)
+        check("Ollama never consulted when user config succeeds", mock_ollama.call_count == 0)
+        check("the user's own path reaches llama.cpp", mock_spec.call_args.kwargs["spec"].path == "/своя/папка/модель.gguf")
+
+    # Свой удалённый сервер (например Клод) — тоже настройка узла,
+    # дальше делегируется в remote_backend без изменений.
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(node_config, "get_model_entry", return_value={
+             "backend": "remote", "protocol": "anthropic",
+             "base_url": "https://api.anthropic.com", "model": "claude-sonnet-5",
+             "api_key_env": "MY_CLAUDE_KEY",
+         }), \
+         patch.object(remote_backend, "generate", return_value=("ответ клода", {})) as mock_remote, \
+         patch.object(client, "_do_complete_ollama") as mock_ollama:
+        out = client.complete("q", model="мой-клод")
+        check("user-configured remote model is used", out == "ответ клода", repr(out))
+        check("Ollama never consulted for a configured remote model", mock_ollama.call_count == 0)
+        check(
+            "remote_backend receives the configured protocol/url/model/key-env",
+            mock_remote.call_args.kwargs["protocol"] == "anthropic"
+            and mock_remote.call_args.kwargs["base_url"] == "https://api.anthropic.com"
+            and mock_remote.call_args.kwargs["model"] == "claude-sonnet-5"
+            and mock_remote.call_args.kwargs["api_key_env"] == "MY_CLAUDE_KEY",
+            repr(mock_remote.call_args.kwargs),
+        )
+
+    # Неизвестный backend в настройке узла -> ошибка ловится, тихий
+    # откат на Ollama (тот же контракт fail-safe, что и везде тут).
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(node_config, "get_model_entry", return_value={"backend": "carrier-pigeon"}), \
+         patch.object(client, "_do_complete_ollama", return_value=("ответ ollama", {})) as mock_ollama:
+        out = client.complete("q", model="странная-модель")
+        check("unknown backend type in node config falls back to Ollama, doesn't crash", out == "ответ ollama")
+
+    # Ничего не настроено под этим именем -> обычное поведение
+    # встроенного дефолта, без изменений.
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(node_config, "get_model_entry", return_value=None), \
+         patch.object(llamacpp_backend, "has_model", return_value=True), \
+         patch.object(llamacpp_backend, "generate", return_value=("ответ дефолта", {})) as mock_gen, \
+         patch.object(client, "_do_complete_ollama") as mock_ollama:
+        out = client.complete("q", model="heretic:q8")
+        check("no node config for this name -> falls through to built-in default unaffected", out == "ответ дефолта", repr(out))
+
+
 def main() -> int:
     from llm_gateway import client
 
     _run_ollama_wire_format_checks(client)
 
     _run_backend_dispatch_checks(client)
+
+    _run_node_config_dispatch_checks(client)
 
     print()
     print("=" * 72)

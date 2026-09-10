@@ -81,17 +81,40 @@ def generate(
     response_format: str | None,
     extra_options: dict[str, object] | None = None,
 ) -> tuple[str, dict]:
-    """Синхронный вызов — та же форма результата, что и Ollama-путь
-    в client.py: (текст, сырой словарь метаданных). Бросает исключение
-    при любой проблеме — client.py решает, откатываться на Ollama или
-    нет, сам этот модуль ничего не скрывает и не подставляет fallback.
+    """Встроенный дефолт: генерация по алиасу из _MODEL_REGISTRY. Для
+    модели, которую владелец узла настроил сам (своя папка, свой файл —
+    см. llm_gateway.config), используется generate_at_spec() напрямую с
+    его путём, эта функция её не знает."""
+    spec = _MODEL_REGISTRY.get(model)
+    if spec is None:
+        raise RuntimeError(f"нет встроенной GGUF-записи для модели {model!r}")
+    return generate_at_spec(
+        prompt, spec=spec, system=system, temperature=temperature,
+        max_tokens=max_tokens, response_format=response_format,
+        extra_options=extra_options,
+    )
+
+
+def generate_at_spec(
+    prompt: str,
+    *,
+    spec: ModelSpec,
+    system: str | None,
+    temperature: float | None,
+    max_tokens: int | None,
+    response_format: str | None,
+    extra_options: dict[str, object] | None = None,
+) -> tuple[str, dict]:
+    """То же самое, что generate(), но по явному ModelSpec, а не по
+    имени из встроенного реестра — то, что реально вызывается и для
+    дефолтных алиасов, и для моделей, настроенных владельцем узла
+    (llm_gateway.config), одной и той же логикой загрузки/генерации.
+    Бросает исключение при любой проблеме — client.py решает,
+    откатываться на Ollama или нет, сам этот модуль ничего не скрывает
+    и не подставляет fallback.
     """
     if Llama is None:
         raise RuntimeError(f"llama_cpp недоступен: {_import_error}")
-
-    spec = _MODEL_REGISTRY.get(model)
-    if spec is None:
-        raise RuntimeError(f"нет локальной GGUF-записи для модели {model!r}")
     if not Path(spec.path).exists():
         raise RuntimeError(f"GGUF-файл не найден: {spec.path}")
 
