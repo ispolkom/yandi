@@ -42,6 +42,7 @@ def complete(
     timeout: int = DEFAULT_TIMEOUT,
     base_url: str = DEFAULT_BASE_URL,
     strip_think: bool = True,
+    extra_options: dict[str, object] | None = None,
 ) -> str:
     """Запросить у модели завершение текста.
 
@@ -49,6 +50,12 @@ def complete(
     agent/: голый prompt (бывший /api/generate) и prompt+system (бывший
     /api/chat) — внутри всегда используется чат-эндпоинт Ollama, вторая
     форма для него просто частный случай без system-сообщения.
+
+    base_url переопределяется там, где call-сайт валидирует разные ноды
+    на разных Ollama-инстансах (см. orch_validator.py), а не только
+    локальный. extra_options — путь наружу для редких, специфичных для
+    конкретного call-сайта опций generation (например seed у валидатора
+    нод), не заслуживающих собственного именованного параметра здесь.
 
     Бросает LLMError при сетевой ошибке, ошибке бэкенда или неожиданном
     формате ответа — вызывающий код сам решает, ловить её или нет,
@@ -59,7 +66,7 @@ def complete(
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    options: dict[str, float | int] = {}
+    options: dict[str, object] = dict(extra_options) if extra_options else {}
     if temperature is not None:
         options["temperature"] = temperature
     if max_tokens is not None:

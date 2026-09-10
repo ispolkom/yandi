@@ -13,11 +13,15 @@ import time
 
 import requests as _requests
 
+from llm_gateway import complete as llm_complete
+
 from agent.orch_schemas      import NodeSelectorResult, NodeValidation, ValidationResult
 from agent.orch_node_selector import get_node_params
 from agent.orch_reputation   import update_node
 
-OLLAMA   = "http://127.0.0.1:11434"
+# _session остаётся: _validate_on_yandi_node() ниже бьёт в отдельный
+# YANDI-транспорт (pet/council_chat_server.py), не в Ollama — это не
+# call-сайт для llm_gateway.
 TIMEOUT  = 90   # секунд на одну ноду
 
 _session = _requests.Session()
@@ -223,23 +227,11 @@ def _validate_on_node(
     )
 
     try:
-        resp = _session.post(
-            f"{endpoint}/api/generate",
-            json={
-                "model":   model,
-                "prompt":  prompt,
-                "stream":  False,
-                "options": {
-                    "temperature": params.get("temperature", 0.2),
-                    "seed":        params.get("seed", 0),
-                    "num_predict": 200,
-                },
-            },
-            timeout=TIMEOUT,
+        raw = llm_complete(
+            prompt, model=model, max_tokens=200, timeout=TIMEOUT,
+            base_url=endpoint, temperature=params.get("temperature", 0.2),
+            extra_options={"seed": params.get("seed", 0)},
         )
-        resp.raise_for_status()
-        raw  = resp.json().get("response", "").strip()
-        raw  = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         data = {}
         try:
             data = json.loads(raw)

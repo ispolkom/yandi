@@ -83,6 +83,28 @@ def main() -> int:
             repr(sent.get("options")),
         )
 
+    # 3b. extra_options (например seed у orch_validator.py) сливается с
+    #     temperature/max_tokens, не заменяет их.
+    with patch.object(client._session, "post") as mock_post:
+        mock_post.return_value = _fake_response({"message": {"content": "ok"}})
+        client.complete("q", model="m", temperature=0.2, extra_options={"seed": 7})
+        sent = mock_post.call_args.kwargs["json"]
+        check(
+            "extra_options merges with temperature, doesn't replace it",
+            sent.get("options") == {"seed": 7, "temperature": 0.2},
+            repr(sent.get("options")),
+        )
+
+    # 3c. base_url переопределяется для не-локальных нод.
+    with patch.object(client._session, "post") as mock_post:
+        mock_post.return_value = _fake_response({"message": {"content": "ok"}})
+        client.complete("q", model="m", base_url="http://10.0.0.5:11434")
+        check(
+            "base_url override hits the given host, not the default",
+            mock_post.call_args.args[0] == "http://10.0.0.5:11434/api/chat",
+            repr(mock_post.call_args.args),
+        )
+
     # 4. <think>...</think> вырезается по умолчанию (orchestrator.py's
     #    старое поведение для reasoning-моделей).
     with patch.object(client._session, "post") as mock_post:
