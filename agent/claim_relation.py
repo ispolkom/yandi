@@ -316,10 +316,8 @@ def infer_claim_relation(
 
     import json
     import os
-    import requests
 
-    session = requests.Session()
-    session.trust_env = False
+    from llm_gateway import complete as llm_complete
 
     model = os.environ.get("YANDI_LOCAL_MODEL", "heretic:q8")
 
@@ -403,23 +401,10 @@ uncertain
 """
 
     try:
-        resp = session.post(
-            "http://127.0.0.1:11434/api/generate",
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "format": "json",
-                "options": {
-                    "temperature": 0.0,
-                    "num_predict": 40,
-                },
-            },
-            timeout=60,
+        raw = llm_complete(
+            prompt, model=model, temperature=0.0, max_tokens=40,
+            timeout=60, response_format="json",
         )
-        resp.raise_for_status()
-
-        raw = resp.json().get("response", "").strip()
         parsed = json.loads(raw)
 
         relation = str(parsed.get("relation", "")).strip().lower()
@@ -480,7 +465,8 @@ def infer_claim_relations_batch(
     import json
     import os
     import time
-    import requests
+
+    from llm_gateway import complete as llm_complete
 
     if not pairs:
         return []
@@ -505,9 +491,6 @@ def infer_claim_relations_batch(
         "YANDI_LOCAL_MODEL",
         "heretic:q8",
     )
-
-    session = requests.Session()
-    session.trust_env = False
 
     results_by_id = {}
 
@@ -607,33 +590,13 @@ uncertain
         _t0_generation = time.time()
 
         try:
-            resp = session.post(
-                "http://127.0.0.1:11434/api/generate",
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
-                    "options": {
-                        "temperature": 0.0,
-
-                        # Для batch нужен существенно больший output budget,
-                        # чем для одиночного NLI.
-                        "num_predict": max(
-                            160,
-                            len(batch) * 32,
-                        ),
-                    },
-                },
-                timeout=120,
+            raw = llm_complete(
+                prompt, model=model, temperature=0.0,
+                # Для batch нужен существенно больший output budget,
+                # чем для одиночного NLI.
+                max_tokens=max(160, len(batch) * 32),
+                timeout=120, response_format="json",
             )
-
-            resp.raise_for_status()
-
-            raw = resp.json().get(
-                "response",
-                "",
-            ).strip()
 
             _generation_ms = (time.time() - _t0_generation) * 1000
             _call_generation_ms.append(_generation_ms)
@@ -1003,10 +966,8 @@ def classify_sources(main_claim: str, sources: List[Dict[str, Any]]) -> Dict[str
 
     import json
     import os
-    import requests
 
-    session = requests.Session()
-    session.trust_env = False
+    from llm_gateway import complete as llm_complete
 
     model = os.environ.get("YANDI_LOCAL_MODEL", "heretic:q8")
 
@@ -1105,23 +1066,10 @@ uncertain
 """
 
         try:
-            resp = session.post(
-                "http://127.0.0.1:11434/api/generate",
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
-                    "options": {
-                        "temperature": 0.0,
-                        "num_predict": 40,
-                    },
-                },
-                timeout=60,
+            raw = llm_complete(
+                prompt, model=model, temperature=0.0, max_tokens=40,
+                timeout=60, response_format="json",
             )
-            resp.raise_for_status()
-
-            raw = resp.json().get("response", "").strip()
             parsed = json.loads(raw)
 
             relation = str(parsed.get("relation", "")).strip().lower()

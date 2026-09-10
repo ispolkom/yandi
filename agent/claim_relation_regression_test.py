@@ -175,16 +175,19 @@ _generate_call_log = []
 
 def _mock_generate_post(self, url, json=None, timeout=None):
     _generate_call_log.append(json)
-    batch_pairs = json["prompt"]  # not parsed here, just counted via len(batch) below
+    # llm_gateway sends chat-shape requests (messages=[...]), not the old
+    # raw {"prompt": ...} — the actual prompt text is the last message's
+    # content regardless of which call site built it.
+    batch_prompt = json["messages"][-1]["content"]
     resp = MagicMock()
     resp.raise_for_status = MagicMock()
     # Echo back "supports" for every pair_id the batch actually asked about.
     import re as _re
-    pair_ids = _re.findall(r'"pair_id":\s*"([^"]+)"', json["prompt"])
+    pair_ids = _re.findall(r'"pair_id":\s*"([^"]+)"', batch_prompt)
     resp.json.return_value = {
-        "response": __import__("json").dumps({
+        "message": {"content": __import__("json").dumps({
             "results": [{"pair_id": pid, "relation": "supports"} for pid in pair_ids]
-        })
+        })}
     }
     return resp
 
