@@ -149,3 +149,13 @@ def derive_blind_index_key(kek: bytes) -> bytes:
     §19: independent purposes, one key per purpose)."""
     hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"YANDI|blind-index-key|v1")
     return hkdf.derive(kek)
+
+
+def derive_node_config_key(kek: bytes) -> bytes:
+    """Same HKDF pattern, distinct info label — dedicated to encrypting
+    this node's own local model/API configuration (llm_gateway's
+    secure_store, per-node, local SQLite — not the shared MySQL
+    epistemic memory this module was originally built for; the key
+    hierarchy discipline is engine-agnostic and reused as-is here)."""
+    hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"YANDI|node-config-key|v1")
+    return hkdf.derive(kek)

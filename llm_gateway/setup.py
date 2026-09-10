@@ -61,6 +61,16 @@ def _interactive_add_model() -> None:
         print("Пустое имя — отменено.")
         return
 
+    if cfg.get_model_entry(alias) is not None:
+        print(f"Под именем '{alias}' уже что-то настроено.")
+        print("Изменить на месте нельзя — только удалить и настроить заново.")
+        answer = _ask("Удалить старую запись и настроить заново? (да/нет)", "нет")
+        if answer.lower() not in ("да", "yes", "y", "д"):
+            print("Отменено, старая запись осталась без изменений.")
+            return
+        cfg.remove_model_entry(alias)
+        print("Старая запись удалена. Настраиваем заново.")
+
     print("Откуда модель?")
     print("  1) Папка на диске (локальный файл .gguf)")
     print("  2) Удалённый сервер по API (свой Клод/OpenAI/self-hosted)")
@@ -105,7 +115,7 @@ def _interactive_add_model() -> None:
 
 def main() -> int:
     print("=== Настройка модели узла YANDI ===")
-    print(f"Конфиг: {cfg.config_path()}")
+    print(f"База настроек (зашифрована, редактировать вручную нельзя): {cfg.config_path()}")
     existing = cfg.list_models()
     if existing:
         print("\nУже настроено:")
@@ -119,7 +129,7 @@ def main() -> int:
 
     print()
     while True:
-        print("1) Добавить/изменить модель")
+        print("1) Добавить модель (или заменить существующую — удалить и настроить заново)")
         print("2) Удалить модель")
         print("3) Выход")
         choice = _ask("Выбор", "3")

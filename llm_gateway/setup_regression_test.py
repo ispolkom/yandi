@@ -12,6 +12,7 @@ from __future__ import annotations
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 FAILURES: list[str] = []
 
@@ -62,6 +63,30 @@ def main() -> int:
         repr(remote_entry),
     )
     check("remote entry never contains a literal key-shaped string", "sk-" not in str(remote_entry) and "ant-" not in str(remote_entry))
+
+    # ── Interactive "replace an existing entry" flow — no silent overwrite ──
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {"YANDI_KEK_PATH": str(Path(tmp) / "kek.bin"), "YANDI_NODE_DB": str(Path(tmp) / "node.sqlite")}
+        with patch.dict("os.environ", env):
+            from llm_gateway import config as cfg
+
+            cfg.set_model_entry("heretic:q8", su.build_remote_entry("openai", "https://old.example", "old-model", "OLD_KEY"))
+
+            # User declines the replace confirmation -> old entry survives untouched.
+            with patch("builtins.input", side_effect=["heretic:q8", "нет"]):
+                su._interactive_add_model()
+            check(
+                "declining the replace confirmation leaves the old entry untouched",
+                cfg.get_model_entry("heretic:q8") == su.build_remote_entry("openai", "https://old.example", "old-model", "OLD_KEY"),
+            )
+
+            # User confirms -> old entry is deleted, then a fresh one is created (delete-then-insert, not update).
+            with patch("builtins.input", side_effect=["heretic:q8", "да", "2", "openai", "https://new.example", "new-model", "NEW_KEY"]):
+                su._interactive_add_model()
+            check(
+                "confirming the replace produces the NEW entry, old one is gone",
+                cfg.get_model_entry("heretic:q8") == su.build_remote_entry("openai", "https://new.example", "new-model", "NEW_KEY"),
+            )
 
     print()
     print("=" * 72)
