@@ -291,10 +291,7 @@ class BeliefManager:
         прошедших embedding-prefilter (similarity >= 0.70).
         """
         try:
-            import requests
-
-            session = requests.Session()
-            session.trust_env = False
+            from llm_gateway import complete as llm_complete
 
             prompt = f"""
 Ты определяешь отношение между двумя утверждениями.
@@ -328,25 +325,12 @@ different
 {{"relation":"equivalent"}}
 """
 
-            resp = session.post(
-                "http://127.0.0.1:11434/api/generate",
-                json={
-                    "model": "heretic:q8",
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
-                    "options": {
-                        "temperature": 0.0,
-                        "num_predict": 40,
-                    },
-                },
-                timeout=60,
+            raw = llm_complete(
+                prompt, model="heretic:q8", temperature=0.0, max_tokens=40,
+                timeout=60, response_format="json",
             )
-            resp.raise_for_status()
 
-            parsed = json.loads(
-                resp.json().get("response", "{}")
-            )
+            parsed = json.loads(raw or "{}")
 
             return str(
                 parsed.get("relation", "")

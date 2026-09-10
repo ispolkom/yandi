@@ -24,6 +24,7 @@ import requests
 import yaml
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from agent.local_http import local_post
+from llm_gateway import complete as llm_complete
 
 BASE        = Path(__file__).parent.parent
 CONFIG_PATH = BASE / "reader" / "config.yaml"
@@ -192,16 +193,8 @@ class Orchestrator:
 
     def _call(self, model: str, prompt: str, system: str = None, timeout: int = 180) -> str:
         self.vram.acquire(model)
-        msgs = []
-        if system:
-            msgs.append({"role": "system", "content": system})
-        msgs.append({"role": "user", "content": prompt})
         try:
-            r = local_post(f"{OLLAMA}/api/chat",
-                json={"model": model, "messages": msgs, "stream": False},
-                timeout=timeout)
-            raw = r.json()["message"]["content"].strip()
-            return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+            return llm_complete(prompt, model=model, system=system, timeout=timeout)
         except Exception as e:
             return f"[error: {e}]"
 
