@@ -16,9 +16,8 @@ from __future__ import annotations
 import re
 import time
 
-import requests
+from llm_gateway import complete as llm_complete
 
-OLLAMA_URL   = "http://127.0.0.1:11434/api/generate"
 OLLAMA_MODEL = "heretic:q8"
 
 # Шаблоны мусора из system-prompt оркестратора
@@ -107,14 +106,7 @@ def refine(
 
     t0 = time.time()
     try:
-        r = requests.post(
-            OLLAMA_URL,
-            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-            timeout=timeout,
-            proxies={"http": None, "https": None},
-        )
-        d = r.json()
-        raw_text = d.get("response", "")
+        raw_text = llm_complete(prompt, model=OLLAMA_MODEL, timeout=timeout)
         text = _clean_response(raw_text)
         return {
             "ok":      True,

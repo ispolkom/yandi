@@ -13,13 +13,9 @@ import re
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
-import requests as _requests
+from llm_gateway import complete as llm_complete
 
-OLLAMA = "http://127.0.0.1:11434"
 MODEL  = "heretic:q8"
-
-_session = _requests.Session()
-_session.trust_env = False
 
 
 # ── Dataclass ──────────────────────────────────────────────────────────────────
@@ -233,21 +229,10 @@ def build_query_frame(query: str, history: list[dict] | None = None) -> QueryFra
     )
 
     try:
-        resp = _session.post(
-            f"{OLLAMA}/api/generate",
-            json={
-                "model":   MODEL,
-                "prompt":  _PROMPT.format(
-                    history=history_str,
-                    query=query,
-                    context_block=context_block,
-                ),
-                "stream":  False,
-                "options": {"temperature": 0.1, "num_predict": 800},
-            },
-            timeout=90,
+        raw = llm_complete(
+            _PROMPT.format(history=history_str, query=query, context_block=context_block),
+            model=MODEL, temperature=0.1, max_tokens=800, timeout=90,
         )
-        raw  = resp.json().get("response", "")
         data = _extract_json(raw)
     except Exception:
         return _fallback(query)

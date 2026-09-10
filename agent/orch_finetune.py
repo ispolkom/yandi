@@ -160,12 +160,7 @@ def train(config_key: str = "7b"):
 
 def eval_ab(question: str = "Что такое DHT?"):
     """A/B тест: base Qwen3:14b vs fine-tuned оркестратор."""
-    import requests
-    session = requests.Session()
-    session.trust_env = False
-
-    OLLAMA = "http://127.0.0.1:11434"
-    models = ["qwen3:14b"]
+    from llm_gateway import complete as llm_complete
 
     from agent.orch_schemas import OrchestratorRequest
     from agent.orchestrator_v2 import process
@@ -175,13 +170,7 @@ def eval_ab(question: str = "Что такое DHT?"):
     # Base model (прямой вызов)
     print("\n[BASE Qwen3:14b — прямой вызов]")
     try:
-        r = session.post(
-            f"{OLLAMA}/api/generate",
-            json={"model": "qwen3:14b", "prompt": question, "stream": False,
-                  "options": {"temperature": 0.7, "num_predict": 300}},
-            timeout=60,
-        )
-        base_answer = r.json().get("response", "").strip()
+        base_answer = llm_complete(question, model="qwen3:14b", temperature=0.7, max_tokens=300, timeout=60)
         print(base_answer[:400])
     except Exception as e:
         print(f"Ошибка: {e}")
