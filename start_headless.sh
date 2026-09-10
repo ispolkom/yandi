@@ -11,6 +11,12 @@ PYTHON="python3"
 # Зависимости
 pip install -q fastapi uvicorn redis requests pydantic httpx trafilatura 2>/dev/null
 
+# Свой движок инференса (llama.cpp, те же веса, что у Ollama, но без
+# HTTP-сервера между нами и моделью) — Ollama остаётся автоматическим
+# фоллбэком внутри llm_gateway, если локальный движок недоступен или
+# упадёт. См. память ollama-decoupling-plan.
+export LLM_GATEWAY_ENABLE_LOCAL=1
+
 REQUIRED_SQL_GROUP="yandi-db"
 CURRENT_USER="$(id -un)"
 if getent group "$REQUIRED_SQL_GROUP" >/dev/null \
