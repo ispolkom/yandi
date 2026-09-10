@@ -14,10 +14,18 @@ if ! redis-cli ping &>/dev/null; then
   exit 1
 fi
 
-# Проверка Ollama (опционально)
+# Проверка Ollama (опционально — теперь это фоллбэк, не основной путь,
+# см. llm_gateway/llamacpp_backend.py, но если и он недоступен, а
+# локальный движок споткнётся, деградировать будет не на что)
 if ! curl --noproxy '127.0.0.1,localhost' -s http://127.0.0.1:11434/api/tags &>/dev/null; then
-  echo "[WARN] Ollama не доступен — YANDI Помощник работать не будет"
+  echo "[WARN] Ollama (фоллбэк) не доступен"
 fi
+
+# Свой движок инференса (llama.cpp, те же веса, что у Ollama, но без
+# HTTP-сервера между нами и моделью) — Ollama остаётся автоматическим
+# фоллбэком внутри llm_gateway, если локальный движок недоступен или
+# упадёт. См. память ollama-decoupling-plan.
+export LLM_GATEWAY_ENABLE_LOCAL=1
 
 REQUIRED_SQL_GROUP="yandi-db"
 CURRENT_USER="$(id -un)"
