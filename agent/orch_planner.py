@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-import requests as _requests
+from llm_gateway import complete as llm_complete
 
 # Добавляем путь для импорта
 BASE = Path(__file__).parent.parent
@@ -25,12 +25,8 @@ sys.path.insert(0, str(BASE))
 
 from agent.orch_schemas import PlanResult, PlanStep, RiskResult, StepName
 
-OLLAMA  = "http://127.0.0.1:11434"
 MODEL   = "qwen3:14b"
 TIMEOUT = 45
-
-_session = _requests.Session()
-_session.trust_env = False
 
 # Пытаемся импортировать рефлексию
 try:
@@ -97,14 +93,7 @@ _REFLECTION_POLICY_MAP = {
 
 
 def _call_ollama(prompt: str) -> str:
-    resp = _session.post(
-        f"{OLLAMA}/api/generate",
-        json={"model": MODEL, "prompt": prompt, "stream": False,
-              "options": {"temperature": 0.1, "num_predict": 300}},
-        timeout=TIMEOUT,
-    )
-    resp.raise_for_status()
-    return resp.json().get("response", "").strip()
+    return llm_complete(prompt, model=MODEL, temperature=0.1, max_tokens=300, timeout=TIMEOUT)
 
 
 def _extract_json(text: str) -> dict:

@@ -19,7 +19,7 @@ from pathlib import Path
 from agent.source_quality import evaluate_source_quality
 from typing import List, Dict, Any, Optional
 
-import requests as _requests
+from llm_gateway import complete as llm_complete
 
 from agent.orch_schemas import (
     SearchResult,
@@ -32,7 +32,7 @@ from agent.orch_schemas import (
     CoverageReport,
     OutcomeRecord,
 )
-from agent.orch_config import OLLAMA_BASE as OLLAMA, MODEL, MAX_TOKENS_ANALYST, TEMP_ANALYST
+from agent.orch_config import MODEL, MAX_TOKENS_ANALYST, TEMP_ANALYST
 
 BASE = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE))
@@ -111,9 +111,6 @@ def _extract_refutation_argument(text: str) -> str:
 TIMEOUT       = 180
 MAX_CTX_CHARS = 12000
 
-_session = _requests.Session()
-_session.trust_env = False
-
 # ============================================================
 # LOCAL GENERATION CONCURRENCY GATE
 # ============================================================
@@ -152,21 +149,9 @@ def _call(
 
         call_started = time.time()
 
-        resp = _session.post(
-            f"{OLLAMA}/api/generate",
-            json={
-                "model": MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": temp,
-                    "num_predict": max_tokens,
-                },
-            },
-            timeout=TIMEOUT,
+        text = llm_complete(
+            prompt, model=MODEL, temperature=temp, max_tokens=max_tokens, timeout=TIMEOUT,
         )
-
-        resp.raise_for_status()
 
         elapsed = time.time() - call_started
 
@@ -176,10 +161,7 @@ def _call(
             f"tokens<={max_tokens}"
         )
 
-        return resp.json().get(
-            "response",
-            "",
-        ).strip()
+        return text
 
 
 # ── Постобработка ──────────────────────────────────────────────────────────────

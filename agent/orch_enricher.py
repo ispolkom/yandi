@@ -8,14 +8,11 @@ import json
 import re
 import time
 
-import requests as _requests
+from llm_gateway import complete as llm_complete
 
 from agent.orch_schemas import IntentResult, EnrichedQuery
 
-_session = _requests.Session()
-_session.trust_env = False
-
-from agent.orch_config import OLLAMA_BASE as OLLAMA, MODEL, MAX_TOKENS_CONDUCTOR, TEMP_CONDUCTOR
+from agent.orch_config import MODEL, MAX_TOKENS_CONDUCTOR, TEMP_CONDUCTOR
 TIMEOUT = 90
 
 
@@ -63,14 +60,10 @@ Examples: travel:tourism, tech:networking, health:medicine, cooking:recipes, fin
 Question: {query}
 Tags:"""
         
-        resp = _session.post(
-            f"{OLLAMA}/api/generate",
-            json={"model": MODEL, "prompt": TAG_PROMPT.format(query=query), "stream": False,
-                  "options": {"temperature": 0.1, "num_predict": 50}},
-            timeout=15,
+        raw = llm_complete(
+            TAG_PROMPT.format(query=query), model=MODEL,
+            temperature=0.1, max_tokens=50, timeout=15,
         )
-        raw = resp.json().get("response", "").strip()
-        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         for stop in ("<|endoftext|>", "<|im_start|>", "<|im_end|>", "</s>"):
             raw = raw.split(stop)[0]
         first_line = raw.splitlines()[0] if raw else ""
