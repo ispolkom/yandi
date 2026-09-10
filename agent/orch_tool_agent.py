@@ -8,9 +8,11 @@ import re
 import subprocess
 import requests
 
+from llm_gateway import complete as llm_complete
+
+# _SESSION остаётся для NODE_KB — это отдельный узел, не Ollama.
 _SESSION = requests.Session()
 _SESSION.trust_env = False
-OLLAMA  = "http://127.0.0.1:11434"
 NODE_KB = "http://127.0.0.1:18082/api/ai-rpc/knowledge"
 MODEL   = "heretic:q8"
 
@@ -63,27 +65,22 @@ def _extract_yt(text: str) -> str | None:
 
 def _model_identify(user_query: str) -> str:
     """Модель переводит бытовое описание в официальное название исполнитель - трек."""
-    resp = _SESSION.post(
-        f"{OLLAMA}/api/chat",
-        json={
-            "model": MODEL,
-            "messages": [
-                {"role": "system", "content":
-                    "Ты определяешь о какой песне/клипе говорит пользователь. "
-                    "Отвечай ТОЛЬКО: Исполнитель - Название. "
-                    "Если не знаешь — отвечай: unknown\n"
-                    "Примеры:\n"
-                    "вороны крутятся мадонна → Madonna - Frozen\n"
-                    "рюмка водки на столе → Григорий Лепс - Рюмка водки на столе\n"
-                    "мастхэв бинлав роксет → Roxette - It Must Have Been Love"},
-                {"role": "user", "content": user_query},
-            ],
-            "stream": False,
-            "options": {"num_predict": 25, "temperature": 0.1},
-        },
+    text = llm_complete(
+        user_query,
+        model=MODEL,
+        system=(
+            "Ты определяешь о какой песне/клипе говорит пользователь. "
+            "Отвечай ТОЛЬКО: Исполнитель - Название. "
+            "Если не знаешь — отвечай: unknown\n"
+            "Примеры:\n"
+            "вороны крутятся мадонна → Madonna - Frozen\n"
+            "рюмка водки на столе → Григорий Лепс - Рюмка водки на столе\n"
+            "мастхэв бинлав роксет → Roxette - It Must Have Been Love"
+        ),
+        max_tokens=25,
+        temperature=0.1,
         timeout=30,
     )
-    text = resp.json().get("message", {}).get("content", "")
     text = re.sub(r"<\|[^|]*\|>", "", text).strip().splitlines()[0].strip()
     return text if text and text.lower() != "unknown" else ""
 

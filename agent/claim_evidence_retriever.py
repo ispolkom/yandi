@@ -320,16 +320,8 @@ def _call_ollama_for_query_batch(prompt: str, batch_size: int) -> str:
     grows with batch_size instead of risking the same truncation bug
     P0-B already found and fixed elsewhere.
     """
-    import requests
-    from agent.orch_config import (
-        OLLAMA_BASE,
-        MODEL,
-        TEMP_CONDUCTOR,
-        GENERATION_SEMAPHORE,
-    )
-
-    session = requests.Session()
-    session.trust_env = False
+    from llm_gateway import complete as llm_complete
+    from agent.orch_config import MODEL, TEMP_CONDUCTOR, GENERATION_SEMAPHORE
 
     num_predict = max(300, batch_size * 120)
 
@@ -341,22 +333,10 @@ def _call_ollama_for_query_batch(prompt: str, batch_size: int) -> str:
         if waited > 0.05:
             print(f"[Claim Query Batch LLM] generation queue wait={waited:.2f}s")
 
-        resp = session.post(
-            f"{OLLAMA_BASE}/api/generate",
-            json={
-                "model": MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": TEMP_CONDUCTOR,
-                    "num_predict": num_predict,
-                },
-            },
-            timeout=90,
+        return llm_complete(
+            prompt, model=MODEL, temperature=TEMP_CONDUCTOR,
+            max_tokens=num_predict, timeout=90,
         )
-        resp.raise_for_status()
-
-        return resp.json().get("response", "").strip()
 
 
 def formulate_claim_evidence_queries_batch(

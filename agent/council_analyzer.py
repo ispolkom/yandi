@@ -33,6 +33,8 @@ from typing import Optional
 import redis
 import requests
 
+from llm_gateway import complete as llm_complete
+
 BASE              = Path(__file__).parent.parent
 ANALYSIS_DIR      = BASE / "registry" / "analysis"
 TOPICS_DIR        = ANALYSIS_DIR / "topics"
@@ -192,21 +194,11 @@ def extract_threads(messages: list[dict]) -> list[dict]:
 
 def _ollama_generate(prompt: str, model: str = ANALYSIS_MODEL,
                      system: str = "", timeout: int = 120) -> str:
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"temperature": 0.3, "num_predict": 1024},
-    }
-    if system:
-        payload["system"] = system
     try:
-        resp = requests.post(
-            f"{OLLAMA_URL}/api/generate",
-            json=payload, timeout=timeout,
-            proxies={"http": None, "https": None},
+        return llm_complete(
+            prompt, model=model, system=system or None,
+            temperature=0.3, max_tokens=1024, timeout=timeout,
         )
-        return resp.json().get("response", "").strip()
     except Exception as e:
         return f"[ERROR: {e}]"
 
