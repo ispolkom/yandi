@@ -10,13 +10,9 @@ from __future__ import annotations
 import json
 import re
 
-import requests as _requests
+from llm_gateway import complete as llm_complete
 
-OLLAMA = "http://127.0.0.1:11434"
 MODEL  = "heretic:q8"
-
-_session = _requests.Session()
-_session.trust_env = False
 
 _PROMPT = """\
 Ты помощник по формированию поисковых запросов. Проанализируй диалог и составь точный поисковый запрос.
@@ -94,17 +90,7 @@ def build_query_from_context(query: str, history: list[dict]) -> str:
     prompt = _PROMPT.format(history=history_str, query=query)
 
     try:
-        resp = _session.post(
-            f"{OLLAMA}/api/generate",
-            json={
-                "model": MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.1, "num_predict": 200},
-            },
-            timeout=60,
-        )
-        raw = resp.json().get("response", "")
+        raw = llm_complete(prompt, model=MODEL, temperature=0.1, max_tokens=200, timeout=60)
         data = _extract_json(raw)
         result = (data.get("search_query") or "").strip()
         return result if result else query

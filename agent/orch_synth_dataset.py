@@ -25,7 +25,9 @@ sys.path.insert(0, str(BASE))
 OUT_FILE = BASE / "registry" / "dataset" / "orch_sft" / "orchestrator_synth.jsonl"
 OUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-from agent.orch_config import OLLAMA_BASE as OLLAMA, MODEL, MAX_TOKENS_DATASET, TEMP_DATASET
+from llm_gateway import complete as llm_complete
+
+from agent.orch_config import MODEL, MAX_TOKENS_DATASET, TEMP_DATASET
 TIMEOUT = 180
 
 # ── Категории и вопросы ────────────────────────────────────────────────────────
@@ -242,18 +244,11 @@ Response format:
 # ── Генерация ─────────────────────────────────────────────────────────────────
 
 def _call_ollama(query: str, domain: str, risk: str) -> str:
-    import requests
-    s = requests.Session()
-    s.trust_env = False
     prompt = f"{SYSTEM_PROMPT}\n\nЗапрос пользователя: {query}\nДомен: {domain}, Риск: {risk}"
-    resp = s.post(
-        f"{OLLAMA}/api/generate",
-        json={"model": MODEL, "prompt": prompt, "stream": False,
-              "options": {"temperature": TEMP_DATASET, "num_predict": MAX_TOKENS_DATASET}},
-        timeout=TIMEOUT,
+    return llm_complete(
+        prompt, model=MODEL, temperature=TEMP_DATASET,
+        max_tokens=MAX_TOKENS_DATASET, timeout=TIMEOUT,
     )
-    resp.raise_for_status()
-    return resp.json().get("response", "").strip()
 
 
 def _parse_response(raw: str) -> dict | None:
