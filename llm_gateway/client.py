@@ -59,6 +59,7 @@ def _do_complete(
     base_url: str,
     strip_think: bool,
     extra_options: dict[str, object] | None,
+    response_format: str | None,
 ) -> tuple[str, dict]:
     """Общая часть complete()/complete_with_meta() — один HTTP-вызов,
     возвращает и очищенный текст, и сырой JSON-ответ (для тех, кому
@@ -75,6 +76,8 @@ def _do_complete(
         options["num_predict"] = max_tokens
 
     payload: dict[str, object] = {"model": model, "messages": messages, "stream": False}
+    if response_format is not None:
+        payload["format"] = response_format
     if options:
         payload["options"] = options
 
@@ -106,6 +109,7 @@ def complete(
     base_url: str = DEFAULT_BASE_URL,
     strip_think: bool = True,
     extra_options: dict[str, object] | None = None,
+    response_format: str | None = None,
 ) -> str:
     """Запросить у модели завершение текста.
 
@@ -119,6 +123,9 @@ def complete(
     локальный. extra_options — путь наружу для редких, специфичных для
     конкретного call-сайта опций generation (например seed у валидатора
     нод), не заслуживающих собственного именованного параметра здесь.
+    response_format="json" — строгий JSON-режим бэкенда (Ollama:
+    top-level "format", не options) для call-сайтов, где парсинг ответа
+    как JSON обязателен (claim_relation.py и т.п.).
 
     Бросает LLMError при сетевой ошибке, ошибке бэкенда или неожиданном
     формате ответа — вызывающий код сам решает, ловить её или нет,
@@ -131,6 +138,7 @@ def complete(
         prompt, model=model, system=system, temperature=temperature,
         max_tokens=max_tokens, timeout=timeout, base_url=base_url,
         strip_think=strip_think, extra_options=extra_options,
+        response_format=response_format,
     )
     return text
 
@@ -146,6 +154,7 @@ def complete_with_meta(
     base_url: str = DEFAULT_BASE_URL,
     strip_think: bool = True,
     extra_options: dict[str, object] | None = None,
+    response_format: str | None = None,
 ) -> CompletionResult:
     """Как complete(), но также сообщает, была ли генерация оборвана
     лимитом токенов (а не завершилась естественно) — нужно только
@@ -155,6 +164,7 @@ def complete_with_meta(
         prompt, model=model, system=system, temperature=temperature,
         max_tokens=max_tokens, timeout=timeout, base_url=base_url,
         strip_think=strip_think, extra_options=extra_options,
+        response_format=response_format,
     )
     return CompletionResult(
         text=text,

@@ -105,6 +105,21 @@ def main() -> int:
             repr(mock_post.call_args.args),
         )
 
+    # 3d. response_format="json" -> top-level "format", не в options
+    #     (claim_relation.py нужен строгий JSON-режим).
+    with patch.object(client._session, "post") as mock_post:
+        mock_post.return_value = _fake_response({"message": {"content": "{}"}})
+        client.complete("q", model="m", response_format="json")
+        sent = mock_post.call_args.kwargs["json"]
+        check("response_format='json' sets top-level format", sent.get("format") == "json", repr(sent))
+        check("response_format doesn't leak into options", "format" not in (sent.get("options") or {}), repr(sent))
+
+    with patch.object(client._session, "post") as mock_post:
+        mock_post.return_value = _fake_response({"message": {"content": "ok"}})
+        client.complete("q", model="m")
+        sent = mock_post.call_args.kwargs["json"]
+        check("no format key when response_format unset", "format" not in sent, repr(sent))
+
     # 4. <think>...</think> вырезается по умолчанию (orchestrator.py's
     #    старое поведение для reasoning-моделей).
     with patch.object(client._session, "post") as mock_post:
