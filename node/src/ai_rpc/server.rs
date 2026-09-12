@@ -63,10 +63,22 @@ pub struct RpcServer {
     fetch_client: reqwest::Client,
     pub counters: Arc<RpcCounters>,
     pub kb: Arc<Mutex<KnowledgeBase>>,
+    /// Node Identity Binding Fix (Barrier 2): this node's own signing
+    /// identity, used to sign every outgoing RpcResponse — success AND
+    /// error alike — so a requester can verify the answer really came
+    /// from the node it asked, independent of whatever the transport
+    /// layer's routing table currently believes.
+    signing_key: ed25519_dalek::SigningKey,
+    node_address: [u8; 32],
 }
 
 impl RpcServer {
-    pub fn new(bridge_url: &str, kb: Arc<Mutex<KnowledgeBase>>) -> Result<Self, String> {
+    pub fn new(
+        bridge_url: &str,
+        kb: Arc<Mutex<KnowledgeBase>>,
+        signing_key: ed25519_dalek::SigningKey,
+        node_address: [u8; 32],
+    ) -> Result<Self, String> {
         let intelligence = IntelligenceBridgeClient::new(bridge_url)?;
         let fetch_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -80,7 +92,38 @@ impl RpcServer {
             fetch_client,
             counters: RpcCounters::new(),
             kb,
+            signing_key,
+            node_address,
         })
+    }
+
+    /// Build and sign a response. `requester` is the node_id that sent the
+    /// original request (`RpcEnvelope::sender`) — bound into the signature
+    /// so this exact response can never be replayed as an answer to a
+    /// different peer, even if their `request_id` counters collide.
+    fn build_response(&self, request_id: u64, requester: [u8; 32], status: RpcStatus, payload: Vec<u8>) -> RpcResponse {
+        use ed25519_dalek::Signer;
+        let mut resp = RpcResponse {
+            request_id,
+            requester,
+            responder: self.node_address,
+            status,
+            is_chunk: false,
+            chunk_done: true,
+            payload,
+            signature: Vec::new(),
+        };
+        let canonical = resp.canonical_bytes();
+        resp.signature = self.signing_key.sign(&canonical).to_bytes().to_vec();
+        resp
+    }
+
+    fn ok_response(&self, request_id: u64, requester: [u8; 32], payload: Vec<u8>) -> RpcResponse {
+        self.build_response(request_id, requester, RpcStatus::Ok, payload)
+    }
+
+    fn error_response(&self, request_id: u64, requester: [u8; 32], err: RpcError) -> RpcResponse {
+        self.build_response(request_id, requester, RpcStatus::Err(err), vec![])
     }
 
     /// Grant access to a peer. Thread-safe.
@@ -105,7 +148,7 @@ impl RpcServer {
             Err(e) => {
                 self.counters.errors_total.fetch_add(1, Ordering::Relaxed);
                 warn!("ai_rpc: failed to decode envelope: {e}");
-                return error_response(0, RpcError::InvalidPayload(e.to_string()));
+                return self.error_response(0, [0u8; 32], RpcError::InvalidPayload(e.to_string()));
             }
         };
 
@@ -114,7 +157,7 @@ impl RpcServer {
         // Validate: version, timestamp, allowlist, rate limit, nonce, signature
         if let Err(e) = self.policy.lock().await.validate(&env) {
             self.counters.errors_total.fetch_add(1, Ordering::Relaxed);
-            return error_response(request_id, e);
+            return self.error_response(request_id, env.sender, e);
         }
 
         // Dispatch
@@ -127,7 +170,7 @@ impl RpcServer {
             }
             Err(e) => {
                 self.counters.errors_total.fetch_add(1, Ordering::Relaxed);
-                error_response(request_id, e)
+                self.error_response(request_id, env.sender, e)
             }
         }
     }
@@ -153,7 +196,7 @@ impl RpcServer {
         };
         let payload = bincode::serialize(&pong)
             .map_err(|e| RpcError::BackendError(e.to_string()))?;
-        Ok(ok_response(env.request_id, payload))
+        Ok(self.ok_response(env.request_id, env.sender, payload))
     }
 
     async fn handle_ai_infer(&self, env: &RpcEnvelope) -> Result<RpcResponse, RpcError> {
@@ -198,7 +241,7 @@ impl RpcServer {
 
         let payload = bincode::serialize(&infer_resp)
             .map_err(|e| RpcError::BackendError(e.to_string()))?;
-        Ok(ok_response(env.request_id, payload))
+        Ok(self.ok_response(env.request_id, env.sender, payload))
     }
 
     async fn handle_fetch(&self, env: &RpcEnvelope) -> Result<RpcResponse, RpcError> {
@@ -221,7 +264,7 @@ impl RpcServer {
 
         let payload = bincode::serialize(&fetch_resp)
             .map_err(|e| RpcError::BackendError(e.to_string()))?;
-        Ok(ok_response(env.request_id, payload))
+        Ok(self.ok_response(env.request_id, env.sender, payload))
     }
 
     async fn handle_kb_store(&self, env: &RpcEnvelope) -> Result<RpcResponse, RpcError> {
@@ -238,7 +281,7 @@ impl RpcServer {
 
         let payload = bincode::serialize(&id)
             .map_err(|e| RpcError::BackendError(e.to_string()))?;
-        Ok(ok_response(env.request_id, payload))
+        Ok(self.ok_response(env.request_id, env.sender, payload))
     }
 
     async fn handle_kb_search(&self, env: &RpcEnvelope) -> Result<RpcResponse, RpcError> {
@@ -255,28 +298,7 @@ impl RpcServer {
         // Returns an empty result set. Iter 8 (DHT-shared KB) will fill this in.
         let payload = bincode::serialize(&Vec::<String>::new())
             .map_err(|e| RpcError::BackendError(e.to_string()))?;
-        Ok(ok_response(env.request_id, payload))
+        Ok(self.ok_response(env.request_id, env.sender, payload))
     }
 }
 
-// ── Response helpers ───────────────────────────────────────────────────────
-
-fn ok_response(request_id: u64, payload: Vec<u8>) -> RpcResponse {
-    RpcResponse {
-        request_id,
-        status: RpcStatus::Ok,
-        is_chunk: false,
-        chunk_done: true,
-        payload,
-    }
-}
-
-fn error_response(request_id: u64, err: RpcError) -> RpcResponse {
-    RpcResponse {
-        request_id,
-        status: RpcStatus::Err(err),
-        is_chunk: false,
-        chunk_done: true,
-        payload: vec![],
-    }
-}

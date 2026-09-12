@@ -172,15 +172,63 @@ impl RpcEnvelope {
 
 // ── Response ───────────────────────────────────────────────────────────────
 
+/// Node Identity Binding Fix: every response is now Ed25519-signed by the
+/// answering node, over `canonical_bytes()` below. Verified on the
+/// requester's side against the SAME locally-pinned signing key used to
+/// authorize the original request (`trusted_ai_peers.json`) — never
+/// against anything this struct itself claims. This closes the gap a live
+/// exploit proved: an encrypted transport session only proves "I share a
+/// key with whoever currently occupies this routing slot," never "this is
+/// the specific node I trust" — only a checked signature over an
+/// independently-known key can prove that.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcResponse {
     pub request_id: u64,
+    /// node_id of whoever ORIGINALLY sent the request this answers — binds
+    /// the response to one specific requester so a genuine response B gave
+    /// to peer C can never be replayed/misapplied as an answer to A, even
+    /// though `request_id` values are only unique per-sender, not globally.
+    pub requester: [u8; 32],
+    /// node_id the answering node claims to be. Verified: the requester
+    /// checks this equals the address it actually sent the request to,
+    /// AND that the signature verifies under ITS locally-pinned key for
+    /// that address — a bare claim here proves nothing by itself.
+    pub responder: [u8; 32],
     pub status: RpcStatus,
     /// True when this is a streaming chunk (more to follow unless `chunk_done`).
     pub is_chunk: bool,
     /// True on the final chunk of a streaming response, or on a non-streaming response.
     pub chunk_done: bool,
     pub payload: Vec<u8>, // bincode-encoded RpcResponsePayload
+    /// Ed25519 signature (64 bytes) over `canonical_bytes()`, made by the
+    /// responder's own signing key. Covers success AND error responses
+    /// alike — an attacker must not be able to forge "B says her backend
+    /// is down" any more than "B says the answer is X".
+    pub signature: Vec<u8>,
+}
+
+impl RpcResponse {
+    /// Explicit, ordered byte buffer to sign/verify — never
+    /// `bincode::serialize(&self)` of the whole struct, whose layout could
+    /// silently shift under an unrelated refactor. Mirrors
+    /// `RpcEnvelope::canonical_bytes()`'s existing pattern. `status` is
+    /// included via bincode only for ITS OWN stable, self-contained
+    /// encoding — deterministic for identical content, which is all a
+    /// signature needs.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(8 + 32 + 32 + 2 + self.payload.len() + 16);
+        buf.extend_from_slice(&self.request_id.to_le_bytes());
+        buf.extend_from_slice(&self.requester);
+        buf.extend_from_slice(&self.responder);
+        buf.push(self.is_chunk as u8);
+        buf.push(self.chunk_done as u8);
+        if let Ok(status_bytes) = bincode::serialize(&self.status) {
+            buf.extend_from_slice(&(status_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&status_bytes);
+        }
+        buf.extend_from_slice(&self.payload);
+        buf
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,6 +259,14 @@ pub enum RpcError {
     BackendError(String),
     #[error("upstream fetch failed: {0}")]
     FetchError(String),
+    /// Node Identity Binding Fix: a response arrived that does not
+    /// cryptographically prove it came from the node this request was
+    /// actually sent to — missing/malformed signature, signature that
+    /// doesn't verify against the locally-pinned key, responder/requester
+    /// mismatch, or (see PendingRequests) no pinned key exists at all for
+    /// the peer the request was sent to. Never treated as a real answer.
+    #[error("response authentication failed: {0}")]
+    ResponseAuthFailed(String),
 }
 
 /// Payload inside `RpcResponse.payload` for a successful AiInfer call.
