@@ -50,6 +50,17 @@ use yandi::ai_rpc::types::{RpcResponse, PKT_AI_RPC_REQUEST};
 use yandi::ai_rpc::{AiInferPayload, AiRpcService, ChatMessage};
 use yandi::util::HashId;
 
+/// Build one `trusted_ai_peers.json`-shaped entry for a test's own
+/// `PeerDirectory`, so `send_ai_infer_remote` has a pinned key to verify
+/// the eventual response against (Node Identity Binding Fix, Barrier 2).
+fn test_peer(node_id: HashId, pubkey: [u8; 32], name: &str) -> yandi::ai_rpc::peer_directory::TrustedAiPeer {
+    yandi::ai_rpc::peer_directory::TrustedAiPeer {
+        node_id_hex: node_id.to_hex(),
+        signing_pubkey_hex: hex::encode(pubkey),
+        name: Some(name.to_string()),
+    }
+}
+
 struct BridgeProc {
     child: Child,
 }
@@ -76,7 +87,16 @@ fn spawn_bridge(port: u16, kek_path: &str, db_path: &str, gguf_path: &str) -> Op
         .env("YANDI_NODE_DB", db_path)
         .arg("-c")
         .arg(format!(
-            "from llm_gateway import config; config.set_model_entry('yandi:peer-default', {{'backend': 'llamacpp', 'path': {gguf_path:?}, 'n_ctx': 4096, 'n_gpu_layers': -1}})"
+            // CPU-only (n_gpu_layers: 0) deliberately, not the usual -1:
+            // this test suite's own repeated process kills across many
+            // mandates this session have left the GPU holding ~11GB of
+            // orphaned VRAM with no live owning process (confirmed via
+            // nvidia-smi) — a real but purely environmental problem,
+            // unrelated to this fix, that a full machine reboot would
+            // clear. CPU inference is slower but deterministic and
+            // unaffected by that, so it's what makes this suite reliable
+            // regardless of host GPU state.
+            "from llm_gateway import config; config.set_model_entry('yandi:peer-default', {{'backend': 'llamacpp', 'path': {gguf_path:?}, 'n_ctx': 4096, 'n_gpu_layers': 0}})"
         ))
         .status()
         .ok()?;
@@ -166,13 +186,13 @@ async fn peer_inference_without_ollama() {
     wait_for_port(18197, Duration::from_secs(20)).await;
     wait_for_port(18198, Duration::from_secs(20)).await;
 
-    let svc_a = AiRpcService::new("http://127.0.0.1:18197").expect("AiRpcService A");
-    let svc_b = AiRpcService::new("http://127.0.0.1:18198").expect("AiRpcService B");
-
     let sk_a = SigningKey::generate(&mut OsRng);
     let sk_b = SigningKey::generate(&mut OsRng);
     let addr_a = sk_a.verifying_key().to_bytes();
     let addr_b = sk_b.verifying_key().to_bytes();
+
+    let svc_a = AiRpcService::new("http://127.0.0.1:18197", sk_a.clone(), addr_a).expect("AiRpcService A");
+    let svc_b = AiRpcService::new("http://127.0.0.1:18198", sk_b.clone(), addr_b).expect("AiRpcService B");
 
     // B allows A; A allows B — mirrors main.rs's real paired-peer
     // allowlist population from PairedClientStore, just without the
@@ -189,11 +209,18 @@ async fn peer_inference_without_ollama() {
         .add_peer(AllowedPeer { address: addr_a, signing_pubkey: addr_a, name: Some("A".into()), rpm_limit: None })
         .await
         .unwrap();
+    // Node Identity Binding Fix (Barrier 2): send_ai_infer_remote() now
+    // refuses to send unless the target peer is in OUR OWN trusted
+    // directory (so its eventual response can be verified) — A must know
+    // B's real pubkey, not just have B in its AllowedPeer allowlist.
+    svc_a.lock().await.set_peer_directory(std::sync::Arc::new(
+        yandi::ai_rpc::PeerDirectory { peers: vec![test_peer(HashId(addr_b), addr_b, "B")] },
+    ));
 
     // Wire A's outbound gossip channel to A's own signing identity —
     // real code path, real signing key.
     let (gossip_tx_a, mut gossip_rx_a) = mpsc::channel::<(HashId, Vec<u8>)>(8);
-    svc_a.lock().await.set_gossip_channel(gossip_tx_a, sk_a, addr_a);
+    svc_a.lock().await.set_gossip_channel(gossip_tx_a);
     // Cloned out ONCE, used directly from then on — mirrors main.rs's
     // real wiring; going back through svc_a.lock() to resolve a reply
     // would deadlock against send_ai_infer_remote's own held lock (see
@@ -264,19 +291,22 @@ async fn peer_cannot_choose_backend_model() {
     .expect("failed to configure/spawn bridge B");
     wait_for_port(18199, Duration::from_secs(20)).await;
 
-    let svc_a = AiRpcService::new("http://127.0.0.1:18099").expect("AiRpcService A"); // A has no real bridge — irrelevant, A only sends
-    let svc_b = AiRpcService::new("http://127.0.0.1:18199").expect("AiRpcService B");
-
     let sk_a = SigningKey::generate(&mut OsRng);
     let sk_b = SigningKey::generate(&mut OsRng);
     let addr_a = sk_a.verifying_key().to_bytes();
     let addr_b = sk_b.verifying_key().to_bytes();
 
+    let svc_a = AiRpcService::new("http://127.0.0.1:18099", sk_a.clone(), addr_a).expect("AiRpcService A"); // A has no real bridge — irrelevant, A only sends
+    let svc_b = AiRpcService::new("http://127.0.0.1:18199", sk_b.clone(), addr_b).expect("AiRpcService B");
+
     svc_a.lock().await.add_peer(AllowedPeer { address: addr_b, signing_pubkey: addr_b, name: None, rpm_limit: None }).await.unwrap();
     svc_b.lock().await.add_peer(AllowedPeer { address: addr_a, signing_pubkey: addr_a, name: None, rpm_limit: None }).await.unwrap();
+    svc_a.lock().await.set_peer_directory(std::sync::Arc::new(
+        yandi::ai_rpc::PeerDirectory { peers: vec![test_peer(HashId(addr_b), addr_b, "B")] },
+    ));
 
     let (gossip_tx_a, mut gossip_rx_a) = mpsc::channel::<(HashId, Vec<u8>)>(8);
-    svc_a.lock().await.set_gossip_channel(gossip_tx_a, sk_a, addr_a);
+    svc_a.lock().await.set_gossip_channel(gossip_tx_a);
     let pending_a = svc_a.lock().await.pending_requests();
 
     let svc_b_for_wire = svc_b.clone();
@@ -311,7 +341,9 @@ async fn peer_cannot_choose_backend_model() {
 /// `TrustPolicy::validate` before dispatch, so no backend is ever touched.
 #[tokio::test]
 async fn unpaired_peer_gets_no_inference() {
-    let svc_b = AiRpcService::new("http://127.0.0.1:1").expect("AiRpcService B"); // bogus bridge URL — must never be reached
+    let sk_b = SigningKey::generate(&mut OsRng);
+    let addr_b = sk_b.verifying_key().to_bytes();
+    let svc_b = AiRpcService::new("http://127.0.0.1:1", sk_b, addr_b).expect("AiRpcService B"); // bogus bridge URL — must never be reached
 
     let sk_a = SigningKey::generate(&mut OsRng);
     let addr_a = sk_a.verifying_key().to_bytes();
@@ -353,7 +385,9 @@ async fn unpaired_peer_gets_no_inference() {
 /// backend call itself (bogus bridge URL that would error loudly if hit).
 #[tokio::test]
 async fn malformed_requests_never_reach_a_backend() {
-    let svc_b = AiRpcService::new("http://127.0.0.1:1").expect("AiRpcService B");
+    let sk_b = SigningKey::generate(&mut OsRng);
+    let addr_b = sk_b.verifying_key().to_bytes();
+    let svc_b = AiRpcService::new("http://127.0.0.1:1", sk_b, addr_b).expect("AiRpcService B");
 
     let resp = svc_b.lock().await.server.handle(b"not a valid bincode envelope at all").await;
     assert!(matches!(resp.status, yandi::ai_rpc::RpcStatus::Err(_)), "garbage bytes must produce an error response, not a panic or a backend call");
@@ -414,17 +448,20 @@ async fn explicit_backend_failure_is_honest_not_silently_substituted() {
     .expect("failed to configure/spawn bridge B");
     wait_for_port(18296, Duration::from_secs(20)).await;
 
-    let svc_a = AiRpcService::new("http://127.0.0.1:1").expect("AiRpcService A");
-    let svc_b = AiRpcService::new("http://127.0.0.1:18296").expect("AiRpcService B");
     let sk_a = SigningKey::generate(&mut OsRng);
     let sk_b = SigningKey::generate(&mut OsRng);
     let addr_a = sk_a.verifying_key().to_bytes();
     let addr_b = sk_b.verifying_key().to_bytes();
+    let svc_a = AiRpcService::new("http://127.0.0.1:1", sk_a.clone(), addr_a).expect("AiRpcService A");
+    let svc_b = AiRpcService::new("http://127.0.0.1:18296", sk_b, addr_b).expect("AiRpcService B");
     svc_a.lock().await.add_peer(AllowedPeer { address: addr_b, signing_pubkey: addr_b, name: None, rpm_limit: None }).await.unwrap();
     svc_b.lock().await.add_peer(AllowedPeer { address: addr_a, signing_pubkey: addr_a, name: None, rpm_limit: None }).await.unwrap();
+    svc_a.lock().await.set_peer_directory(std::sync::Arc::new(
+        yandi::ai_rpc::PeerDirectory { peers: vec![test_peer(HashId(addr_b), addr_b, "B")] },
+    ));
 
     let (gossip_tx_a, mut gossip_rx_a) = mpsc::channel::<(HashId, Vec<u8>)>(8);
-    svc_a.lock().await.set_gossip_channel(gossip_tx_a, sk_a, addr_a);
+    svc_a.lock().await.set_gossip_channel(gossip_tx_a);
     let pending_a = svc_a.lock().await.pending_requests();
     let svc_b_for_wire = svc_b.clone();
     tokio::spawn(async move {
@@ -469,7 +506,9 @@ async fn explicit_backend_failure_is_honest_not_silently_substituted() {
 /// (`address = node_id`, `signing_pubkey = <actual pubkey>`, independently).
 #[tokio::test]
 async fn realistic_distinct_node_id_and_pubkey_still_authorize() {
-    let svc_b = AiRpcService::new("http://127.0.0.1:1").expect("AiRpcService B"); // unreachable bridge, but request must get past auth first
+    let sk_b = SigningKey::generate(&mut OsRng);
+    let addr_b = sk_b.verifying_key().to_bytes();
+    let svc_b = AiRpcService::new("http://127.0.0.1:1", sk_b, addr_b).expect("AiRpcService B"); // unreachable bridge, but request must get past auth first
 
     let sk_a = SigningKey::generate(&mut OsRng);
     let real_pubkey_a = sk_a.verifying_key().to_bytes();
@@ -586,4 +625,298 @@ fn ai_rpc_frame_requires_stripping_the_leading_tag_byte_before_decode() {
         .expect("decoding WITH the tag byte stripped must succeed — this is the real fix");
     assert_eq!(decoded.sender, sender);
     assert_eq!(decoded.method, yandi::ai_rpc::RpcMethod::AiInfer);
+}
+
+// ── Node Identity Binding Fix — Barrier 2 tests ─────────────────────────────
+//
+// The live exploit's second half: even with routing hijacked to X, a
+// signed, verified response is the independent second barrier that must
+// still refuse X's answer. These tests intercept the OUTGOING request on
+// the wire (real signing, real framing, real request_id) and, instead of
+// routing it to a real RpcServer, hand a hand-crafted "forged" RpcResponse
+// straight to `PendingRequests::resolve()` — exactly the shape a hijacked
+// routing slot would let an attacker deliver. No live model/bridge needed.
+
+fn sign_response(resp: &mut RpcResponse, key: &SigningKey) {
+    use ed25519_dalek::Signer;
+    resp.signature = key.sign(&resp.canonical_bytes()).to_bytes().to_vec();
+}
+
+/// Shared setup: A trusts B (real key), sends exactly one AiInfer request,
+/// and the caller's `forge` closure gets to see the real, decoded outgoing
+/// envelope (so it knows the real `request_id`) and must produce the
+/// `RpcResponse` to feed back through `resolve()` instead of a real one.
+/// Returns what `send_ai_infer_remote` resolved to.
+async fn run_forgery_scenario(
+    forge: impl FnOnce(&yandi::ai_rpc::RpcEnvelope, [u8; 32]) -> RpcResponse + Send + 'static,
+) -> Result<yandi::ai_rpc::AiInferResponse, yandi::ai_rpc::RpcError> {
+    let sk_a = SigningKey::generate(&mut OsRng);
+    let addr_a = sk_a.verifying_key().to_bytes();
+    let sk_b = SigningKey::generate(&mut OsRng);
+    let addr_b = sk_b.verifying_key().to_bytes();
+
+    let svc_a = AiRpcService::new("http://127.0.0.1:1", sk_a, addr_a).expect("AiRpcService A");
+    svc_a.lock().await.set_peer_directory(std::sync::Arc::new(
+        yandi::ai_rpc::PeerDirectory { peers: vec![test_peer(HashId(addr_b), addr_b, "B")] },
+    ));
+
+    let (gossip_tx_a, mut gossip_rx_a) = mpsc::channel::<(HashId, Vec<u8>)>(8);
+    svc_a.lock().await.set_gossip_channel(gossip_tx_a);
+    let pending_a = svc_a.lock().await.pending_requests();
+
+    tokio::spawn(async move {
+        if let Some((_peer_id, framed)) = gossip_rx_a.recv().await {
+            let env = yandi::ai_rpc::RpcEnvelope::from_bytes(&framed[1..])
+                .expect("A's own outgoing envelope must decode");
+            // addr_b is what A ACTUALLY expects the responder to be — pass
+            // it to `forge` so scenarios can correctly claim to be B while
+            // getting some OTHER aspect (key/payload/etc.) wrong.
+            let forged = forge(&env, addr_b);
+            pending_a.resolve(forged).await;
+        }
+    });
+
+    let payload = AiInferPayload {
+        model: "irrelevant".to_string(),
+        messages: vec![ChatMessage { role: "user".to_string(), content: "hi".to_string() }],
+        max_tokens: 10,
+        stream: false,
+        temperature: None,
+    };
+    let result = svc_a.lock().await.send_ai_infer_remote(HashId(addr_b), payload).await;
+    result
+}
+
+/// TEST9: a response from X's key under B's node_id must be rejected —
+/// the exact second half of the original live exploit.
+#[tokio::test]
+async fn forged_response_from_wrong_key_is_rejected() {
+    let sk_x = SigningKey::generate(&mut OsRng); // attacker's OWN, unrelated, otherwise-valid key
+
+    let result = run_forgery_scenario(move |env, addr_b| {
+        // X correctly claims to BE B (responder = addr_b, exactly what A
+        // expects) — the ONLY thing wrong is the signing key underneath.
+        let mut resp = RpcResponse {
+            request_id: env.request_id,
+            requester: env.sender,
+            responder: addr_b,
+            status: yandi::ai_rpc::RpcStatus::Ok,
+            is_chunk: false,
+            chunk_done: true,
+            payload: bincode::serialize(&yandi::ai_rpc::AiInferResponse { content: "FORGED BY X".into(), tokens_used: None }).unwrap(),
+            signature: vec![],
+        };
+        sign_response(&mut resp, &sk_x); // signed with X's key, NOT B's pinned key
+        resp
+    }).await;
+
+    match result {
+        Err(yandi::ai_rpc::RpcError::ResponseAuthFailed(msg)) => {
+            println!("[ok] forged response from the wrong key rejected: {msg}");
+        }
+        other => panic!("FORGED RESPONSE FROM WRONG KEY ACCEPTED: YES — got {other:?}"),
+    }
+}
+
+/// TEST10: a response with no signature at all must be rejected.
+#[tokio::test]
+async fn unsigned_response_is_rejected() {
+    let result = run_forgery_scenario(|env, addr_b| RpcResponse {
+        request_id: env.request_id,
+        requester: env.sender,
+        responder: addr_b,
+        status: yandi::ai_rpc::RpcStatus::Ok,
+        is_chunk: false,
+        chunk_done: true,
+        payload: bincode::serialize(&yandi::ai_rpc::AiInferResponse { content: "no sig".into(), tokens_used: None }).unwrap(),
+        signature: vec![], // never signed
+    }).await;
+
+    match result {
+        Err(yandi::ai_rpc::RpcError::ResponseAuthFailed(msg)) => println!("[ok] unsigned response rejected: {msg}"),
+        other => panic!("an unsigned response was accepted: {other:?}"),
+    }
+}
+
+/// TEST11: a legitimately-signed response whose payload is altered
+/// AFTER signing must be rejected (signature no longer matches).
+#[tokio::test]
+async fn payload_altered_after_signing_is_rejected() {
+    let sk_b = SigningKey::generate(&mut OsRng); // this scenario needs B's real key baked in below
+    let real_pubkey_b = sk_b.verifying_key().to_bytes();
+
+    // Build the scenario manually (not via run_forgery_scenario) so we can
+    // pin A's directory to THIS SPECIFIC sk_b/addr_b pair.
+    let sk_a = SigningKey::generate(&mut OsRng);
+    let addr_a = sk_a.verifying_key().to_bytes();
+    let addr_b = real_pubkey_b;
+
+    let svc_a = AiRpcService::new("http://127.0.0.1:1", sk_a, addr_a).expect("AiRpcService A");
+    svc_a.lock().await.set_peer_directory(std::sync::Arc::new(
+        yandi::ai_rpc::PeerDirectory { peers: vec![test_peer(HashId(addr_b), addr_b, "B")] },
+    ));
+    let (gossip_tx_a, mut gossip_rx_a) = mpsc::channel::<(HashId, Vec<u8>)>(8);
+    svc_a.lock().await.set_gossip_channel(gossip_tx_a);
+    let pending_a = svc_a.lock().await.pending_requests();
+
+    tokio::spawn(async move {
+        if let Some((_peer_id, framed)) = gossip_rx_a.recv().await {
+            let env = yandi::ai_rpc::RpcEnvelope::from_bytes(&framed[1..]).unwrap();
+            let mut resp = RpcResponse {
+                request_id: env.request_id,
+                requester: env.sender,
+                responder: addr_b,
+                status: yandi::ai_rpc::RpcStatus::Ok,
+                is_chunk: false,
+                chunk_done: true,
+                payload: bincode::serialize(&yandi::ai_rpc::AiInferResponse { content: "honest answer".into(), tokens_used: None }).unwrap(),
+                signature: vec![],
+            };
+            sign_response(&mut resp, &sk_b); // signed HONESTLY, with B's real key
+            resp.payload = bincode::serialize(&yandi::ai_rpc::AiInferResponse { content: "TAMPERED answer".into(), tokens_used: None }).unwrap(); // tampered AFTER signing
+            pending_a.resolve(resp).await;
+        }
+    });
+
+    let payload = AiInferPayload {
+        model: "irrelevant".to_string(),
+        messages: vec![ChatMessage { role: "user".to_string(), content: "hi".to_string() }],
+        max_tokens: 10, stream: false, temperature: None,
+    };
+    let result = svc_a.lock().await.send_ai_infer_remote(HashId(addr_b), payload).await;
+    match result {
+        Err(yandi::ai_rpc::RpcError::ResponseAuthFailed(msg)) => println!("[ok] tampered payload rejected: {msg}"),
+        other => panic!("a response tampered after signing was accepted: {other:?}"),
+    }
+}
+
+/// TEST13: responder field altered after signing (claims a different
+/// node_id than the one actually signed for) must be rejected.
+#[tokio::test]
+async fn altered_responder_field_is_rejected() {
+    let sk_x = SigningKey::generate(&mut OsRng);
+    let result = run_forgery_scenario(move |env, _addr_b| {
+        let mut resp = RpcResponse {
+            request_id: env.request_id,
+            requester: env.sender,
+            responder: sk_x.verifying_key().to_bytes(), // X honestly signs AS ITSELF...
+            status: yandi::ai_rpc::RpcStatus::Ok,
+            is_chunk: false,
+            chunk_done: true,
+            payload: bincode::serialize(&yandi::ai_rpc::AiInferResponse { content: "hi".into(), tokens_used: None }).unwrap(),
+            signature: vec![],
+        };
+        sign_response(&mut resp, &sk_x);
+        resp.responder = [0xBBu8; 32]; // ...then relabels itself as B AFTER signing
+        resp
+    }).await;
+
+    match result {
+        Err(yandi::ai_rpc::RpcError::ResponseAuthFailed(msg)) => println!("[ok] responder altered post-signature rejected: {msg}"),
+        other => panic!("a response with an altered responder field was accepted: {other:?}"),
+    }
+}
+
+/// TEST12: a response for a DIFFERENT (unrelated) request_id must simply
+/// never match this pending request at all — proving `resolve()` can't be
+/// tricked into completing the wrong waiter via an unrelated valid response.
+#[tokio::test]
+async fn mismatched_request_id_never_resolves_the_wrong_waiter() {
+    let sk_a = SigningKey::generate(&mut OsRng);
+    let addr_a = sk_a.verifying_key().to_bytes();
+    let sk_b = SigningKey::generate(&mut OsRng);
+    let addr_b = sk_b.verifying_key().to_bytes();
+
+    let svc_a = AiRpcService::new("http://127.0.0.1:1", sk_a, addr_a).expect("AiRpcService A");
+    svc_a.lock().await.set_peer_directory(std::sync::Arc::new(
+        yandi::ai_rpc::PeerDirectory { peers: vec![test_peer(HashId(addr_b), addr_b, "B")] },
+    ));
+    let (gossip_tx_a, mut gossip_rx_a) = mpsc::channel::<(HashId, Vec<u8>)>(8);
+    svc_a.lock().await.set_gossip_channel(gossip_tx_a);
+    let pending_a = svc_a.lock().await.pending_requests();
+
+    tokio::spawn(async move {
+        if let Some((_peer_id, framed)) = gossip_rx_a.recv().await {
+            let env = yandi::ai_rpc::RpcEnvelope::from_bytes(&framed[1..]).unwrap();
+            let mut resp = RpcResponse {
+                request_id: env.request_id.wrapping_add(12345), // deliberately WRONG request_id
+                requester: env.sender,
+                responder: addr_b,
+                status: yandi::ai_rpc::RpcStatus::Ok,
+                is_chunk: false,
+                chunk_done: true,
+                payload: bincode::serialize(&yandi::ai_rpc::AiInferResponse { content: "for someone else".into(), tokens_used: None }).unwrap(),
+                signature: vec![],
+            };
+            sign_response(&mut resp, &sk_b); // even honestly, correctly signed by the REAL B
+            pending_a.resolve(resp).await; // must be silently dropped — no matching pending entry
+        }
+    });
+
+    let payload = AiInferPayload {
+        model: "irrelevant".to_string(),
+        messages: vec![ChatMessage { role: "user".to_string(), content: "hi".to_string() }],
+        max_tokens: 10, stream: false, temperature: None,
+    };
+    // Shrink the wait so this test doesn't sit for the full 90s timeout.
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        svc_a.lock().await.send_ai_infer_remote(HashId(addr_b), payload),
+    ).await;
+    assert!(result.is_err(), "a response for an unrelated request_id must never resolve THIS pending request — it must simply time out, not succeed with someone else's answer");
+    println!("[ok] mismatched request_id response never resolved this waiter (timed out as expected)");
+}
+
+/// TEST7/TEST8: the honest path still works — a correctly-signed success
+/// AND a correctly-signed error response are both accepted as authenticated.
+#[tokio::test]
+async fn correctly_signed_success_and_error_responses_are_accepted() {
+    let sk_a = SigningKey::generate(&mut OsRng);
+    let addr_a = sk_a.verifying_key().to_bytes();
+    let sk_b = SigningKey::generate(&mut OsRng);
+    let addr_b = sk_b.verifying_key().to_bytes();
+
+    for (send_error, expect_ok) in [(false, true), (true, false)] {
+        let svc_a = AiRpcService::new("http://127.0.0.1:1", sk_a.clone(), addr_a).expect("AiRpcService A");
+        svc_a.lock().await.set_peer_directory(std::sync::Arc::new(
+            yandi::ai_rpc::PeerDirectory { peers: vec![test_peer(HashId(addr_b), addr_b, "B")] },
+        ));
+        let (gossip_tx_a, mut gossip_rx_a) = mpsc::channel::<(HashId, Vec<u8>)>(8);
+        svc_a.lock().await.set_gossip_channel(gossip_tx_a);
+        let pending_a = svc_a.lock().await.pending_requests();
+        let sk_b = sk_b.clone();
+
+        tokio::spawn(async move {
+            if let Some((_peer_id, framed)) = gossip_rx_a.recv().await {
+                let env = yandi::ai_rpc::RpcEnvelope::from_bytes(&framed[1..]).unwrap();
+                let status = if send_error {
+                    yandi::ai_rpc::RpcStatus::Err(yandi::ai_rpc::RpcError::BackendError("B's backend really is down".into()))
+                } else {
+                    yandi::ai_rpc::RpcStatus::Ok
+                };
+                let payload = if send_error { vec![] } else {
+                    bincode::serialize(&yandi::ai_rpc::AiInferResponse { content: "honest answer".into(), tokens_used: Some(3) }).unwrap()
+                };
+                let mut resp = RpcResponse {
+                    request_id: env.request_id, requester: env.sender, responder: addr_b,
+                    status, is_chunk: false, chunk_done: true, payload, signature: vec![],
+                };
+                sign_response(&mut resp, &sk_b);
+                pending_a.resolve(resp).await;
+            }
+        });
+
+        let payload = AiInferPayload {
+            model: "irrelevant".to_string(),
+            messages: vec![ChatMessage { role: "user".to_string(), content: "hi".to_string() }],
+            max_tokens: 10, stream: false, temperature: None,
+        };
+        let result = svc_a.lock().await.send_ai_infer_remote(HashId(addr_b), payload).await;
+        assert_eq!(result.is_ok(), expect_ok, "send_error={send_error} result={result:?}");
+        match &result {
+            Ok(r) => println!("[ok] correctly-signed SUCCESS response accepted: {:?}", r.content),
+            Err(yandi::ai_rpc::RpcError::BackendError(m)) => println!("[ok] correctly-signed ERROR response accepted as an authenticated error: {m}"),
+            Err(e) => panic!("expected an authenticated BackendError, got a different error: {e}"),
+        }
+    }
 }

@@ -51,6 +51,14 @@ pub struct PeerInfo {
     /// 🌍 Iter 3: ISO-3166 alpha-2 self-claim peer'а из последнего Hello (опц.).
     /// Используется для выбора foreign-exit hop'а в circuit'е.
     pub jurisdiction: Option<String>,
+
+    /// Node Identity Binding Fix: Ed25519 signing pubkey this peer proved
+    /// ownership of during its last Ed25519-verified Hello handshake
+    /// (`verify_peer_handshake`/`_static`) — NOT set for peers only known
+    /// via unauthenticated peer-exchange gossip. Used to detect a later
+    /// Hello claiming the SAME node_id with a DIFFERENT key — see
+    /// `P2PTransport::identity_conflict` in transport.rs.
+    pub verified_signing_pubkey: Option<[u8; 32]>,
 }
 
 impl PeerInfo {
@@ -76,6 +84,7 @@ impl PeerInfo {
             direct_miss_streak: 0,
             caps_bits: 0,
             jurisdiction: None,
+            verified_signing_pubkey: None,
         }
     }
 
@@ -101,6 +110,7 @@ impl PeerInfo {
             direct_miss_streak: 0,
             caps_bits: 0,
             jurisdiction: None,
+            verified_signing_pubkey: None,
         }
     }
 
@@ -131,6 +141,7 @@ impl PeerInfo {
             direct_miss_streak: 0,
             caps_bits: 0,
             jurisdiction: None,
+            verified_signing_pubkey: None,
         }
     }
 
@@ -162,6 +173,7 @@ impl PeerInfo {
             direct_miss_streak: 0,
             caps_bits: 0,
             jurisdiction: None,
+            verified_signing_pubkey: None,
         }
     }
 

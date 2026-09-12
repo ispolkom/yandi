@@ -581,7 +581,13 @@ async fn main() -> anyhow::Result<()> {
         let bridge_url_owned = std::env::var("YANDI_INTELLIGENCE_BRIDGE_URL")
             .unwrap_or_else(|_| yandi::ai_rpc::intelligence_bridge::DEFAULT_BRIDGE_URL.to_string());
         let bridge_url = bridge_url_owned.as_str();
-        match AiRpcService::new(bridge_url) {
+        // Node Identity Binding Fix: computed here (not later, at gossip
+        // wiring time) because RpcServer needs to sign responses from the
+        // moment it can receive its first request, not just once outbound
+        // gossip is wired up.
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&identity.signing_private_key);
+        let node_addr = identity.node_id().0;
+        match AiRpcService::new(bridge_url, signing_key, node_addr) {
             Err(e) => {
                 eprintln!("[ai_rpc] Failed to create AiRpcService: {} — AI-RPC disabled", e);
             }
@@ -601,7 +607,15 @@ async fn main() -> anyhow::Result<()> {
                     PeerDirectory::load_or_default(&default_peer_directory_path())
                 );
                 let mut registered = 0usize;
+                // Node Identity Binding Fix: the same trusted_ai_peers.json
+                // bindings that authorize AI-RPC ALSO pin those node_ids at
+                // the transport layer — a Hello later claiming one of these
+                // node_ids with a different signing key is a hard reject,
+                // independent of (and enforced earlier than) AI-RPC's own
+                // authorization check. See transport.set_pinned_identities.
+                let mut pins = std::collections::HashMap::new();
                 for (node_id, signing_pubkey, name) in peer_directory.decoded() {
+                    pins.insert(node_id, signing_pubkey);
                     let peer = AllowedPeer {
                         address: node_id.0,
                         signing_pubkey,
@@ -615,6 +629,7 @@ async fn main() -> anyhow::Result<()> {
                         registered += 1;
                     }
                 }
+                transport.set_pinned_identities(pins).await;
                 ai_rpc_svc.lock().await.set_peer_directory(peer_directory);
                 println!("[ai_rpc] Registered {} trusted AI peer(s)", registered);
 
@@ -626,9 +641,7 @@ async fn main() -> anyhow::Result<()> {
                 // Reused for both KbStore gossip AND outbound AiInfer
                 // requests to a peer (Node Intelligence RPC migration).
                 let (gossip_tx, mut gossip_rx) = mpsc::channel::<(yandi::util::HashId, Vec<u8>)>(256);
-                let signing_key = ed25519_dalek::SigningKey::from_bytes(&identity.signing_private_key);
-                let node_addr = identity.node_id().0;
-                ai_rpc_svc.lock().await.set_gossip_channel(gossip_tx, signing_key, node_addr);
+                ai_rpc_svc.lock().await.set_gossip_channel(gossip_tx);
                 let transport_for_gossip = transport.clone();
                 tokio::spawn(async move {
                     while let Some((peer_id, frame)) = gossip_rx.recv().await {

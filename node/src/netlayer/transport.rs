@@ -391,6 +391,15 @@ pub struct P2PTransport {
     /// outbound AiInfer requests back to AiRpcService::resolve_pending.
     ai_rpc_response_tx: Arc<tokio::sync::Mutex<Option<mpsc::Sender<(HashId, Vec<u8>)>>>>,
 
+    /// Node Identity Binding Fix: node_id -> pinned Ed25519 signing pubkey,
+    /// sourced from the owner's own `trusted_ai_peers.json` (see
+    /// `set_pinned_identities`). A Hello claiming a pinned node_id with a
+    /// DIFFERENT signing key is a hard IDENTITY_CONFLICT, rejected before
+    /// any PeerInfo/DHT/online-state update — see `identity_conflict()`.
+    /// Empty by default (fully permissive, matching prior behavior) until
+    /// main.rs loads the peer directory and calls the setter.
+    pinned_identities: Arc<tokio::sync::RwLock<HashMap<HashId, [u8; 32]>>>,
+
     /// New peer notification sender (optional, for P2P transport synchronization)
     new_peer_tx: Option<mpsc::Sender<PeerInfo>>,
     /** External IP address (detected via external service).
@@ -817,6 +826,7 @@ impl P2PTransport {
             active_rotated_listeners: Arc::new(tokio::sync::Mutex::new(None)),
             ai_rpc_tx: Arc::new(tokio::sync::Mutex::new(None)),
             ai_rpc_response_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            pinned_identities: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         };
 
         // Create Arc<P2PTransport> for Station
@@ -1501,6 +1511,7 @@ impl P2PTransport {
         let new_peer_tx = transport.new_peer_tx.clone();
         let external_ip = transport.external_ip.clone();
         let jurisdiction_index = transport.jurisdiction_index.clone();
+        let pinned_identities = transport.pinned_identities.clone();
 
         tokio::spawn(async move {
             Self::discovery_listener(
@@ -1512,6 +1523,7 @@ impl P2PTransport {
                 new_peer_tx,
                 external_ip,
                 jurisdiction_index,
+                pinned_identities,
                 shutdown,
             ).await;
         });
@@ -1876,6 +1888,19 @@ impl P2PTransport {
         }
     }
 
+    /// Node Identity Binding Fix: true if `node_id` is pinned (from the
+    /// owner's own trusted_ai_peers.json) to a signing key OTHER than
+    /// `claimed_pubkey` — a genuine, hard identity conflict. False
+    /// (permissive) for an unpinned node_id, matching prior behavior for
+    /// every peer the owner hasn't explicitly recorded.
+    fn identity_conflict(
+        pins: &HashMap<HashId, [u8; 32]>,
+        node_id: HashId,
+        claimed_pubkey: &[u8; 32],
+    ) -> bool {
+        matches!(pins.get(&node_id), Some(pinned) if pinned != claimed_pubkey)
+    }
+
     /// Discovery listener task (port 9000)
     ///
     /// Handles Hello Request/Ack packets
@@ -1888,6 +1913,7 @@ impl P2PTransport {
         new_peer_tx: Option<mpsc::Sender<PeerInfo>>,
         external_ip: Arc<tokio::sync::RwLock<Option<String>>>,
         jurisdiction_index: Arc<crate::dht::JurisdictionIndex>,
+        pinned_identities: Arc<tokio::sync::RwLock<HashMap<HashId, [u8; 32]>>>,
         mut shutdown: Option<oneshot::Receiver<()>>,
     ) {
         let local_addr = socket.local_addr().ok();
@@ -1943,6 +1969,37 @@ impl P2PTransport {
                                 }
                             }
 
+                            // 🔒 Node Identity Binding Fix — Barrier 1.
+                            // A Hello passing Ed25519 verification only proves
+                            // internal self-consistency (signer's own claimed
+                            // key matches its own claimed node_id in THIS
+                            // packet) — it proves nothing about whether this
+                            // is the SAME node_id we've trusted/seen before.
+                            // Checked BEFORE any PeerInfo/DHT/online-state
+                            // update, exactly like the IPv6-spoofing check
+                            // right below it.
+                            {
+                                let pins = pinned_identities.read().await;
+                                if Self::identity_conflict(&pins, hello_packet.node_id, &hello_packet.public_key) {
+                                    println!(
+                                        "[transport] ⛔ REJECTED: IDENTITY_CONFLICT — node_id {} is pinned to a different signing key than this Hello claims (from {})",
+                                        hex::encode(&hello_packet.node_id.0[..8]), from
+                                    );
+                                    continue;
+                                }
+                            }
+                            if let Some(existing) = peers.lock().await.get(&hello_packet.node_id) {
+                                if let Some(known_key) = existing.verified_signing_pubkey {
+                                    if known_key != hello_packet.public_key {
+                                        println!(
+                                            "[transport] ⛔ REJECTED: IDENTITY_CONFLICT — node_id {} previously verified with a different signing key (from {})",
+                                            hex::encode(&hello_packet.node_id.0[..8]), from
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+
 
 
                             // 🔒 Verify IPv6 virtual address (Stage 2.2: Prevent spoofing)
@@ -1986,6 +2043,11 @@ impl P2PTransport {
 
                                     // Store IPv6 virtual address
                                     peer.ipv6_virtual = hello_packet.ipv6_virtual;
+                                    // Node Identity Binding Fix: record the key this Hello
+                                    // proved ownership of, so a LATER Hello for the same
+                                    // node_id with a different key is caught even without
+                                    // a static pin (see the general check above).
+                                    peer.verified_signing_pubkey = Some(hello_packet.public_key);
                                     // Store P2P X25519 public key
                                     peer.p2p_x25519_public = p2p_x25519_key;
 
@@ -2065,6 +2127,11 @@ impl P2PTransport {
                                     };
 
                                     peer.ipv6_virtual = hello_packet.ipv6_virtual;
+                                    // Node Identity Binding Fix: record the key this Hello
+                                    // proved ownership of, so a LATER Hello for the same
+                                    // node_id with a different key is caught even without
+                                    // a static pin (see the general check above).
+                                    peer.verified_signing_pubkey = Some(hello_packet.public_key);
                                     // Store P2P X25519 public key
                                     peer.p2p_x25519_public = p2p_x25519_key;
 
@@ -3193,9 +3260,15 @@ impl P2PTransport {
 
                                                     let mut peers_lock = peers.lock().await;
 
-                                                    if !peers_lock.contains_key(&new_peer_id) {
+                                                    // Node Identity Binding Fix: unauthenticated
+                                                    // peer-exchange hearsay carries no signing key at
+                                                    // all — never let it introduce a pinned node_id.
+                                                    // Only that node's OWN verified Hello may do that.
+                                                    let is_pinned = transport.pinned_identities.read().await.contains_key(&new_peer_id);
 
-                                                        println!("[transport] ➕ Adding new peer from list: {} @ {}", 
+                                                    if !peers_lock.contains_key(&new_peer_id) && !is_pinned {
+
+                                                        println!("[transport] ➕ Adding new peer from list: {} @ {}",
 
                                                                  hex::encode(&new_peer_id.0[..8]), new_addr);
 
@@ -5682,6 +5755,16 @@ impl P2PTransport {
         *self.ai_rpc_response_tx.lock().await = Some(tx);
     }
 
+    /// Node Identity Binding Fix: load the owner's pinned node_id -> signing
+    /// pubkey bindings (from `trusted_ai_peers.json` via `PeerDirectory`).
+    /// A Hello later claiming one of these node_ids with any other key is
+    /// rejected before it can touch PeerInfo/DHT/online state. Peers not in
+    /// this map keep the existing, unchanged discovery behavior.
+    pub async fn set_pinned_identities(&self, pins: HashMap<HashId, [u8; 32]>) {
+        println!("[transport] 🔒 Loaded {} pinned node identity binding(s)", pins.len());
+        *self.pinned_identities.write().await = pins;
+    }
+
     /// Bootstrap - connect to all nodes in the list
     pub async fn bootstrap(&self, bootstrap_addrs: Vec<String>, external_ip: Option<String>) -> Result<(), String> {
         println!("[bootstrap] 🚀 Starting bootstrap with {} nodes", bootstrap_addrs.len());
@@ -6327,5 +6410,62 @@ impl PortUpdatePacket {
             rx_speed,
             timestamp,
         })
+    }
+}
+
+// ── Node Identity Binding Fix — Barrier 1 unit tests ────────────────────────
+//
+// Found by a live exploit: a Hello passing Ed25519 verification only proves
+// internal self-consistency, never that this is the node_id we've pinned.
+// `P2PTransport::identity_conflict` is the guard that closes that gap —
+// tested here directly (pure function over a HashMap, no live socket/process
+// needed) rather than via a real two-node run, which this codebase
+// deliberately avoids in automated tests (constructing a real P2PTransport
+// binds fixed, well-known ports that could collide with an actual running
+// node — see the prior mandate's report).
+#[cfg(test)]
+mod identity_pin_tests {
+    use super::*;
+
+    fn key(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
+
+    #[test]
+    fn unpinned_node_id_is_never_a_conflict() {
+        let pins: HashMap<HashId, [u8; 32]> = HashMap::new();
+        let node_id = HashId([1u8; 32]);
+        assert!(!P2PTransport::identity_conflict(&pins, node_id, &key(0xAA)));
+    }
+
+    #[test]
+    fn pinned_node_id_with_matching_key_is_not_a_conflict() {
+        let node_id = HashId([2u8; 32]);
+        let mut pins = HashMap::new();
+        pins.insert(node_id, key(0xBB));
+        assert!(!P2PTransport::identity_conflict(&pins, node_id, &key(0xBB)));
+    }
+
+    #[test]
+    fn pinned_node_id_with_a_different_key_is_a_conflict() {
+        // The exact shape of the live exploit: X claims B's node_id with
+        // its own, different, otherwise perfectly valid signing key.
+        let node_id_b = HashId([3u8; 32]);
+        let real_key_b = key(0xCC);
+        let attacker_key_x = key(0xDD);
+        let mut pins = HashMap::new();
+        pins.insert(node_id_b, real_key_b);
+        assert!(P2PTransport::identity_conflict(&pins, node_id_b, &attacker_key_x));
+    }
+
+    #[test]
+    fn pinning_one_node_id_never_affects_another() {
+        let node_id_b = HashId([4u8; 32]);
+        let node_id_other = HashId([5u8; 32]);
+        let mut pins = HashMap::new();
+        pins.insert(node_id_b, key(0xEE));
+        // A totally unrelated, unpinned node_id must remain unaffected —
+        // pinning B must not accidentally restrict discovery of anyone else.
+        assert!(!P2PTransport::identity_conflict(&pins, node_id_other, &key(0xFF)));
     }
 }

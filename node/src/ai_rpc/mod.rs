@@ -56,19 +56,35 @@ const PEER_INFER_TIMEOUT: Duration = Duration::from_secs(90);
 /// handle a caller (`main.rs`) can clone out ONCE and use directly,
 /// without ever going through `Mutex<AiRpcService>` again, so resolving
 /// a reply never contends with a call that's still waiting for one.
+/// Node Identity Binding Fix (Barrier 2): everything `resolve()` needs to
+/// verify a reply BEFORE it is ever handed to the caller — captured at
+/// send-time, from locally-known state, never from anything the response
+/// itself claims.
+struct PendingEntry {
+    tx: oneshot::Sender<Result<RpcResponse, RpcError>>,
+    /// node_id we actually sent the request to.
+    expected_responder: [u8; 32],
+    /// THIS node's own pinned/trusted signing key for that node_id — the
+    /// ONLY key a valid response's signature may verify against.
+    expected_pubkey: [u8; 32],
+    /// Our own node_id — must match `RpcResponse::requester` so a real
+    /// answer to a different peer's request can never be misapplied here.
+    expected_requester: [u8; 32],
+}
+
 #[derive(Clone)]
-pub struct PendingRequests(Arc<Mutex<HashMap<u64, oneshot::Sender<RpcResponse>>>>);
+pub struct PendingRequests(Arc<Mutex<HashMap<u64, PendingEntry>>>);
 
 impl PendingRequests {
     fn new() -> Self {
         Self(Arc::new(Mutex::new(HashMap::new())))
     }
 
-    async fn insert(&self, request_id: u64, tx: oneshot::Sender<RpcResponse>) {
-        self.0.lock().await.insert(request_id, tx);
+    async fn insert(&self, request_id: u64, entry: PendingEntry) {
+        self.0.lock().await.insert(request_id, entry);
     }
 
-    async fn take(&self, request_id: u64) -> Option<oneshot::Sender<RpcResponse>> {
+    async fn take(&self, request_id: u64) -> Option<PendingEntry> {
         self.0.lock().await.remove(&request_id)
     }
 
@@ -76,10 +92,52 @@ impl PendingRequests {
     /// request, if one is still waiting. Unmatched/late responses
     /// (already timed out, or not ours) are silently dropped — not a
     /// protocol violation, just a race we already gave up on.
+    ///
+    /// Every response that DOES match a pending request_id is verified
+    /// here before the caller ever sees it: routing/session state is not
+    /// trusted as proof of who answered — only a signature checked
+    /// against the key we pinned for `expected_responder` at send-time is.
     pub async fn resolve(&self, resp: RpcResponse) {
-        if let Some(tx) = self.take(resp.request_id).await {
-            let _ = tx.send(resp);
+        if let Some(entry) = self.take(resp.request_id).await {
+            let verified = Self::verify(resp, &entry);
+            let _ = entry.tx.send(verified);
         }
+    }
+
+    fn verify(resp: RpcResponse, entry: &PendingEntry) -> Result<RpcResponse, RpcError> {
+        use ed25519_dalek::Verifier;
+
+        if resp.responder != entry.expected_responder {
+            return Err(RpcError::ResponseAuthFailed(
+                "responder node_id does not match the peer this request was sent to".to_string(),
+            ));
+        }
+        if resp.requester != entry.expected_requester {
+            return Err(RpcError::ResponseAuthFailed(
+                "requester node_id in response does not match this node".to_string(),
+            ));
+        }
+        let sig_bytes: [u8; 64] = match resp.signature.as_slice().try_into() {
+            Ok(b) => b,
+            Err(_) => {
+                return Err(RpcError::ResponseAuthFailed(format!(
+                    "malformed signature length={}",
+                    resp.signature.len()
+                )))
+            }
+        };
+        let verifying_key = match ed25519_dalek::VerifyingKey::from_bytes(&entry.expected_pubkey) {
+            Ok(vk) => vk,
+            Err(_) => return Err(RpcError::ResponseAuthFailed("invalid pinned pubkey".to_string())),
+        };
+        let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+        let canonical = resp.canonical_bytes();
+        if verifying_key.verify(&canonical, &signature).is_err() {
+            return Err(RpcError::ResponseAuthFailed(
+                "signature does not verify against the pinned key for this peer".to_string(),
+            ));
+        }
+        Ok(resp)
     }
 }
 
@@ -100,8 +158,9 @@ pub struct AiRpcService {
     gossip_tx: Option<mpsc::Sender<(HashId, Vec<u8>)>>,
     /// Known peer addresses for gossip.
     gossip_peers: Vec<HashId>,
-    /// Node identity for signing outbound envelopes.
-    signing_key: Option<ed25519_dalek::SigningKey>,
+    /// Node identity for signing outbound envelopes AND responses (via
+    /// `RpcServer`, which holds its own copy — see `AiRpcService::new`).
+    signing_key: ed25519_dalek::SigningKey,
     node_address: [u8; 32],
     req_counter: Arc<AtomicU64>,
     /// Outbound requests awaiting a peer's PKT_AI_RPC_RESPONSE. See
@@ -117,9 +176,17 @@ pub struct AiRpcService {
 }
 
 impl AiRpcService {
-    pub fn new(bridge_url: &str) -> Result<Arc<Mutex<Self>>, String> {
+    /// Node Identity Binding Fix: `signing_key`/`node_address` are now
+    /// required at construction (not set later via `set_gossip_channel`)
+    /// because `RpcServer` needs them immediately to sign every response
+    /// it ever produces, including ones sent before gossip is wired up.
+    pub fn new(
+        bridge_url: &str,
+        signing_key: ed25519_dalek::SigningKey,
+        node_address: [u8; 32],
+    ) -> Result<Arc<Mutex<Self>>, String> {
         let kb = Arc::new(Mutex::new(KnowledgeBase::new()));
-        let server = Arc::new(RpcServer::new(bridge_url, kb.clone())?);
+        let server = Arc::new(RpcServer::new(bridge_url, kb.clone(), signing_key.clone(), node_address)?);
         let local_intelligence = Arc::new(intelligence_bridge::IntelligenceBridgeClient::new(bridge_url)?);
         let local_fetch_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -137,8 +204,8 @@ impl AiRpcService {
             kb,
             gossip_tx: None,
             gossip_peers: Vec::new(),
-            signing_key: None,
-            node_address: [0u8; 32],
+            signing_key,
+            node_address,
             req_counter: Arc::new(AtomicU64::new(1)),
             pending: PendingRequests::new(),
             peer_directory: Arc::new(peer_directory::PeerDirectory::default()),
@@ -166,17 +233,11 @@ impl AiRpcService {
 
     // ── Gossip setup ───────────────────────────────────────────────────
 
-    /// Set the outbound P2P channel and this node's signing key.
-    pub fn set_gossip_channel(
-        &mut self,
-        tx: mpsc::Sender<(HashId, Vec<u8>)>,
-        signing_key: ed25519_dalek::SigningKey,
-        node_address: [u8; 32],
-    ) {
+    /// Set the outbound P2P channel. Signing identity is already known —
+    /// see `AiRpcService::new`.
+    pub fn set_gossip_channel(&mut self, tx: mpsc::Sender<(HashId, Vec<u8>)>) {
         self.gossip_tx = Some(tx);
-        self.node_address = node_address;
-        self.signing_key = Some(signing_key);
-        info!("ai_rpc: gossip channel set, node={}", hex::encode(&node_address[..8]));
+        info!("ai_rpc: gossip channel set, node={}", hex::encode(&self.node_address[..8]));
     }
 
     /// Register a peer for gossip (call after each successful P2P handshake).
@@ -275,11 +336,30 @@ impl AiRpcService {
         peer_id: HashId,
         payload: AiInferPayload,
     ) -> Result<AiInferResponse, RpcError> {
-        let (Some(tx), Some(signing_key)) = (&self.gossip_tx, &self.signing_key) else {
+        let Some(tx) = &self.gossip_tx else {
             return Err(RpcError::BackendError(
                 "outbound P2P channel not configured on this node".to_string(),
             ));
         };
+
+        // Node Identity Binding Fix (Barrier 2): we can only ever verify a
+        // reply against a key WE already know for this peer — never
+        // against anything the reply itself claims. If this peer isn't in
+        // our own trusted_ai_peers.json, there is no such key, so refuse
+        // up front rather than send a request whose answer could never be
+        // authenticated.
+        let expected_pubkey = self
+            .peer_directory
+            .decoded()
+            .into_iter()
+            .find(|(id, _, _)| *id == peer_id)
+            .map(|(_, pubkey, _)| pubkey)
+            .ok_or_else(|| {
+                RpcError::ResponseAuthFailed(format!(
+                    "no pinned signing key on file for peer {} — refusing to send a request whose answer could never be verified",
+                    peer_id.to_hex()
+                ))
+            })?;
 
         let payload_bytes = bincode::serialize(&payload)
             .map_err(|e| RpcError::InvalidPayload(format!("serialize AiInferPayload: {e}")))?;
@@ -295,7 +375,7 @@ impl AiRpcService {
             payload: payload_bytes,
             signature: vec![],
         };
-        sign_envelope(&mut env, signing_key);
+        sign_envelope(&mut env, &self.signing_key);
 
         let env_bytes = env
             .to_bytes()
@@ -309,7 +389,13 @@ impl AiRpcService {
         // it. This never touches the outer AiRpcService lock — see
         // `PendingRequests` doc comment.
         let (resp_tx, resp_rx) = oneshot::channel();
-        self.pending.insert(req_id, resp_tx).await;
+        let entry = PendingEntry {
+            tx: resp_tx,
+            expected_responder: peer_id.0,
+            expected_pubkey,
+            expected_requester: self.node_address,
+        };
+        self.pending.insert(req_id, entry).await;
 
         if let Err(e) = tx.try_send((peer_id, framed)) {
             self.pending.take(req_id).await;
@@ -317,7 +403,7 @@ impl AiRpcService {
         }
 
         let resp = match tokio::time::timeout(PEER_INFER_TIMEOUT, resp_rx).await {
-            Ok(Ok(resp)) => resp,
+            Ok(Ok(verified)) => verified?,
             Ok(Err(_)) => {
                 return Err(RpcError::BackendError(
                     "internal: pending response channel closed".to_string(),
@@ -373,9 +459,10 @@ impl AiRpcService {
         models: Vec<String>,
         domain: Option<String>,
     ) {
-        let (Some(tx), Some(signing_key)) = (&self.gossip_tx, &self.signing_key) else {
+        let Some(tx) = &self.gossip_tx else {
             return;
         };
+        let signing_key = &self.signing_key;
         if self.gossip_peers.is_empty() {
             return;
         }
