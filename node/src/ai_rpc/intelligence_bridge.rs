@@ -1,0 +1,151 @@
+// src/ai_rpc/intelligence_bridge.rs
+//! Local Intelligence Bridge Client
+//! ================================
+//!
+//! Replaces the previous hardcoded Ollama coupling
+//! (`node/src/ai_rpc/ollama.rs::OllamaProxy`) as the thing this node
+//! actually calls to answer an AI-RPC inference request — whether that
+//! request came from a peer over P2P (`RpcServer::handle_ai_infer`) or
+//! from a local caller on this same machine (`AiRpcService::local_infer`).
+//!
+//! **Why this exists (mandate "Node Intelligence RPC migration"):** the
+//! Rust transport must never re-implement backend selection (explicit
+//! config, local engine, remote API, Ollama-compat fallback, secure
+//! credential storage) — that logic lives in exactly one place,
+//! `llm_gateway` (Python). This client only speaks a tiny, backend-
+//! agnostic HTTP contract to `llm_gateway.intelligence_bridge` (loopback
+//! only, see that module's docstring). Rust transports; Python decides
+//! what actually thinks.
+//!
+//! **Closes a real hole found during audit:** `AiInferPayload.model` is
+//! part of the wire format and is populated by whoever sent the
+//! request — including a remote peer. The OLD code forwarded that
+//! caller-supplied model name straight to Ollama, meaning a peer could
+//! dictate which model answered it. This client deliberately DROPS
+//! `req.model` — it is never sent to the bridge. The bridge always
+//! resolves its own fixed logical alias (`yandi:peer-default`), which
+//! this node's owner configures (or doesn't) exactly like any other
+//! `llm_gateway` model alias. A caller can still populate `model` in
+//! the wire struct (kept for backward wire compatibility / the
+//! "non-empty model" sanity check upstream), but it has no effect on
+//! which backend answers.
+
+use std::time::Duration;
+
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+
+use super::types::{AiInferPayload, AiInferResponse, ChatMessage, RpcError};
+
+pub const DEFAULT_BRIDGE_URL: &str = "http://127.0.0.1:18083";
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const INFER_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Debug, Serialize)]
+struct BridgeMessage<'a> {
+    role: &'a str,
+    content: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeInferRequest<'a> {
+    request_id: &'a str,
+    messages: Vec<BridgeMessage<'a>>,
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BridgeInferResponse {
+    success: bool,
+    text: Option<String>,
+    tokens_used: Option<u32>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+pub struct IntelligenceBridgeClient {
+    base_url: String,
+    client: Client,
+}
+
+impl IntelligenceBridgeClient {
+    pub fn new(base_url: &str) -> Result<Self, String> {
+        if !base_url.starts_with("http://127.0.0.1")
+            && !base_url.starts_with("http://localhost")
+        {
+            return Err(format!(
+                "intelligence bridge URL must be loopback, got: {base_url}"
+            ));
+        }
+        let client = Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(INFER_TIMEOUT)
+            .user_agent("YANDI-AI-RPC/1.0 (intelligence-bridge)")
+            // Loopback-only traffic must never be routed through a
+            // system HTTP(S) proxy — it wouldn't reach 127.0.0.1 anyway,
+            // and a local intelligence bridge has no business leaving
+            // this machine at all.
+            .no_proxy()
+            .build()
+            .map_err(|e| format!("failed to build intelligence bridge client: {e}"))?;
+        Ok(Self { base_url: base_url.to_string(), client })
+    }
+
+    /// Run one inference request through the local `llm_gateway` bridge.
+    /// `req.model` is intentionally never transmitted — see module docs.
+    pub async fn complete(&self, req: &AiInferPayload) -> Result<AiInferResponse, RpcError> {
+        let messages: Vec<BridgeMessage> = req
+            .messages
+            .iter()
+            .map(|m: &ChatMessage| BridgeMessage { role: &m.role, content: &m.content })
+            .collect();
+
+        let body = BridgeInferRequest {
+            request_id: "ai-rpc",
+            messages,
+            max_tokens: req.max_tokens,
+            temperature: req.temperature,
+        };
+
+        let resp = self
+            .client
+            .post(format!("{}/infer", self.base_url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| RpcError::BackendError(format!("intelligence bridge unreachable: {e}")))?;
+
+        let parsed: BridgeInferResponse = resp
+            .json()
+            .await
+            .map_err(|e| RpcError::BackendError(format!("intelligence bridge returned invalid response: {e}")))?;
+
+        if !parsed.success {
+            return Err(RpcError::BackendError(
+                parsed.error.unwrap_or_else(|| "backend_error".to_string()),
+            ));
+        }
+
+        Ok(AiInferResponse {
+            content: parsed.text.unwrap_or_default(),
+            tokens_used: parsed.tokens_used,
+        })
+    }
+
+    pub async fn is_reachable(&self) -> bool {
+        // A cheap reachability probe that never invokes a backend: an
+        // intentionally malformed request (no messages) is rejected by
+        // the bridge with HTTP 400 before it ever calls llm_gateway —
+        // any HTTP response at all (even an error one) proves the
+        // bridge process is alive and listening.
+        self.client
+            .post(format!("{}/infer", self.base_url))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .is_ok()
+    }
+}

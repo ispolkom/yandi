@@ -38,7 +38,8 @@ pub const PKT_AI_RPC_ERROR: u8 = 0xD3;
 pub enum RpcMethod {
     /// Liveness probe — no payload, instant pong.
     Ping = 0x01,
-    /// Run LLM inference on the remote anchor (proxy → Ollama).
+    /// Run LLM inference on the remote anchor. The anchor's own
+    /// llm_gateway decides which backend actually answers.
     AiInfer = 0x10,
     /// Fetch an HTTP resource via the remote anchor.
     Fetch = 0x20,
@@ -76,7 +77,12 @@ pub struct ChatMessage {
 /// Payload for `AiInfer`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiInferPayload {
-    /// Model name as Ollama understands it, e.g. `"deepseek-r1:14b"`.
+    /// Historical/logical model label. Kept for wire compatibility and
+    /// the non-empty sanity check on the receiving side, but the
+    /// answering node's `IntelligenceBridgeClient` deliberately never
+    /// forwards this to its backend — see `intelligence_bridge.rs` doc
+    /// comment. A sender (including a remote peer) cannot use this
+    /// field to choose which physical backend answers.
     pub model: String,
     pub messages: Vec<ChatMessage>,
     /// Hard cap on generated tokens (capped server-side by `MAX_TOKENS_ALLOWED`).
@@ -276,8 +282,11 @@ pub struct LocalFetchRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiRpcStatus {
     pub enabled: bool,
-    pub ollama_url: String,
-    pub ollama_reachable: bool,
+    /// Local `llm_gateway.intelligence_bridge` URL this node answers
+    /// through — NOT necessarily Ollama; the bridge itself may resolve
+    /// to any backend the node owner configured.
+    pub backend_url: String,
+    pub backend_reachable: bool,
     pub allowed_peers: usize,
     pub requests_served: u64,
     pub errors_total: u64,

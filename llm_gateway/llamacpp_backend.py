@@ -44,6 +44,14 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
 _lock = threading.Lock()
 _loaded: dict[str, "Llama"] = {}  # keyed by resolved file path, not alias
 
+# Embedding-режим требует Llama(embedding=True) на конструкторе —
+# нельзя переиспользовать инстанс, загруженный для чата (_loaded выше);
+# та же модель загружается второй раз, отдельно, только когда реально
+# понадобился embed_at_spec() для этого пути. Дороже по памяти, но
+# llama.cpp не позволяет переключать embedding-режим у уже созданного
+# контекста.
+_loaded_embed: dict[str, "Llama"] = {}
+
 
 def registry_error() -> str | None:
     """Почему локальный движок недоступен прямо сейчас, если недоступен."""
@@ -55,6 +63,11 @@ def registry_error() -> str | None:
 def has_model(model: str) -> bool:
     spec = _MODEL_REGISTRY.get(model)
     return spec is not None and Path(spec.path).exists()
+
+
+def list_builtin_models() -> list[str]:
+    """Имена встроенного дефолтного реестра — для llm_gateway.list_models()."""
+    return list(_MODEL_REGISTRY.keys())
 
 
 def _get_or_load(spec: ModelSpec) -> "Llama":
@@ -72,37 +85,38 @@ def _get_or_load(spec: ModelSpec) -> "Llama":
 
 
 def generate(
-    prompt: str,
+    messages: list[dict[str, str]],
     *,
     model: str,
-    system: str | None,
     temperature: float | None,
     max_tokens: int | None,
     response_format: str | None,
+    stop: list[str] | None = None,
     extra_options: dict[str, object] | None = None,
 ) -> tuple[str, dict]:
     """Встроенный дефолт: генерация по алиасу из _MODEL_REGISTRY. Для
     модели, которую владелец узла настроил сам (своя папка, свой файл —
     см. llm_gateway.config), используется generate_at_spec() напрямую с
-    его путём, эта функция её не знает."""
+    его путём, эта функция её не знает. messages — уже готовый wire-
+    формат (client.py._build_messages()), не prompt/system по отдельности."""
     spec = _MODEL_REGISTRY.get(model)
     if spec is None:
         raise RuntimeError(f"нет встроенной GGUF-записи для модели {model!r}")
     return generate_at_spec(
-        prompt, spec=spec, system=system, temperature=temperature,
+        messages, spec=spec, temperature=temperature,
         max_tokens=max_tokens, response_format=response_format,
-        extra_options=extra_options,
+        extra_options=extra_options, stop=stop,
     )
 
 
 def generate_at_spec(
-    prompt: str,
+    messages: list[dict[str, str]],
     *,
     spec: ModelSpec,
-    system: str | None,
     temperature: float | None,
     max_tokens: int | None,
     response_format: str | None,
+    stop: list[str] | None = None,
     extra_options: dict[str, object] | None = None,
 ) -> tuple[str, dict]:
     """То же самое, что generate(), но по явному ModelSpec, а не по
@@ -120,18 +134,26 @@ def generate_at_spec(
 
     llm = _get_or_load(spec)
 
-    messages: list[dict[str, str]] = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
-
     kwargs: dict[str, object] = dict(extra_options) if extra_options else {}
+    # repeat_last_n — НЕ параметр create_chat_completion() в llama-cpp-
+    # python (проверено интроспекцией сигнатуры) — только конструктора
+    # (last_n_tokens_size), а его библиотечный дефолт уже 64 (то самое
+    # значение, что исторически запрашивал pet/chat_local.py), и не
+    # может меняться per-call для уже загруженного инстанса без
+    # перезагрузки модели. Явно выкидываем этот ОДИН конкретный ключ,
+    # задокументированно и безопасно (значение и так совпадает), а не
+    # даём create_chat_completion() упасть с TypeError на неизвестном
+    # kwarg — это не общая политика "тихо не поддерживаем", это разбор
+    # одного конкретного, проверенного случая.
+    kwargs.pop("repeat_last_n", None)
     if temperature is not None:
         kwargs["temperature"] = temperature
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
     if response_format == "json":
         kwargs["response_format"] = {"type": "json_object"}
+    if stop:
+        kwargs["stop"] = list(stop)
 
     # Один Llama-контекст не потокобезопасен для одновременной генерации
     # — тот же дисциплинированный подход, что GENERATION_SEMAPHORE уже
@@ -148,3 +170,48 @@ def generate_at_spec(
         "done_reason": "length" if finish_reason == "length" else "stop",
         "eval_count": usage.get("completion_tokens"),
     }
+
+
+def _get_or_load_embed(spec: ModelSpec) -> "Llama":
+    with _lock:
+        llm = _loaded_embed.get(spec.path)
+        if llm is None:
+            llm = Llama(
+                model_path=spec.path,
+                n_ctx=spec.n_ctx,
+                n_gpu_layers=spec.n_gpu_layers,
+                embedding=True,
+                verbose=False,
+            )
+            _loaded_embed[spec.path] = llm
+        return llm
+
+
+def embed_at_spec(texts: list[str], *, spec: ModelSpec) -> tuple[list[list[float]], dict]:
+    """Embeddings по явному ModelSpec — та же модель, что и для
+    completion, но загруженная ОТДЕЛЬНЫМ инстансом в embedding-режиме
+    (llama.cpp не позволяет переключить это у уже созданного
+    контекста). Бросает исключение при любой проблеме — client.py
+    решает, как деградировать, этот модуль ничего не скрывает."""
+    if Llama is None:
+        raise RuntimeError(f"llama_cpp недоступен: {_import_error}")
+    if not Path(spec.path).exists():
+        raise RuntimeError(f"GGUF-файл не найден: {spec.path}")
+    if not texts:
+        raise RuntimeError("embed_at_spec() вызван с пустым списком текстов")
+
+    llm = _get_or_load_embed(spec)
+
+    with _lock:
+        # normalize=False — гейтвей не трогает содержимое вектора, та же
+        # дисциплина, что и у remote/Ollama путей (см. vector_space.py).
+        vectors = llm.embed(list(texts), normalize=False)
+
+    if not isinstance(vectors, list) or not vectors or not isinstance(vectors[0], list):
+        raise RuntimeError(
+            f"llama_cpp.Llama.embed() вернул неожиданную форму для батча из {len(texts)} "
+            f"текстов: {type(vectors)!r}"
+        )
+
+    dimension = len(vectors[0])
+    return vectors, {"dimension": dimension, "normalized": False}

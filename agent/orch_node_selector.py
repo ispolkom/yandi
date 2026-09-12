@@ -1,13 +1,35 @@
 """
 assistant/orch_node_selector.py — выбор нод на основе репутации.
 Использует Decision Ledger из orch_reputation.py.
+
+Мандат "Real Node Directory Integration": раньше каждая ветка этого
+модуля при отсутствии реальной ноды подставляла фиктивную
+"yandi-council" @ 127.0.0.1:11434 — т.е. Python эпистемика никогда не
+отличала "нашли реальный пир" от "пиров нет вообще". Теперь источник
+живых нод — agent.orch_peer_directory (спрашивает РЕАЛЬНЫЙ P2P peer
+directory Rust-ноды, см. отчёт). node_id здесь — canonical identity
+(hex node_id() транспортного слоя), НЕ IP и НЕ модель; endpoint для
+таких нод — не URL, а sentinel "p2p" (см. orch_validator.py — та же
+идиома, что уже используется для "council"/"/api/yandi/validate").
 """
 from __future__ import annotations
 
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
-from agent.orch_reputation import get_best_nodes as _get_best_nodes, list_nodes as _list_nodes
+from agent.orch_reputation import (
+    get_best_nodes as _get_best_nodes,
+    list_nodes as _list_nodes,
+    register_node as _reputation_register_node,
+)
+from agent.orch_peer_directory import list_online_trusted_peers
+
+# Sentinel вместо реального URL — см. orch_validator.py::_validate_on_node().
+# Модель/backend реальной удалённой ноды НАМ НЕИЗВЕСТНЫ и НЕ ДОЛЖНЫ быть
+# известны (см. llm_gateway/intelligence_bridge.py) — "hidden" честно
+# говорит об этом, а не выдумывает имя.
+P2P_ENDPOINT_SENTINEL = "p2p"
+_HIDDEN_MODEL = "hidden (backend decided by peer owner)"
 
 
 def yandi_connected() -> bool:
@@ -74,53 +96,72 @@ def get_ledger():
 
 def get_node_params(node_id: str) -> Dict[str, Any]:
     """
-    Получить параметры ноды по ID.
-    Возвращает словарь с model, endpoint, reputation.
+    Получить параметры ноды по ID — ТОЛЬКО для локальной псевдо-
+    независимой проверки (endpoint="local", тот самый node_id
+    "yandi-council", что и раньше — сохраняем непрерывность истории
+    репутации под этим ключом). Для реальных P2P-пиров (endpoint="p2p")
+    этот словарь не используется вообще: temperature/seed — внутреннее
+    дело владельца ТОЙ ноды, не наше.
     """
     nodes = _list_nodes()
     for node in nodes:
         if node.get("node_id") == node_id:
             return {
                 "model": node.get("model", "unknown"),
-                "endpoint": node.get("endpoint", "http://127.0.0.1:11434"),
                 "reputation": node.get("reputation", 0.5),
             }
-    # Fallback для yandi-council
     if node_id == "yandi-council":
-        return {
-            "model": "heretic:q8",
-            "endpoint": "http://127.0.0.1:11434",
-            "reputation": 0.7,
-        }
-    return {
-        "model": "unknown",
-        "endpoint": "http://127.0.0.1:11434",
-        "reputation": 0.5,
-    }
+        return {"model": "heretic:q8", "reputation": 0.7}
+    return {"model": "unknown", "reputation": 0.5}
 
 
 def select_nodes(risk, domain: str = "general", limit: int = 3) -> NodeSelectionResult:
+    """Мандат "Real Node Directory Integration": сначала спрашиваем
+    РЕАЛЬНЫЕ доверенные P2P-ноды (canonical node_id, живой online-статус
+    от Rust-транспорта). Если такие есть — используем ТОЛЬКО их,
+    отранжированные по накопленной репутации; ни при каких условиях не
+    считаем офлайн- или незарегистрированный пир доступным (мандат:
+    "Не считать offline peer живым. Не выдумывать peers.").
+
+    Если реальных пиров нет вообще — не выдаём себя за них: явный,
+    промаркированный локальный self-check (endpoint="local", тот же
+    node_id "yandi-council", что и до этого мандата, — непрерывность
+    истории репутации), а не фиктивный "remote"-узел на localhost."""
+    online_peers = list_online_trusted_peers()
+    for p in online_peers:
+        node_id = p.get("node_id")
+        if not node_id:
+            continue
+        # Idempotent upsert (INSERT OR IGNORE) — модель/backend этой
+        # ноды нам неизвестны и не должны быть известны.
+        _reputation_register_node(node_id, _HIDDEN_MODEL, P2P_ENDPOINT_SENTINEL)
+
+    online_ids = {p["node_id"] for p in online_peers if p.get("node_id")}
     top_nodes = get_top_reputation("node", domain, limit)
-    
+
     nodes = []
     for item in top_nodes:
+        node_id = item.get("node_id", "unknown")
+        if node_id not in online_ids:
+            continue  # реальный пир, но сейчас offline — не выдаём за доступного
         nodes.append(NodeInfo(
-            node_id=item.get("node_id", "unknown"),
-            model=item.get("model", "unknown"),
-            endpoint=item.get("endpoint", "unknown"),
+            node_id=node_id,
+            model=_HIDDEN_MODEL,
+            endpoint=P2P_ENDPOINT_SENTINEL,
             reputation=item.get("reputation", 0.0),
             domain_score=item.get("domain_score", 0.0),
         ))
-    
+    nodes = nodes[:limit]
+
     if not nodes:
         nodes.append(NodeInfo(
             node_id="yandi-council",
             model="heretic:q8",
-            endpoint="http://127.0.0.1:11434",
+            endpoint="local",
             reputation=0.7,
             domain_score=0.7,
         ))
-    
+
     return NodeSelectionResult(nodes=nodes)
 
 

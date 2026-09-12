@@ -16,8 +16,9 @@ import requests as _requests
 from llm_gateway import complete as llm_complete
 
 from agent.orch_schemas      import NodeSelectorResult, NodeValidation, ValidationResult
-from agent.orch_node_selector import get_node_params
+from agent.orch_node_selector import get_node_params, P2P_ENDPOINT_SENTINEL
 from agent.orch_reputation   import update_node
+from agent.orch_peer_directory import infer_on_peer, PeerDirectoryError
 
 # _session остаётся: _validate_on_yandi_node() ниже бьёт в отдельный
 # YANDI-транспорт (pet/council_chat_server.py), не в Ollama — это не
@@ -203,6 +204,59 @@ def _validate_on_yandi_node(
         )
 
 
+def _parse_verdict_json(raw: str) -> dict:
+    """Общий разбор ответа валидатора (используется и локальной, и
+    реальной peer-веткой) — сначала пробуем JSON целиком, затем ищем
+    JSON-подстроку в свободном тексте."""
+    try:
+        return json.loads(raw)
+    except Exception:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group())
+            except Exception:
+                pass
+    return {}
+
+
+def _validate_on_peer_node(node_id: str, question: str, answer: str, domain: str) -> NodeValidation:
+    """Мандат "Real Node Directory Integration": настоящая проверка на
+    ФИЗИЧЕСКИ ДРУГОЙ, реальной, доверенной P2P-ноде — через
+    orch_peer_directory.infer_on_peer() (canonical node_id → Rust
+    AI-RPC bridge → её собственный llm_gateway → ответ). Никакой model/
+    endpoint/backend этой ноды здесь нет и быть не может — она решает
+    это сама."""
+    t0 = time.time()
+    prompt = VALIDATOR_PROMPT.format(question=question[:500], answer=answer[:1500])
+    try:
+        raw = infer_on_peer(
+            node_id,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+        )
+        data = _parse_verdict_json(raw)
+        verdict = data.get("verdict", "partial")
+        if verdict not in ("agree", "disagree", "partial"):
+            verdict = "partial"
+        reason  = data.get("reason", "")
+        latency = time.time() - t0
+
+        update_node(node_id, correct=(verdict == "agree"), latency=latency, domain=domain)
+        return NodeValidation(node_id=node_id, verdict=verdict, confidence=0.7,
+                               explanation=reason, latency=latency)
+    except PeerDirectoryError as e:
+        latency = time.time() - t0
+        update_node(node_id, correct=False, latency=latency, domain=domain)
+        return NodeValidation(
+            node_id=node_id,
+            verdict="partial",
+            confidence=0.0,
+            explanation=f"[peer недоступен: {e}]",
+            latency=latency,
+        )
+
+
 def _validate_on_node(
     node_id: str,
     model: str,
@@ -211,12 +265,16 @@ def _validate_on_node(
     answer: str,
     domain: str,
 ) -> NodeValidation:
-    """Выполнить валидацию на одной ноде (Ollama, Council или YANDI)."""
+    """Выполнить валидацию на одной ноде (Ollama, Council, YANDI или
+    реальный P2P-пир)."""
     if endpoint == "council":
         return _validate_on_council_node(node_id, question, answer, domain)
 
     if "/api/yandi/validate" in endpoint:
         return _validate_on_yandi_node(node_id, endpoint, question, answer, domain)
+
+    if endpoint == P2P_ENDPOINT_SENTINEL:
+        return _validate_on_peer_node(node_id, question, answer, domain)
 
     t0 = time.time()
     params = get_node_params(node_id)
@@ -226,22 +284,29 @@ def _validate_on_node(
         answer=answer[:1500],
     )
 
+    # Мандат "Node Intelligence RPC migration": раньше здесь стоял
+    # base_url=endpoint, что в client.py безусловно уходило в
+    # Ollama-протокол для ЛЮБОГО non-default base_url (обходя даже
+    # explicit-config STEP1). Аудит подтвердил: get_node_params()
+    # сегодня в каждой ветке отдаёт endpoint этой же ноды (реального
+    # адреса другого физического узла не существует — см.
+    # orch_node_selector.py/orch_reputation.py), т.е. фактического
+    # межнодового HTTP-похода тут никогда и не было — только псевдо-
+    # независимая проверка тем же backend'ом с другим seed. endpoint
+    # оставлен в сигнатуре узла как логическая метка (для логов/отчёта),
+    # backend теперь выбирает исключительно llm_gateway по имени model
+    # — так же, как во всех остальных call-сайтах agent/. Настоящая
+    # проверка ФИЗИЧЕСКИ ДРУГОЙ ноды — через YANDI Intelligence RPC
+    # (node/src/ai_rpc), когда появится реальный peer-registry,
+    # связывающий node_id с P2P-идентичностью; это отдельная, более
+    # крупная задача (см. отчёт, раздел "ограничения").
     try:
         raw = llm_complete(
             prompt, model=model, max_tokens=200, timeout=TIMEOUT,
-            base_url=endpoint, temperature=params.get("temperature", 0.2),
+            temperature=params.get("temperature", 0.2),
             extra_options={"seed": params.get("seed", 0)},
         )
-        data = {}
-        try:
-            data = json.loads(raw)
-        except Exception:
-            m = re.search(r"\{.*\}", raw, re.DOTALL)
-            if m:
-                try:
-                    data = json.loads(m.group())
-                except Exception:
-                    pass
+        data = _parse_verdict_json(raw)
 
         verdict = data.get("verdict", "partial")
         if verdict not in ("agree", "disagree", "partial"):

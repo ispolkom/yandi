@@ -2282,22 +2282,19 @@ def _is_russian(text: str) -> bool:
 
 
 def _translate_to_russian(text: str, who: str) -> str:
-    """Локальная Ollama переводит ответ совета на русский."""
-    import re as _re, requests as _req
+    """Backend узла переводит ответ совета на русский — было: напрямую
+    локальная Ollama. Теперь через llm_gateway.complete(); имя модели,
+    generation-параметры и вся последующая текстовая чистка сохранены
+    буквально. strip_think=False — старый код никогда не вырезал
+    <think>, не добавляем новое поведение."""
+    from llm_gateway import complete as _llm_complete
     prompt = (
         f"Переведи текст ниже на русский язык. "
         f"Верни ТОЛЬКО перевод — без оригинала, без слов «перевод», «вот», «ответ», без вступлений.\n\n"
         f"Текст:\n{text[:3000]}\n\nПеревод:"
     )
     try:
-        s = _req.Session(); s.trust_env = False
-        r = s.post(
-            "http://127.0.0.1:11434/api/generate",
-            json={"model": "heretic:q8", "prompt": prompt, "stream": False,
-                  "options": {"temperature": 0.1, "num_predict": 1200}},
-            timeout=90,
-        )
-        raw = r.json().get("response", "").strip()
+        raw = _llm_complete(prompt, model="heretic:q8", temperature=0.1, max_tokens=1200, strip_think=False).strip()
         if not raw:
             return text
         # Срезаем по первому EOS/служебному токену

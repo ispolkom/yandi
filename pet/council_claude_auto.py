@@ -22,7 +22,6 @@ import time
 from pathlib import Path
 
 import redis
-import requests
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agent.local_http import local_post
 
@@ -96,7 +95,6 @@ def post_reply(text: str) -> str:
     return turn_next
 
 
-_OLLAMA_URL = "http://127.0.0.1:11434"
 _FILTER_MODEL = os.environ.get("COUNCIL_FILTER_MODEL", "heretic:q8")
 
 
@@ -124,8 +122,7 @@ def _filter_reply(raw: str) -> str:
     first_line = cleaned.split("\n")[0].lower()
     if any(s in first_line for s in meta_signals):
         try:
-            s = requests.Session()
-            s.trust_env = False
+            from llm_gateway import complete as _llm_complete
             prompt = (
                 "Ниже — ответ участника совета. Убери любые мета-нарративы "
                 "('As an AI', 'I'll write', 'Claude responded:' и подобные), "
@@ -133,21 +130,15 @@ def _filter_reply(raw: str) -> str:
                 "Верни только чистый текст ответа без изменений смысла.\n\n"
                 f"Текст:\n{cleaned[:2000]}\n\nЧистый текст:"
             )
-            r = s.post(
-                f"{_OLLAMA_URL}/api/generate",
-                json={
-                    "model": _FILTER_MODEL,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.0, "num_predict": 600},
-                },
-                timeout=30,
-            )
-            result_text = r.json().get("response", "").strip()
+            # strip_think=False — старый код никогда не вырезал <think>,
+            # сохраняем это буквально, не добавляем новое поведение.
+            result_text = _llm_complete(
+                prompt, model=_FILTER_MODEL, temperature=0.0, max_tokens=600, strip_think=False,
+            ).strip()
             if result_text:
                 cleaned = result_text
         except Exception as e:
-            print(f"[filter] ollama filter failed: {e}", file=sys.stderr)
+            print(f"[filter] gateway filter failed: {e}", file=sys.stderr)
 
     return cleaned or raw
 

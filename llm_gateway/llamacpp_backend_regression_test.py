@@ -60,9 +60,8 @@ def main() -> int:
         print(f"[skip] живой смоук-тест: GGUF-файл не найден ({gguf_path})")
     else:
         text, meta = be.generate(
-            "Ответь одним словом: сколько будет 2+2?",
+            [{"role": "user", "content": "Ответь одним словом: сколько будет 2+2?"}],
             model="heretic:q8",
-            system=None,
             temperature=0.0,
             max_tokens=50,
             response_format=None,
@@ -72,9 +71,11 @@ def main() -> int:
         print(f"[info] live model said: {text!r}")
 
         text_json, _ = be.generate(
-            'Верни JSON: {"answer": "четыре"}',
+            [
+                {"role": "system", "content": "Отвечай ТОЛЬКО валидным JSON, без пояснений."},
+                {"role": "user", "content": 'Верни JSON: {"answer": "четыре"}'},
+            ],
             model="heretic:q8",
-            system="Отвечай ТОЛЬКО валидным JSON, без пояснений.",
             temperature=0.0,
             max_tokens=50,
             response_format="json",
@@ -86,6 +87,42 @@ def main() -> int:
             check("parsed JSON has expected shape", isinstance(parsed, dict), repr(parsed))
         except Exception as e:
             check("live generation with response_format=json produces parseable JSON", False, f"{e}: {text_json!r}")
+
+        # Мандат "chat_local gateway migration": multi-turn messages + stop
+        # + repeat_penalty/repeat_last_n через extra_options — реальный
+        # путь, которым будет пользоваться pet/chat_local.py.
+        text_multi, _ = be.generate(
+            [
+                {"role": "system", "content": "Ты отвечаешь очень кратко."},
+                {"role": "user", "content": "Столица Франции?"},
+                {"role": "assistant", "content": "Париж."},
+                {"role": "user", "content": "А Германии?"},
+            ],
+            model="heretic:q8", temperature=0.0, max_tokens=30, response_format=None,
+        )
+        check("live multi-turn messages() call succeeds and returns non-empty text", bool(text_multi.strip()), repr(text_multi))
+
+        text_stop, _ = be.generate(
+            [{"role": "user", "content": "Считай от 1 до 10, по одному числу на строке."}],
+            model="heretic:q8", temperature=0.0, max_tokens=100, response_format=None,
+            stop=["4"],
+        )
+        check(
+            "live stop-sequence is actually honored by llama.cpp (generation halts at/before '4')",
+            "5" not in text_stop and "6" not in text_stop, repr(text_stop),
+        )
+
+        text_rep, _ = be.generate(
+            [{"role": "user", "content": "Ответь одним словом: сколько будет 2+2?"}],
+            model="heretic:q8", temperature=0.0, max_tokens=20, response_format=None,
+            extra_options={"repeat_penalty": 1.3, "repeat_last_n": 64},
+        )
+        check(
+            "live call with extra_options={repeat_penalty, repeat_last_n} does not crash "
+            "(repeat_last_n silently dropped before reaching create_chat_completion, "
+            "repeat_penalty passed through)",
+            bool(text_rep.strip()), repr(text_rep),
+        )
 
     print()
     print("=" * 72)

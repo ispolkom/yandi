@@ -28,22 +28,20 @@ class RemoteBackendError(RuntimeError):
 
 
 def _generate_openai(
-    prompt: str,
+    messages: list[dict[str, str]],
     *,
     base_url: str,
     api_key: str | None,
     model: str,
-    system: str | None,
     temperature: float | None,
     max_tokens: int | None,
     response_format: str | None,
+    stop: list[str] | None,
     timeout: int,
 ) -> tuple[str, dict]:
-    messages: list[dict[str, str]] = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
-
+    # OpenAI-совместимый формат принимает role="system" прямо внутри
+    # messages (в отличие от Anthropic ниже) — messages уже собран
+    # client.py._build_messages(), никакой доп. обработки не нужно.
     payload: dict[str, object] = {"model": model, "messages": messages}
     if temperature is not None:
         payload["temperature"] = temperature
@@ -51,6 +49,8 @@ def _generate_openai(
         payload["max_tokens"] = max_tokens
     if response_format == "json":
         payload["response_format"] = {"type": "json_object"}
+    if stop:
+        payload["stop"] = list(stop)
 
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
@@ -79,25 +79,38 @@ def _generate_openai(
 
 
 def _generate_anthropic(
-    prompt: str,
+    messages: list[dict[str, str]],
     *,
     base_url: str,
     api_key: str | None,
     model: str,
-    system: str | None,
     temperature: float | None,
     max_tokens: int | None,
+    stop: list[str] | None,
     timeout: int,
 ) -> tuple[str, dict]:
+    # Anthropic, В ОТЛИЧИЕ от OpenAI, НЕ принимает role="system" внутри
+    # messages — только отдельным top-level полем. Извлекаем все
+    # system-сообщения (их может быть несколько — chat_local.py шлёт
+    # три независимых) и склеиваем в один system-текст; остальное —
+    # обычные user/assistant реплики как есть. Честный перевод формата,
+    # а не притворство, что Anthropic понимает то же, что и OpenAI.
+    system_parts = [m["content"] for m in messages if m.get("role") == "system" and m.get("content")]
+    convo = [m for m in messages if m.get("role") != "system"]
+
     payload: dict[str, object] = {
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": convo,
         "max_tokens": max_tokens or 4096,  # обязательное поле у Anthropic, дефолт разумный
     }
-    if system:
-        payload["system"] = system
+    if system_parts:
+        payload["system"] = "\n\n".join(system_parts)
     if temperature is not None:
         payload["temperature"] = temperature
+    if stop:
+        # Anthropic называет это stop_sequences, не stop — честный
+        # перевод имени поля, не выдумывание поддержки.
+        payload["stop_sequences"] = list(stop)
 
     headers = {
         "x-api-key": api_key or "",
@@ -130,35 +143,100 @@ def _generate_anthropic(
     }
 
 
-def generate(
-    prompt: str,
+def _embed_openai(
+    texts: list[str],
+    *,
+    base_url: str,
+    api_key: str | None,
+    model: str,
+    timeout: int,
+) -> tuple[list[list[float]], dict]:
+    """OpenAI-совместимый /embeddings — принимает список строк в одном
+    запросе (batch), возвращает по одной записи на вход с полем
+    `index`, порядок в ответе НЕ гарантирован спецификацией — сортируем
+    по `index` явно, а не полагаемся на порядок массива."""
+    payload: dict[str, object] = {"model": model, "input": texts}
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+    try:
+        resp = _session.post(
+            f"{base_url.rstrip('/')}/embeddings",
+            json=payload, headers=headers, timeout=timeout,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        raise RemoteBackendError(f"{model} @ {base_url}: {e}") from e
+
+    try:
+        raw = resp.json()
+        items = sorted(raw["data"], key=lambda item: item.get("index", 0))
+        vectors = [item["embedding"] for item in items]
+    except (KeyError, IndexError, ValueError, TypeError) as e:
+        raise RemoteBackendError(f"{model} @ {base_url}: неожиданный формат embedding-ответа: {e}") from e
+
+    dimension = len(vectors[0]) if vectors else 0
+    return vectors, {"dimension": dimension, "normalized": False}
+
+
+def embed(
+    texts: list[str],
     *,
     base_url: str,
     protocol: str,
     model: str,
     api_key_env: str | None = None,
-    system: str | None = None,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> tuple[list[list[float]], dict]:
+    """Единая точка входа для embeddings по сети. Пока только
+    OpenAI-совместимый протокол — у Anthropic нативного embeddings API
+    не существует, и притворяться, что он есть через чужой формат,
+    означало бы делать вид, что поддержка есть, когда её нет (тот же
+    принцип, что уже применён к completion в этом файле)."""
+    api_key = os.environ.get(api_key_env) if api_key_env else None
+
+    if protocol == "openai":
+        return _embed_openai(texts, base_url=base_url, api_key=api_key, model=model, timeout=timeout)
+    if protocol == "anthropic":
+        raise RemoteBackendError(
+            "Anthropic API не предоставляет embeddings — настрой отдельный "
+            "embedding-провайдер (OpenAI-совместимый self-hosted сервер или "
+            "другой явный remote-backend), генерация и эмбеддинги — разные "
+            "способности узла, не обязаны совпадать"
+        )
+    raise RemoteBackendError(f"неизвестный протокол {protocol!r} для embeddings (ожидался 'openai')")
+
+
+def generate(
+    messages: list[dict[str, str]],
+    *,
+    base_url: str,
+    protocol: str,
+    model: str,
+    api_key_env: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
     response_format: str | None = None,
+    stop: list[str] | None = None,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> tuple[str, dict]:
-    """Единая точка входа для обоих протоколов. api_key_env — имя
-    переменной окружения, где лежит ключ (ключ никогда не хранится
-    в самом конфиге узла — только имя переменной, по той же дисциплине,
-    что уже принята для KEK/DEK в agent/db/sql/keys.py)."""
+    """Единая точка входа для обоих протоколов. messages — уже готовый
+    wire-формат (client.py._build_messages(), system-сообщения внутри
+    как role="system"). api_key_env — имя переменной окружения, где
+    лежит ключ (ключ никогда не хранится в самом конфиге узла — только
+    имя переменной, по той же дисциплине, что уже принята для KEK/DEK в
+    agent/db/sql/keys.py)."""
     api_key = os.environ.get(api_key_env) if api_key_env else None
 
     if protocol == "openai":
         return _generate_openai(
-            prompt, base_url=base_url, api_key=api_key, model=model,
-            system=system, temperature=temperature, max_tokens=max_tokens,
-            response_format=response_format, timeout=timeout,
+            messages, base_url=base_url, api_key=api_key, model=model,
+            temperature=temperature, max_tokens=max_tokens,
+            response_format=response_format, stop=stop, timeout=timeout,
         )
     if protocol == "anthropic":
         return _generate_anthropic(
-            prompt, base_url=base_url, api_key=api_key, model=model,
-            system=system, temperature=temperature, max_tokens=max_tokens,
-            timeout=timeout,
+            messages, base_url=base_url, api_key=api_key, model=model,
+            temperature=temperature, max_tokens=max_tokens,
+            stop=stop, timeout=timeout,
         )
     raise RemoteBackendError(f"неизвестный протокол {protocol!r} (ожидался 'openai' или 'anthropic')")

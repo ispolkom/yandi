@@ -386,6 +386,11 @@ pub struct P2PTransport {
     /// AI-RPC packet sender (optional, set after construction via set_ai_rpc_channel).
     ai_rpc_tx: Arc<tokio::sync::Mutex<Option<mpsc::Sender<(HashId, Vec<u8>)>>>>,
 
+    /// AI-RPC response sender (optional, set via set_ai_rpc_response_channel).
+    /// Node Intelligence RPC migration: routes replies to OUR OWN
+    /// outbound AiInfer requests back to AiRpcService::resolve_pending.
+    ai_rpc_response_tx: Arc<tokio::sync::Mutex<Option<mpsc::Sender<(HashId, Vec<u8>)>>>>,
+
     /// New peer notification sender (optional, for P2P transport synchronization)
     new_peer_tx: Option<mpsc::Sender<PeerInfo>>,
     /** External IP address (detected via external service).
@@ -800,6 +805,7 @@ impl P2PTransport {
             port_rotation_tx: port_rotation_tx.clone(),
             active_rotated_listeners: Arc::new(tokio::sync::Mutex::new(None)),
             ai_rpc_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            ai_rpc_response_tx: Arc::new(tokio::sync::Mutex::new(None)),
         };
 
         // Create Arc<P2PTransport> for Station
@@ -4880,6 +4886,22 @@ impl P2PTransport {
                 }
                 true
             }
+            // Node Intelligence RPC migration: AI-RPC response (0xD1).
+            // Arrives when THIS node was the one who sent a
+            // PKT_AI_RPC_REQUEST (e.g. via AiRpcService::send_ai_infer_remote)
+            // and a peer is now answering it. Forwarded to a dedicated
+            // channel — distinct from ai_rpc_tx above, which is for
+            // requests arriving FROM a peer that THIS node must answer.
+            crate::ai_rpc::types::PKT_AI_RPC_RESPONSE => {
+                let _ = source;
+                let guard = self.ai_rpc_response_tx.lock().await;
+                if let Some(tx) = guard.as_ref() {
+                    let _ = tx.send((sender, plaintext.to_vec())).await;
+                } else {
+                    eprintln!("[ai_rpc] received PKT_AI_RPC_RESPONSE but ai_rpc_response_tx not set");
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -5640,6 +5662,13 @@ impl P2PTransport {
     /// are forwarded to the AiRpcService loop instead of being dropped.
     pub async fn set_ai_rpc_channel(&self, tx: mpsc::Sender<(HashId, Vec<u8>)>) {
         *self.ai_rpc_tx.lock().await = Some(tx);
+    }
+
+    /// Wire AI-RPC response channel. After calling this, incoming
+    /// PKT_AI_RPC_RESPONSE frames (replies to OUR OWN outbound AiInfer
+    /// requests) are forwarded here instead of being dropped.
+    pub async fn set_ai_rpc_response_channel(&self, tx: mpsc::Sender<(HashId, Vec<u8>)>) {
+        *self.ai_rpc_response_tx.lock().await = Some(tx);
     }
 
     /// Bootstrap - connect to all nodes in the list
