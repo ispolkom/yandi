@@ -468,7 +468,7 @@ impl P2PTransport {
     /// - 0.0.0.0:9000 for discovery (Hello)
     /// - 0.0.0.0:10000 for encrypted data
     pub async fn new(identity: NodeIdentity, capabilities: u16) -> Result<Arc<Self>, String> {
-        Self::with_handlers(identity, capabilities, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).await
+        Self::with_handlers(identity, capabilities, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, DEFAULT_DISCOVERY_PORT, DEFAULT_DATA_PORT).await
     }
 
     /// Create new P2P transport with exit handler channel
@@ -477,7 +477,7 @@ impl P2PTransport {
         capabilities: u16,
         exit_handler_tx: Option<mpsc::Sender<ExitHandlerRequest>>,
     ) -> Result<Arc<Self>, String> {
-        Self::with_handlers(identity, capabilities, exit_handler_tx, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).await
+        Self::with_handlers(identity, capabilities, exit_handler_tx, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, DEFAULT_DISCOVERY_PORT, DEFAULT_DATA_PORT).await
     }
 
     /// Create new P2P transport with exit handler and proxy request channels
@@ -511,6 +511,15 @@ impl P2PTransport {
         relay_request_tx: Option<mpsc::Sender<(HashId, HashId)>>,
         relay_response_tx: Option<mpsc::Sender<(HashId, crate::netlayer::packet::RelayConnectResponse)>>,
         relay_data_tx: Option<mpsc::Sender<(HashId, HashId, Vec<u8>)>>,
+        // Real Two-Node P2P E2E test mandate: these were hardcoded to
+        // DEFAULT_DISCOVERY_PORT/DEFAULT_DATA_PORT, making it impossible
+        // to run two YANDI nodes on one machine (confirmed live: second
+        // process failed with "Address already in use"). `config.ports.
+        // discovery`/`data` already existed in YandiConfig and were
+        // already read by main.rs for display/identity-file naming —
+        // this just threads those same values into the actual bind.
+        discovery_port: u16,
+        data_port: u16,
     ) -> Result<Arc<Self>, String> {
         println!("[transport] Initializing P2P transport");
 
@@ -540,19 +549,19 @@ impl P2PTransport {
         // Create encryption manager with our node_id
         let encryption = Arc::new(Mutex::new(EncryptionManager::new(identity.node_id())));
 
-        // Bind discovery socket (port 9000)
-        let discovery_socket = UdpSocket::bind(format!("0.0.0.0:{}", DEFAULT_DISCOVERY_PORT))
+        // Bind discovery socket (configurable — see discovery_port param doc above)
+        let discovery_socket = UdpSocket::bind(format!("0.0.0.0:{}", discovery_port))
             .await
             .map_err(|e| format!("Failed to bind discovery socket: {}", e))?;
         let discovery_socket = Arc::new(discovery_socket);
 
         println!(
             "[transport] 🔓 Fallback discovery socket bound to 0.0.0.0:{}",
-            DEFAULT_DISCOVERY_PORT
+            discovery_port
         );
 
-        // Bind ONE data socket (port 10000) with HUGE buffers for 60 Mbps!
-        let data_socket = UdpSocket::bind(format!("0.0.0.0:{}", DEFAULT_DATA_PORT))
+        // Bind ONE data socket with HUGE buffers for 60 Mbps! (port configurable)
+        let data_socket = UdpSocket::bind(format!("0.0.0.0:{}", data_port))
             .await
             .map_err(|e| format!("Failed to bind data socket: {}", e))?;
 
@@ -598,7 +607,7 @@ impl P2PTransport {
 
         println!(
             "[transport] 🔒 Fallback data socket bound to 0.0.0.0:{}",
-            DEFAULT_DATA_PORT
+            data_port
         );
 
         println!("[transport] 🔗 Data send socket created (shared with recv)");
@@ -645,7 +654,9 @@ impl P2PTransport {
 
         // Create relay manager
         let relay_manager = Arc::new(Mutex::new(RelayManager::new()));
-        let port_manager = Arc::new(PortManager::new(DEFAULT_DISCOVERY_PORT, DEFAULT_DATA_PORT));
+        // Seed with the ports we actually bound above, not the hardcoded
+        // defaults — see discovery_port/data_port param doc.
+        let port_manager = Arc::new(PortManager::new(discovery_port, data_port));
 
         let port_manager_for_rotation = port_manager.clone();
         let adaptive_controller = Arc::new(tokio::sync::Mutex::new(AdaptiveController::new()));
@@ -728,11 +739,11 @@ impl P2PTransport {
         println!("[transport] ✅ P2P transport initialized");
         println!(
             "[transport] Fallback discovery: 0.0.0.0:{} (always open)",
-            DEFAULT_DISCOVERY_PORT
+            discovery_port
         );
         println!(
             "[transport] Fallback data:      0.0.0.0:{} (always open)",
-            DEFAULT_DATA_PORT
+            data_port
         );
         println!("[transport] Capabilities: 0b{:016b}", capabilities);
 

@@ -342,6 +342,8 @@ async fn main() -> anyhow::Result<()> {
         None,  // relay_request_tx
         None,  // relay_response_tx
         None,  // relay_data_tx
+        config.ports.discovery,
+        config.ports.data,
     ).await
         .map_err(|e| anyhow!("Failed to create P2P transport: {}", e))?;
 
@@ -571,7 +573,14 @@ async fn main() -> anyhow::Result<()> {
         // (both answering peers AND answering local/PET callers) now
         // talks to the local llm_gateway bridge, never directly to
         // Ollama. See llm_gateway/intelligence_bridge.py.
-        let bridge_url = yandi::ai_rpc::intelligence_bridge::DEFAULT_BRIDGE_URL;
+        //
+        // Real Two-Node P2P E2E test mandate: overridable via env var so
+        // two nodes on one machine can each run their OWN bridge process
+        // on a distinct port — same minimal-override pattern as the
+        // P2P comm transport ports above, no config schema change.
+        let bridge_url_owned = std::env::var("YANDI_INTELLIGENCE_BRIDGE_URL")
+            .unwrap_or_else(|_| yandi::ai_rpc::intelligence_bridge::DEFAULT_BRIDGE_URL.to_string());
+        let bridge_url = bridge_url_owned.as_str();
         match AiRpcService::new(bridge_url) {
             Err(e) => {
                 eprintln!("[ai_rpc] Failed to create AiRpcService: {} — AI-RPC disabled", e);
@@ -648,7 +657,20 @@ async fn main() -> anyhow::Result<()> {
                 let pending_for_resp = ai_rpc_svc.lock().await.pending_requests();
                 tokio::spawn(async move {
                     while let Some((_peer_id, raw)) = ai_rpc_resp_rx.recv().await {
-                        match RpcResponse::from_bytes(&raw) {
+                        // Real Two-Node P2P E2E test mandate — real bug found by
+                        // actually running two nodes (never caught by the
+                        // previous mandate's manually-wired-channel tests):
+                        // dispatch_decrypted_wagon() hands handlers the FULL
+                        // plaintext INCLUDING their own leading packet-type
+                        // byte (see handle_resume_packet's identical
+                        // convention) — it is never pre-stripped. This was
+                        // decoding PKT_AI_RPC_RESPONSE (0xD1) itself as if it
+                        // were the start of the RpcResponse struct.
+                        if raw.is_empty() {
+                            eprintln!("[ai_rpc] empty AI-RPC response frame, dropping");
+                            continue;
+                        }
+                        match RpcResponse::from_bytes(&raw[1..]) {
                             Ok(resp) => pending_for_resp.resolve(resp).await,
                             Err(e) => eprintln!("[ai_rpc] failed to decode AI-RPC response: {}", e),
                         }
@@ -659,10 +681,14 @@ async fn main() -> anyhow::Result<()> {
                 // Real Node Directory Integration: also carries a
                 // transport handle now, needed only to answer
                 // GET /api/ai-rpc/peers with live online status.
+                // Real Two-Node P2P E2E test mandate: port overridable
+                // via env var — same reasoning as bridge_url above.
+                let ai_rpc_http_port: u16 = std::env::var("YANDI_AI_RPC_PORT")
+                    .ok().and_then(|v| v.parse().ok()).unwrap_or(yandi::web::DEFAULT_AI_RPC_PORT);
                 let svc_for_http = ai_rpc_svc.clone();
                 let transport_for_ai_rpc_http = transport.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = yandi::web::run_ai_rpc_server(svc_for_http, transport_for_ai_rpc_http, yandi::web::DEFAULT_AI_RPC_PORT).await {
+                    if let Err(e) = yandi::web::run_ai_rpc_server(svc_for_http, transport_for_ai_rpc_http, ai_rpc_http_port).await {
                         eprintln!("[ai_rpc] HTTP server error: {}", e);
                     }
                 });
@@ -672,7 +698,14 @@ async fn main() -> anyhow::Result<()> {
                 let transport_for_rpc = transport.clone();
                 tokio::spawn(async move {
                     while let Some((peer_id, raw)) = ai_rpc_in_rx.recv().await {
-                        let resp = rpc_server.handle(&raw).await;
+                        // Same leading-tag-byte fix as the response handler
+                        // above — see the comment there for the root cause.
+                        if raw.is_empty() {
+                            eprintln!("[ai_rpc] empty AI-RPC request frame from {}, dropping",
+                                      hex::encode(&peer_id.0[..8]));
+                            continue;
+                        }
+                        let resp = rpc_server.handle(&raw[1..]).await;
                         let resp_bytes = resp.to_bytes().unwrap_or_default();
                         let mut framed = Vec::with_capacity(1 + resp_bytes.len());
                         framed.push(PKT_AI_RPC_RESPONSE);
@@ -684,7 +717,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 });
 
-                println!("[ai_rpc] Service started — HTTP on 127.0.0.1:{} (gossip enabled)", yandi::web::DEFAULT_AI_RPC_PORT);
+                println!("[ai_rpc] Service started — HTTP on 127.0.0.1:{} (gossip enabled)", ai_rpc_http_port);
             }
         }
     }

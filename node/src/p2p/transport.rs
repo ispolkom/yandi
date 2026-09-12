@@ -199,16 +199,27 @@ impl P2PTransport {
         external_ip: String,
     ) -> Result<Arc<Self>, String> {
         let node_id = identity.node_id();
-        // Bind P2P data socket on port 9998
-        let data_socket = UdpSocket::bind("0.0.0.0:9998")
+        // Real Two-Node P2P E2E test mandate: these two ports were
+        // hardcoded, making it impossible to run two YANDI nodes on one
+        // machine. No config field exists for this transport (it's
+        // separate from netlayer::transport's discovery/data ports), so
+        // — minimal, no schema change — an env var override, defaulting
+        // to the original hardcoded values for every existing deployment.
+        let data_port: u16 = std::env::var("YANDI_P2P_DATA_PORT")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(9998);
+        let discovery_port: u16 = std::env::var("YANDI_P2P_DISCOVERY_PORT")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(9001);
+
+        // Bind P2P data socket
+        let data_socket = UdpSocket::bind(format!("0.0.0.0:{data_port}"))
             .await
-            .map_err(|e| format!("Failed to bind P2P data socket on port 9998: {}", e))?;
+            .map_err(|e| format!("Failed to bind P2P data socket on port {data_port}: {}", e))?;
 
         let data_socket = Arc::new(data_socket);
-        // Bind P2P discovery socket on port 9001
-        let discovery_socket = UdpSocket::bind("0.0.0.0:9001")
+        // Bind P2P discovery socket
+        let discovery_socket = UdpSocket::bind(format!("0.0.0.0:{discovery_port}"))
             .await
-            .map_err(|e| format!("Failed to bind P2P discovery socket on port 9001: {}", e))?;
+            .map_err(|e| format!("Failed to bind P2P discovery socket on port {discovery_port}: {}", e))?;
         let discovery_socket = Arc::new(discovery_socket);
 
         println!("   Discovery: {}", discovery_socket.local_addr().unwrap());

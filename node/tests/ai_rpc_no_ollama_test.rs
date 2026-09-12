@@ -521,3 +521,69 @@ async fn realistic_distinct_node_id_and_pubkey_still_authorize() {
         other => panic!("unexpected outcome: {other:?}"),
     }
 }
+
+/// Real Two-Node P2P E2E test mandate — regression test for a real bug
+/// found only by actually running two live node processes and doing a
+/// genuine end-to-end request: `dispatch_decrypted_wagon()` (the real
+/// P2P transport's inbound packet dispatcher, see
+/// `netlayer/transport.rs`) hands every handler the FULL plaintext
+/// INCLUDING its own leading packet-type tag byte — it never strips it.
+/// Every other handler in that match (e.g. `handle_resume_packet` /
+/// `decode_resume`, whose own wire format doc comment is literally
+/// `[C0][node_id:32]...`) already expects and skips that leading byte
+/// itself. `main.rs`'s AI-RPC inbound request/response tasks did NOT —
+/// they fed the full framed bytes (tag byte still attached) straight
+/// into `RpcEnvelope::from_bytes()` / `RpcResponse::from_bytes()`,
+/// silently misaligning every field after the first byte. This was
+/// invisible to every prior test in this file because they all drove
+/// `RpcServer::handle()` / `PendingRequests::resolve()` directly with
+/// already-correctly-stripped bytes or in-memory values, never through
+/// the real dispatcher. A genuine two-node run surfaced it immediately
+/// as "failed to decode envelope: invalid value: integer 325..." /
+/// "peer did not answer in time". Fixed in main.rs by slicing `&raw[1..]`
+/// before decoding in both the inbound-request and inbound-response
+/// tasks. This test pins the wire contract so it cannot silently regress.
+#[test]
+fn ai_rpc_frame_requires_stripping_the_leading_tag_byte_before_decode() {
+    let sk = SigningKey::generate(&mut OsRng);
+    let sender = sk.verifying_key().to_bytes();
+    let payload = AiInferPayload {
+        model: "x".to_string(),
+        messages: vec![ChatMessage { role: "user".to_string(), content: "hi".to_string() }],
+        max_tokens: 10,
+        stream: false,
+        temperature: None,
+    };
+    let payload_bytes = bincode::serialize(&payload).unwrap();
+    let mut env = yandi::ai_rpc::RpcEnvelope {
+        version: yandi::ai_rpc::AI_RPC_VERSION,
+        request_id: 1,
+        nonce: rand::random(),
+        timestamp_ms: yandi::ai_rpc::now_ms(),
+        sender,
+        method: yandi::ai_rpc::RpcMethod::AiInfer,
+        payload: payload_bytes,
+        signature: vec![],
+    };
+    yandi::ai_rpc::sign_envelope(&mut env, &sk);
+    let env_bytes = env.to_bytes().unwrap();
+
+    // Exactly what send_ai_infer_remote()/_gossip_kb() hand to send_encrypted(),
+    // and exactly what dispatch_decrypted_wagon() hands onward, untouched.
+    let mut framed = Vec::with_capacity(1 + env_bytes.len());
+    framed.push(PKT_AI_RPC_REQUEST);
+    framed.extend_from_slice(&env_bytes);
+
+    assert!(
+        yandi::ai_rpc::RpcEnvelope::from_bytes(&framed).is_err()
+            || yandi::ai_rpc::RpcEnvelope::from_bytes(&framed).unwrap().sender != sender,
+        "decoding WITHOUT stripping the tag byte must fail or misdecode — \
+         if this ever starts succeeding cleanly, the wire framing convention changed \
+         and main.rs's raw[1..] slicing must be revisited",
+    );
+
+    let decoded = yandi::ai_rpc::RpcEnvelope::from_bytes(&framed[1..])
+        .expect("decoding WITH the tag byte stripped must succeed — this is the real fix");
+    assert_eq!(decoded.sender, sender);
+    assert_eq!(decoded.method, yandi::ai_rpc::RpcMethod::AiInfer);
+}
