@@ -1159,33 +1159,24 @@ def _query_relevance_score(
         return 0.0
 
     try:
-        import requests
         import numpy as np
-
-        session = requests.Session()
-        session.trust_env = False
+        from llm_gateway import embed as _llm_embed
+        from llm_gateway import vector_space as _vs
 
         def _embed(value: str):
-            resp = session.post(
-                "http://127.0.0.1:11434/api/embed",
-                json={
-                    "model": "embeddinggemma:latest",
-                    "input": value[:2000],
-                },
-                timeout=15,
-            )
-            resp.raise_for_status()
-
-            vec = np.array(
-                resp.json()["embeddings"][0],
-                dtype=np.float32,
-            )
-
+            result = _llm_embed(value[:2000], model="embeddinggemma:latest")
+            vec = np.array(result.vectors[0], dtype=np.float32)
             norm = np.linalg.norm(vec)
-            return vec / norm if norm > 0 else vec
+            return (vec / norm if norm > 0 else vec), result.space
 
-        claim_vec = _embed(claim_text)
-        query_vec = _embed(query_context)
+        claim_vec, claim_space = _embed(claim_text)
+        query_vec, query_space = _embed(query_context)
+
+        # Два ОТДЕЛЬНЫХ вызова embed() (не один batch) — не предполагаем
+        # совместимость вслепую, хотя на практике оба используют тот же
+        # backend в рамках одного вызова этой функции.
+        if not _vs.compatible(claim_space, query_space):
+            return 0.0
 
         return float(np.dot(claim_vec, query_vec))
 

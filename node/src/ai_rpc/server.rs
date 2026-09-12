@@ -18,8 +18,9 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use super::{
+    intelligence_bridge::IntelligenceBridgeClient,
     knowledge::KnowledgeBase,
-    ollama::{fetch_url, OllamaProxy},
+    ollama::fetch_url,
     policy::TrustPolicy,
     types::{
         AiInferPayload, FetchPayload, KbSearchPayload, KbStorePayload,
@@ -58,15 +59,15 @@ impl Default for RpcCounters {
 
 pub struct RpcServer {
     policy: Mutex<TrustPolicy>,
-    ollama: OllamaProxy,
+    intelligence: IntelligenceBridgeClient,
     fetch_client: reqwest::Client,
     pub counters: Arc<RpcCounters>,
     pub kb: Arc<Mutex<KnowledgeBase>>,
 }
 
 impl RpcServer {
-    pub fn new(ollama_url: &str, kb: Arc<Mutex<KnowledgeBase>>) -> Result<Self, String> {
-        let ollama = OllamaProxy::new(ollama_url)?;
+    pub fn new(bridge_url: &str, kb: Arc<Mutex<KnowledgeBase>>) -> Result<Self, String> {
+        let intelligence = IntelligenceBridgeClient::new(bridge_url)?;
         let fetch_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .user_agent("YANDI-AI-RPC/1.0")
@@ -75,7 +76,7 @@ impl RpcServer {
 
         Ok(Self {
             policy: Mutex::new(TrustPolicy::new()),
-            ollama,
+            intelligence,
             fetch_client,
             counters: RpcCounters::new(),
             kb,
@@ -180,14 +181,20 @@ impl RpcServer {
 
         let sanitised = AiInferPayload { max_tokens, ..req };
 
+        // Мандат "Node Intelligence RPC migration" (§6): sanitised.model
+        // приходит от ПИРА и логируется здесь только для трассировки —
+        // IntelligenceBridgeClient::complete() ниже НИКОГДА не передаёт
+        // это имя дальше; какой backend реально отвечает, решает
+        // владелец ЭТОЙ ноды через свой llm_gateway, а не отправитель
+        // запроса.
         info!(
-            "ai_rpc: infer from peer {} model={} tokens={}",
+            "ai_rpc: infer from peer {} requested_model={} tokens={}",
             hex::encode(&env.sender[..8]),
             sanitised.model,
             sanitised.max_tokens,
         );
 
-        let infer_resp = self.ollama.complete(&sanitised).await?;
+        let infer_resp = self.intelligence.complete(&sanitised).await?;
 
         let payload = bincode::serialize(&infer_resp)
             .map_err(|e| RpcError::BackendError(e.to_string()))?;

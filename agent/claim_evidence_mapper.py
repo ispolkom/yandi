@@ -53,8 +53,10 @@ class EvidenceEmbeddingCache:
 
     def get_or_embed(self, evidence_id: str, text: str, embed_fn):
         """
-        embed_fn: callable(text) -> vector. Called AT MOST ONCE per
-        evidence_id for this cache instance's lifetime (one user
+        embed_fn: callable(text) -> anything (opaque to this cache —
+        currently (vector, VectorSpaceId) tuples, see
+        map_claims_to_evidence()'s _gemma_embed()). Called AT MOST ONCE
+        per evidence_id for this cache instance's lifetime (one user
         request), regardless of how many claims/threads ask for it.
         """
         with self._lock:
@@ -198,30 +200,20 @@ def map_claims_to_evidence(
     evidence_vectors = {}
 
     try:
-        import requests
         import numpy as np
-
-        session = requests.Session()
-        session.trust_env = False
+        from llm_gateway import embed as _llm_embed
+        from llm_gateway import vector_space as _vs
 
         def _gemma_embed(value: str):
-            resp = session.post(
-                "http://127.0.0.1:11434/api/embed",
-                json={
-                    "model": "embeddinggemma:latest",
-                    "input": value[:2000],
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
-
-            vec = np.array(
-                resp.json()["embeddings"][0],
-                dtype=np.float32,
-            )
-
+            """Возвращает (вектор, VectorSpaceId) — не просто вектор,
+            потому что evidence и claim эмбеддятся ОТДЕЛЬНЫМИ вызовами
+            embed() (evidence — заранее, одним циклом, claim — позже,
+            по одному на claim), не одним batch'ем; сравнивать их
+            вслепую без проверки происхождения нельзя (см. ниже)."""
+            result = _llm_embed(value[:2000], model="embeddinggemma:latest")
+            vec = np.array(result.vectors[0], dtype=np.float32)
             norm = np.linalg.norm(vec)
-            return vec / norm if norm > 0 else vec
+            return (vec / norm if norm > 0 else vec), result.space
 
         # P1.2 (YANDI_FULL_PIPELINE_AUDIT.md, §26/§33): этот цикл
         # раньше не имел собственного timing вообще — только
@@ -269,7 +261,7 @@ def map_claims_to_evidence(
         # ----------------------------------------------------
         if semantic_available:
             try:
-                claim_vec = _gemma_embed(claim_text)
+                claim_vec, claim_space = _gemma_embed(claim_text)
 
                 all_scores = []
 
@@ -308,9 +300,17 @@ def map_claims_to_evidence(
                     ):
                         continue
 
-                    ev_vec = evidence_vectors.get(ev_id)
+                    ev_result = evidence_vectors.get(ev_id)
 
-                    if ev_vec is None:
+                    if ev_result is None:
+                        continue
+
+                    ev_vec, ev_space = ev_result
+
+                    # claim и evidence эмбедятся ОТДЕЛЬНЫМИ вызовами
+                    # embed() (evidence — заранее, claim — здесь) — не
+                    # предполагаем совместимость пространств вслепую.
+                    if not _vs.compatible(claim_space, ev_space):
                         continue
 
                     similarity = float(

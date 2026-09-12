@@ -34,12 +34,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-import requests as _requests
-
 from llm_gateway import complete_with_meta
 
 from agent.orch_config import (
-    OLLAMA_BASE,
     MODEL,
     TEMP_ANALYST,
     FINAL_CLAIM_EXTRACTION_MAX_TOKENS,
@@ -49,12 +46,6 @@ from agent.claim_relation import (
     infer_claim_relation,
     infer_claim_relations_batch,
 )
-
-# _session — только для /api/embed ниже (embeddings, вне области
-# llm_gateway; см. council_analyzer.py/claim_evidence_retriever.py для
-# того же разделения).
-_session = _requests.Session()
-_session.trust_env = False
 
 _EXTRACTION_TIMEOUT = 180  # same order as orch_synthesizer's analyst-role calls
 
@@ -297,6 +288,7 @@ def _embed_texts_batch(texts: "List[str]") -> "Dict[str, Any]":
     "similarity unknown", never invent a similarity score.
     """
     import numpy as np
+    from llm_gateway import embed as _llm_embed
 
     unique_texts = list(dict.fromkeys(t for t in texts if t))
 
@@ -304,17 +296,9 @@ def _embed_texts_batch(texts: "List[str]") -> "Dict[str, Any]":
         return {}
 
     try:
-        resp = _session.post(
-            f"{OLLAMA_BASE}/api/embed",
-            json={
-                "model": "embeddinggemma:latest",
-                "input": [t[:2000] for t in unique_texts],
-            },
-            timeout=60,
-        )
-        resp.raise_for_status()
+        result = _llm_embed([t[:2000] for t in unique_texts], model="embeddinggemma:latest")
 
-        vecs = np.array(resp.json()["embeddings"], dtype=np.float32)
+        vecs = np.array(result.vectors, dtype=np.float32)
         norms = np.linalg.norm(vecs, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         vecs = vecs / norms

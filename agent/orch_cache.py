@@ -26,7 +26,12 @@ from typing import Optional, Dict, Any, List
 import numpy as np
 import redis as _redis
 
+from llm_gateway import embed as _llm_embed
+from llm_gateway import vector_space as _vs
+
 from agent.orch_schemas import CacheResult, TrustLevel, EvidenceRecord, ClaimRecord
+
+EMBED_MODEL = "nomic-embed-text:latest"
 
 REDIS_HOST   = "127.0.0.1"
 REDIS_PORT   = 6379
@@ -75,22 +80,20 @@ def _cache_key(query: str) -> str:
     return f"{CACHE_PREFIX}{version}:{hash_q}"
 
 
-def _embed_query(query: str) -> Optional[np.ndarray]:
-    """Получить embedding через nomic-embed-text (без прокси)."""
+def _embed_query(query: str) -> tuple[Optional[np.ndarray], Optional[_vs.VectorSpaceId]]:
+    """Получить embedding через llm_gateway.embed() — сам эндпоинт/
+    backend/формат ответа больше не известен этому файлу (было: прямой
+    POST на Ollama). Нормализация остаётся здесь — это свойство того,
+    как ЭТОТ кэш сравнивает векторы (dot product на нормализованных
+    векторах == cosine similarity), не общее свойство эмбеддингов."""
     try:
-        import requests as _req
-        s = _req.Session()
-        s.trust_env = False
-        resp = s.post(
-            "http://127.0.0.1:11434/api/embeddings",
-            json={"model": "nomic-embed-text:latest", "prompt": query[:1000]},
-            timeout=15,
-        )
-        vec = np.array(resp.json()["embedding"], dtype=np.float32)
+        result = _llm_embed(query[:1000], model=EMBED_MODEL)
+        vec = np.array(result.vectors[0], dtype=np.float32)
         norm = np.linalg.norm(vec)
-        return vec / norm if norm > 0 else vec
+        vec = vec / norm if norm > 0 else vec
+        return vec, result.space
     except Exception:
-        return None
+        return None, None
 
 
 def _get_ttl(epistemic: Optional[Dict[str, Any]] = None) -> int:
@@ -132,13 +135,36 @@ class OrchestratorCache:
         self._sem: list[dict] = self._load_sem()
 
     def _load_sem(self) -> list[dict]:
-        if SEM_INDEX_FILE.exists():
+        if not SEM_INDEX_FILE.exists():
+            return []
+        try:
+            with open(SEM_INDEX_FILE, "rb") as f:
+                data = pickle.load(f)
+        except Exception:
+            return []
+
+        if data and not all(isinstance(e, dict) and "vector_space" in e for e in data):
+            # До-миграционный формат — ни одна запись не несёт разметки,
+            # каким провайдером был создан её вектор. Доказать
+            # совместимость с новым query-вектором нельзя — карантин
+            # файла (переименование, НЕ удаление) и старт с пустого
+            # семантического индекса. Сами ответы (answer/claims/
+            # evidence) в карантинном файле физически сохранены — теряется
+            # только способность найти их семантическим поиском, это кэш:
+            # при следующем похожем запросе ответ будет просто пересчитан
+            # заново через настоящий пайплайн, эпистемическая память не
+            # искажается и не смешивается с новым провайдером.
+            quarantine_path = SEM_INDEX_FILE.with_name(SEM_INDEX_FILE.name + f".legacy.{int(time.time())}")
             try:
-                with open(SEM_INDEX_FILE, "rb") as f:
-                    return pickle.load(f)
-            except Exception:
-                pass
-        return []
+                SEM_INDEX_FILE.rename(quarantine_path)
+                print(
+                    f"[orch_cache] Семантический кэш без vector_space (до-миграционный, "
+                    f"{len(data)} записей) — карантин в {quarantine_path.name}, начинаю пустой кэш."
+                )
+            except Exception as e:
+                print(f"[orch_cache] Не удалось поместить старый кэш в карантин ({e}) — использую пустой кэш на этот запуск.")
+            return []
+        return data
 
     def _save_sem(self):
         with open(SEM_INDEX_FILE, "wb") as f:
@@ -175,11 +201,25 @@ class OrchestratorCache:
 
         # 2. Семантический match
         if self._sem:
-            vec = _embed_query(query)
+            vec, query_space = _embed_query(query)
             if vec is not None:
                 best_score = 0.0
                 best_entry = None
                 for entry in self._sem:
+                    try:
+                        entry_space = _vs.VectorSpaceId.from_dict(entry["vector_space"])
+                    except (KeyError, ValueError, TypeError):
+                        # Повреждённые/неполные метаданные происхождения —
+                        # одна плохая запись не должна ронять весь поиск по
+                        # кэшу. Трактуем как недоказанное происхождение,
+                        # значит несравнимо ни с чем, просто пропускаем её.
+                        continue
+                    if not _vs.compatible(entry_space, query_space):
+                        # Разные embedding-пространства — эта запись не
+                        # участвует в сравнении вообще, не "score=0", а
+                        # именно исключена из рассмотрения: 0.0 означало
+                        # бы "непохоже", а тут "несравнимо в принципе".
+                        continue
                     ev = np.array(entry["vec"], dtype=np.float32)
                     norm_ev = ev / np.linalg.norm(ev) if np.linalg.norm(ev) > 0 else ev
                     score = float(np.dot(vec, norm_ev))
@@ -262,10 +302,11 @@ class OrchestratorCache:
         except Exception:
             pass
 
-        vec = _embed_query(query)
+        vec, vec_space = _embed_query(query)
         if vec is not None:
             self._sem.append({
                 "vec": vec.tolist(),
+                "vector_space": vec_space.to_dict(),
                 "answer": answer,
                 "trust_level": trust_level,
                 "version": version,

@@ -78,11 +78,8 @@ def extract_claim_from_source(text: str, main_claim: str = "") -> str:
         return " ".join(sentences[:3])[:1600]
 
     try:
-        import requests
         import numpy as np
-
-        session = requests.Session()
-        session.trust_env = False
+        from llm_gateway import embed as _llm_embed
 
         # P0 (autonomous fix pass, extract_claim_from_source 343s
         # investigation): this used to call /api/embed ONCE PER
@@ -95,24 +92,13 @@ def extract_claim_from_source(text: str, main_claim: str = "") -> str:
         # main_claim + every sentence into a single request measured
         # 12.7x faster for an equivalent 20-item batch (3.20s -> 0.25s).
         # Same cosine-similarity math, same ranking, same fallback —
-        # this changes ONLY how many HTTP calls it takes, not what is
-        # computed or selected.
+        # this changes ONLY how many calls it takes, not what is
+        # computed or selected. Теперь один batch-вызов через
+        # llm_gateway.embed() — тот же принцип, backend/эндпоинт больше
+        # не известны этому файлу.
         def _gemma_embed_batch(values):
-            resp = session.post(
-                "http://127.0.0.1:11434/api/embed",
-                json={
-                    "model": "embeddinggemma:latest",
-                    "input": [v[:2000] for v in values],
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
-
-            vecs = np.array(
-                resp.json()["embeddings"],
-                dtype=np.float32,
-            )
-
+            result = _llm_embed([v[:2000] for v in values], model="embeddinggemma:latest")
+            vecs = np.array(result.vectors, dtype=np.float32)
             norms = np.linalg.norm(vecs, axis=1, keepdims=True)
             norms[norms == 0] = 1.0
             return vecs / norms
@@ -201,12 +187,20 @@ def classify_relation(main_claim: str, source_claim: str) -> str:
 
     try:
         from agent.orch_registry_search import _embed
+        from llm_gateway import vector_space as _vs
         import numpy as np
 
-        main_vec = _embed(main_claim[:1000])
-        source_vec = _embed(source_claim[:1000])
+        main_vec, main_space = _embed(main_claim[:1000])
+        source_vec, source_space = _embed(source_claim[:1000])
 
-        similarity = float(np.dot(main_vec, source_vec))
+        if not _vs.compatible(main_space, source_space):
+            # Не должно случиться на практике (оба вызова — один за другим,
+            # тот же embedding-провайдер), но если backend всё же сменился
+            # между двумя вызовами — не сравниваем векторы из разных
+            # пространств, тот же принцип, что и для персистентных хранилищ.
+            similarity = None
+        else:
+            similarity = float(np.dot(main_vec, source_vec))
 
     except Exception:
         # Если embedding недоступен — не выдумываем отношение.
@@ -1100,28 +1094,21 @@ def is_relevant(text: str, main_claim: str, threshold: float = 0.3) -> bool:
         return False
 
     try:
-        import requests
         import numpy as np
-
-        session = requests.Session()
-        session.trust_env = False
+        from llm_gateway import embed as _llm_embed
+        from llm_gateway import vector_space as _vs
 
         def _gemma_embed(value: str):
-            resp = session.post(
-                "http://127.0.0.1:11434/api/embed",
-                json={
-                    "model": "embeddinggemma:latest",
-                    "input": value[:2000],
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
-            vec = np.array(resp.json()["embeddings"][0], dtype=np.float32)
+            result = _llm_embed(value[:2000], model="embeddinggemma:latest")
+            vec = np.array(result.vectors[0], dtype=np.float32)
             norm = np.linalg.norm(vec)
-            return vec / norm if norm > 0 else vec
+            return (vec / norm if norm > 0 else vec), result.space
 
-        query_vec = _gemma_embed(main_claim)
-        source_vec = _gemma_embed(text)
+        query_vec, query_space = _gemma_embed(main_claim)
+        source_vec, source_space = _gemma_embed(text)
+
+        if not _vs.compatible(query_space, source_space):
+            raise RuntimeError("embedding spaces incompatible between the two calls")
 
         score = float(np.dot(query_vec, source_vec))
 

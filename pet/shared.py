@@ -25,8 +25,10 @@ _HERE        = Path(__file__).parent
 CONFIG_FILE  = _HERE / "council_config.json"
 REGISTRY_DIR = _HERE.parent / "registry" / "council"
 
-# ── Ollama (для переводчика и _gen_* утилит) ──────────────────────────────────
-OLLAMA_URL = "http://127.0.0.1:11434"
+# Модель для переводчика/_gen_* утилит (llm_gateway.complete(), см.
+# chat_translate.py) — логическое имя, не Ollama-specific адрес: тот
+# был удалён как осиротевший, когда _ollama_mini() перестал бить в
+# Ollama напрямую (мандат "chat_local gateway migration").
 OLLAMA_MOD = "heretic:q8"
 
 # ── Интернет-чат модели ───────────────────────────────────────────────────────

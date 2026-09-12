@@ -562,53 +562,60 @@ async fn main() -> anyhow::Result<()> {
 
     // ── AI-RPC (Iter 6) ────────────────────────────────────────────────────
     {
-        use yandi::ai_rpc::{AiRpcService, types::PKT_AI_RPC_RESPONSE};
+        use yandi::ai_rpc::{AiRpcService, types::{PKT_AI_RPC_RESPONSE, RpcResponse}};
         use yandi::ai_rpc::policy::AllowedPeer;
-        use yandi::netlayer::pairing::{PairedClientStore, default_paired_clients_path};
+        use yandi::ai_rpc::peer_directory::{PeerDirectory, default_peer_directory_path};
         use tokio::sync::mpsc;
 
-        let ollama_url = yandi::ai_rpc::ollama::DEFAULT_OLLAMA_URL;
-        match AiRpcService::new(ollama_url) {
+        // Node Intelligence RPC migration: this node's AI-RPC layer
+        // (both answering peers AND answering local/PET callers) now
+        // talks to the local llm_gateway bridge, never directly to
+        // Ollama. See llm_gateway/intelligence_bridge.py.
+        let bridge_url = yandi::ai_rpc::intelligence_bridge::DEFAULT_BRIDGE_URL;
+        match AiRpcService::new(bridge_url) {
             Err(e) => {
                 eprintln!("[ai_rpc] Failed to create AiRpcService: {} — AI-RPC disabled", e);
             }
             Ok(ai_rpc_svc) => {
-                // Register all paired clients as allowed peers.
-                let paired_store = PairedClientStore::load_or_default(&default_paired_clients_path());
+                // Real Node Directory Integration: register trusted AI
+                // peers as allowed peers, keyed by their CANONICAL
+                // node_id() — NOT their signing pubkey (see
+                // peer_directory.rs doc comment for the real bug this
+                // fixes: PairedClientStore is anchor↔mobile-CLIENT
+                // pairing, keyed by pubkey, an unrelated identity space
+                // from what P2PTransport::send_encrypted actually routes
+                // by). AllowedPeer.address is what a real peer's
+                // RpcEnvelope.sender — their node_id() — must match;
+                // AllowedPeer.signing_pubkey remains the credential that
+                // verifies their signature.
+                let peer_directory = std::sync::Arc::new(
+                    PeerDirectory::load_or_default(&default_peer_directory_path())
+                );
                 let mut registered = 0usize;
-                for (pubkey_hex, _token) in &paired_store.clients {
-                    let hex_clean = pubkey_hex.trim();
-                    if hex_clean.len() != 64 {
-                        eprintln!("[ai_rpc] Skipping malformed pubkey: {}", hex_clean);
-                        continue;
-                    }
-                    match hex::decode(hex_clean) {
-                        Ok(bytes) if bytes.len() == 32 => {
-                            let mut addr = [0u8; 32];
-                            addr.copy_from_slice(&bytes);
-                            let peer = AllowedPeer {
-                                address: addr,
-                                signing_pubkey: addr,
-                                name: Some(format!("paired-{}", &hex_clean[..8])),
-                                rpm_limit: None,
-                            };
-                            let svc = ai_rpc_svc.lock().await;
-                            if let Err(e) = svc.add_peer(peer).await {
-                                eprintln!("[ai_rpc] Failed to add peer {}: {}", &hex_clean[..8], e);
-                            } else {
-                                registered += 1;
-                            }
-                        }
-                        _ => eprintln!("[ai_rpc] Failed to decode pubkey: {}", hex_clean),
+                for (node_id, signing_pubkey, name) in peer_directory.decoded() {
+                    let peer = AllowedPeer {
+                        address: node_id.0,
+                        signing_pubkey,
+                        name: name.or_else(|| Some(format!("peer-{}", hex::encode(&node_id.0[..4])))),
+                        rpm_limit: None,
+                    };
+                    let svc = ai_rpc_svc.lock().await;
+                    if let Err(e) = svc.add_peer(peer).await {
+                        eprintln!("[ai_rpc] Failed to add trusted peer {}: {}", node_id.to_hex(), e);
+                    } else {
+                        registered += 1;
                     }
                 }
-                println!("[ai_rpc] Registered {} paired peer(s)", registered);
+                ai_rpc_svc.lock().await.set_peer_directory(peer_directory);
+                println!("[ai_rpc] Registered {} trusted AI peer(s)", registered);
 
                 // Wire inbound channel: transport → AI-RPC handler.
                 let (ai_rpc_in_tx, mut ai_rpc_in_rx) = mpsc::channel::<(yandi::util::HashId, Vec<u8>)>(256);
                 transport.set_ai_rpc_channel(ai_rpc_in_tx).await;
 
                 // Wire outbound gossip channel: AiRpcService → transport.
+                // Reused for both KbStore gossip AND outbound AiInfer
+                // requests to a peer (Node Intelligence RPC migration).
                 let (gossip_tx, mut gossip_rx) = mpsc::channel::<(yandi::util::HashId, Vec<u8>)>(256);
                 let signing_key = ed25519_dalek::SigningKey::from_bytes(&identity.signing_private_key);
                 let node_addr = identity.node_id().0;
@@ -622,10 +629,40 @@ async fn main() -> anyhow::Result<()> {
                     }
                 });
 
-                // Spawn local HTTP server (PET integration on loopback:18082).
-                let svc_for_http = ai_rpc_svc.clone();
+                // Wire inbound AI-RPC RESPONSE channel: transport → AiRpcService.
+                // Node Intelligence RPC migration: this is the piece that
+                // did not exist before — replies to requests THIS node
+                // sent (via send_ai_infer_remote) now reach the pending
+                // map instead of being silently dropped.
+                //
+                // `pending_requests()` is cloned OUT once, here, and used
+                // directly by this task from then on — NOT through
+                // `ai_rpc_svc.lock()` again. A call awaiting a reply
+                // (local_infer → send_ai_infer_remote) holds that lock
+                // for its whole wait; resolving through the same lock
+                // would deadlock every peer request until its own
+                // timeout (found and fixed via the live two-node test,
+                // see PendingRequests doc comment).
+                let (ai_rpc_resp_tx, mut ai_rpc_resp_rx) = mpsc::channel::<(yandi::util::HashId, Vec<u8>)>(256);
+                transport.set_ai_rpc_response_channel(ai_rpc_resp_tx).await;
+                let pending_for_resp = ai_rpc_svc.lock().await.pending_requests();
                 tokio::spawn(async move {
-                    if let Err(e) = yandi::web::run_ai_rpc_server(svc_for_http, yandi::web::DEFAULT_AI_RPC_PORT).await {
+                    while let Some((_peer_id, raw)) = ai_rpc_resp_rx.recv().await {
+                        match RpcResponse::from_bytes(&raw) {
+                            Ok(resp) => pending_for_resp.resolve(resp).await,
+                            Err(e) => eprintln!("[ai_rpc] failed to decode AI-RPC response: {}", e),
+                        }
+                    }
+                });
+
+                // Spawn local HTTP server (PET integration on loopback:18082).
+                // Real Node Directory Integration: also carries a
+                // transport handle now, needed only to answer
+                // GET /api/ai-rpc/peers with live online status.
+                let svc_for_http = ai_rpc_svc.clone();
+                let transport_for_ai_rpc_http = transport.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = yandi::web::run_ai_rpc_server(svc_for_http, transport_for_ai_rpc_http, yandi::web::DEFAULT_AI_RPC_PORT).await {
                         eprintln!("[ai_rpc] HTTP server error: {}", e);
                     }
                 });

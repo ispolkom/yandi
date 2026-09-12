@@ -25,9 +25,8 @@ from typing import Optional, List, Dict, Any
 import numpy as np
 import faiss
 
-import requests as _requests
-_session = _requests.Session()
-_session.trust_env = False
+from llm_gateway import embed as _llm_embed
+from llm_gateway import vector_space as _vs
 
 from agent.orch_schemas import SearchDoc, SearchResult
 
@@ -36,8 +35,14 @@ INDEX_DIR  = BASE / "registry" / "orch_index"
 INDEX_DIR.mkdir(parents=True, exist_ok=True)
 INDEX_FILE = INDEX_DIR / "faiss.index"
 DOCS_FILE  = INDEX_DIR / "docs.pkl"
+# Отдельный файл, не поле внутри docs.pkl — весь docs.pkl исторически
+# читался как "просто список словарей", лишний нераспознанный ключ
+# внутри рискованнее трогать, чем добавить файл рядом (см.
+# YANDI_EMBEDDINGS_ARCHITECTURE_AUDIT.md §6 — риск смешивания векторных
+# пространств: этот файл — минимальная разметка происхождения ВСЕГО
+# индекса разом, один embedding-провайдер на все документы в нём).
+VECTOR_SPACE_FILE = INDEX_DIR / "vector_space.json"
 
-OLLAMA     = "http://127.0.0.1:11434"
 EMBED_MODEL = "nomic-embed-text:latest"
 TOP_K      = 5
 MIN_DOCS   = 3
@@ -52,19 +57,18 @@ DATA_SOURCES = [
 ]
 
 
-def _embed(text: str) -> np.ndarray:
-    resp = _session.post(
-        f"{OLLAMA}/api/embeddings",
-        json={"model": EMBED_MODEL, "prompt": text[:2000]},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    vec = resp.json()["embedding"]
-    arr = np.array(vec, dtype=np.float32)
+def _embed(text: str) -> tuple[np.ndarray, _vs.VectorSpaceId]:
+    """Через llm_gateway.embed() — сам эндпоинт/формат ответа/backend
+    больше не известен этому файлу (было: прямой POST на Ollama). L2-
+    нормализация остаётся ЗДЕСЬ, не в шлюзе — FAISS IndexFlatIP требует
+    нормализованные векторы для cosine-подобного поведения, это свойство
+    ЭТОГО индекса, не общее свойство эмбеддингов вообще."""
+    result = _llm_embed(text[:2000], model=EMBED_MODEL)
+    arr = np.array(result.vectors[0], dtype=np.float32)
     norm = np.linalg.norm(arr)
     if norm > 0:
         arr /= norm
-    return arr
+    return arr, result.space
 
 
 def _extract_docs_from_file(path: Path) -> list[dict]:
@@ -110,27 +114,46 @@ class RegistrySearchIndex:
         self._index: Optional[faiss.IndexFlatIP] = None
         self._docs: list[dict] = []
         self._dim: int = 0
+        self._space: Optional[_vs.VectorSpaceId] = None
 
     def _load(self) -> bool:
-        if INDEX_FILE.exists() and DOCS_FILE.exists():
-            try:
-                self._index = faiss.read_index(str(INDEX_FILE))
-                with open(DOCS_FILE, "rb") as f:
-                    self._docs = pickle.load(f)
-                self._dim = self._index.d
-                return True
-            except Exception:
-                pass
-        return False
+        if not (INDEX_FILE.exists() and DOCS_FILE.exists()):
+            return False
+        if not VECTOR_SPACE_FILE.exists():
+            # Индекс существует, но без разметки происхождения векторов —
+            # до-миграционный файл. Доказать совместимость с текущим
+            # embedding-провайдером нельзя — не грузим как доверенный,
+            # вызывающий код (build()) пересоберёт с нуля из тех же
+            # исходных JSONL (дёшево, документы там сохранены отдельно).
+            print(
+                "[registry_search] Найден индекс без vector_space.json (до-миграционный) — "
+                "происхождение векторов доказать нельзя, будет пересобран."
+            )
+            return False
+        try:
+            self._index = faiss.read_index(str(INDEX_FILE))
+            with open(DOCS_FILE, "rb") as f:
+                self._docs = pickle.load(f)
+            with open(VECTOR_SPACE_FILE, "r", encoding="utf-8") as f:
+                self._space = _vs.VectorSpaceId.from_dict(json.load(f))
+            self._dim = self._index.d
+            return True
+        except Exception:
+            return False
 
     def _save(self):
         faiss.write_index(self._index, str(INDEX_FILE))
         with open(DOCS_FILE, "wb") as f:
             pickle.dump(self._docs, f)
+        with open(VECTOR_SPACE_FILE, "w", encoding="utf-8") as f:
+            json.dump(self._space.to_dict(), f)
 
     def build(self, force: bool = False):
         if not force and self._load():
-            print(f"[registry_search] Индекс загружен: {len(self._docs)} документов")
+            print(
+                f"[registry_search] Индекс загружен: {len(self._docs)} документов, "
+                f"vector_space={self._space.fingerprint()}"
+            )
             return
 
         print("[registry_search] Строю индекс...")
@@ -151,9 +174,19 @@ class RegistrySearchIndex:
         print(f"[registry_search] Embedding {len(all_docs)} документов...")
         vectors = []
         valid_docs = []
+        space: Optional[_vs.VectorSpaceId] = None
         for i, doc in enumerate(all_docs):
             try:
-                vec = _embed(doc["text"][:1000])
+                vec, doc_space = _embed(doc["text"][:1000])
+                if space is None:
+                    space = doc_space
+                elif not _vs.compatible(space, doc_space):
+                    # Не ожидается в одном проходе (тот же провайдер на
+                    # каждой итерации) — но если он всё же сменился ПОСРЕДИ
+                    # построения индекса, не смешиваем разные пространства
+                    # в одном FAISS-индексе.
+                    print(f"  skip doc {i}: embedding-пространство сменилось посреди построения индекса")
+                    continue
                 vectors.append(vec)
                 valid_docs.append(doc)
                 if (i + 1) % 10 == 0:
@@ -161,17 +194,21 @@ class RegistrySearchIndex:
             except Exception as e:
                 print(f"  skip doc {i}: {e}")
 
-        if not vectors:
+        if not vectors or space is None:
             return
 
         mat = np.stack(vectors)
         dim = mat.shape[1]
         self._dim = dim
+        self._space = space
         self._index = faiss.IndexFlatIP(dim)
         self._index.add(mat)
         self._docs = valid_docs
         self._save()
-        print(f"[registry_search] Индекс готов: {len(valid_docs)} документов, dim={dim}")
+        print(
+            f"[registry_search] Индекс готов: {len(valid_docs)} документов, dim={dim}, "
+            f"vector_space={space.fingerprint()}"
+        )
 
     def search(
         self,
@@ -186,8 +223,32 @@ class RegistrySearchIndex:
                 return SearchResult(docs=[], confidence=0.0, source="local", top_k=top_k)
 
         try:
-            vec = _embed(query).reshape(1, -1)
-            scores, indices = self._index.search(vec, min(MAX_DOCS, len(self._docs)))
+            vec, query_space = _embed(query)
+        except Exception as e:
+            print(f"[registry_search] search error: {e}")
+            return SearchResult(docs=[], confidence=0.0, source="local", top_k=top_k)
+
+        if not _vs.compatible(self._space, query_space):
+            # Индекс на диске построен другим embedding-пространством, чем
+            # то, что реально отвечает прямо сейчас (провайдер сменился
+            # между запусками) — НЕ сравниваем несовместимые векторы,
+            # пересобираем индекс текущим провайдером (дёшево — исходные
+            # документы отдельно в JSONL, не только в этом индексе).
+            print(
+                f"[registry_search] пространство запроса ({query_space.fingerprint()}) не совпадает "
+                f"с пространством индекса ({self._space.fingerprint() if self._space else 'нет'}) "
+                f"— пересобираю индекс, а не сравниваю несовместимые векторы."
+            )
+            self.build(force=True)
+            if self._index is None or not _vs.compatible(self._space, query_space):
+                # Пересборка не помогла (например сам embedding-провайдер
+                # недоступен) — безопаснее вернуть "ничего не найдено", чем
+                # сравнить векторы из разных пространств.
+                return SearchResult(docs=[], confidence=0.0, source="local", top_k=top_k)
+
+        try:
+            vec_2d = vec.reshape(1, -1)
+            scores, indices = self._index.search(vec_2d, min(MAX_DOCS, len(self._docs)))
         except Exception as e:
             print(f"[registry_search] search error: {e}")
             return SearchResult(docs=[], confidence=0.0, source="local", top_k=top_k)

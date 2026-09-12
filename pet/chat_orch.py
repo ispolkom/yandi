@@ -288,27 +288,19 @@ def _p2p_available() -> bool:
 
 
 def _local_validate(query: str, answer: str) -> str:
-    """Валидация через локальный Ollama — без интернета, без интернет-чата."""
+    """Валидация через backend узла (без интернета, без интернет-чата) —
+    было: напрямую локальный Ollama. Теперь через llm_gateway.complete().
+    strip_think=False + ручной regex сохранены буквально: старый regex
+    был регистронезависимым (IGNORECASE), а дефолт шлюза — нет, так что
+    полагаться на дефолт значило бы незаметно сузить поведение."""
     import re
-    import requests
+    from llm_gateway import complete as _llm_complete
     prompt = (
         f"Проверь ответ на вопрос. Отвечай кратко: согласен/не согласен/частично, и почему.\n\n"
         f"Вопрос: {query}\n\nОтвет: {answer}\n\nОценка:"
     )
     try:
-        s = requests.Session()
-        s.trust_env = False
-        r = s.post(
-            "http://127.0.0.1:11434/api/generate",
-            json={
-                "model": "heretic:q8",
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.1, "num_predict": 200},
-            },
-            timeout=60,
-        )
-        raw = r.json().get("response", "").strip()
+        raw = _llm_complete(prompt, model="heretic:q8", temperature=0.1, max_tokens=200, strip_think=False)
         raw = re.sub(r"<think>[\s\S]*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE).strip()
         return raw[:300]
     except Exception:

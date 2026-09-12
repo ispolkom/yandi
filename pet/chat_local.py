@@ -1,7 +1,13 @@
 """
-chat_local.py — YANDI Помощник: приватный чат с локальной Ollama-моделью.
+chat_local.py — YANDI Помощник: приватный чат с моделью этой ноды.
 Endpoint: /api/local/*
 Логика ТОЛЬКО для этой вкладки — не влияет на другие чаты.
+
+Мандат "chat_local gateway migration": Помощник принадлежит ноде, а не
+конкретному backend'у — генерация идёт через llm_gateway.complete(),
+владелец узла может настроить свой backend (свой Клод, свой OpenAI-
+совместимый сервер, свой локальный файл) под тем же логическим именем
+модели, Ollama остаётся допустимым, но не единственным путём.
 """
 import asyncio
 import json
@@ -17,8 +23,6 @@ from agent.db.sql.shadow_write import (
 )
 
 router = APIRouter()
-
-_OLLAMA_URL = "http://127.0.0.1:11434"
 
 # Owner mandate ("характер, обидчива"): this endpoint currently has no
 # real multi-user identity (LOCAL_MSGS_KEY below is one single global
@@ -127,40 +131,56 @@ def _clean_response(raw: str) -> str:
     return _dedup_paragraphs(raw).strip()
 
 
-def _call_ollama_raw(model: str, messages: list[dict], temperature: float, memory_ctx: dict | None) -> str:
+def _call_model_raw(model: str, messages: list[dict], temperature: float, memory_ctx: dict | None) -> str:
     """Returns the model's FULL, UNCLEANED generation — including the
     trailing self-report tag, if it produced one. Callers must run this
     through parse_self_report() BEFORE _clean_response(): _clean_
     response()'s own regexes were written for the visible reply only,
     never tested against JSON tag content, and splitting the tag off
     first avoids that interaction entirely rather than hoping it never
-    collides."""
-    import requests
-    s = requests.Session()
-    s.trust_env = False
-    system_msgs = [
-        {"role": "system", "content": _BASE_CHARACTER_PROMPT},
-        {"role": "system", "content": _memory_context_message(memory_ctx)},
-        {"role": "system", "content": _STATE_FORMAT_INSTRUCTION},
+    collides.
+
+    Mandate "chat_local gateway migration": was a direct POST to local
+    Ollama; now goes through llm_gateway.complete() — `model` is a
+    LOGICAL name the owner chose (from the request payload), resolved
+    by the gateway itself (explicit per-node config first, honest
+    failure if THAT fails, Ollama-compat fallback only if nothing was
+    configured — see llm_gateway.client's own STEP 1/2/3). This file no
+    longer knows or cares which physical backend actually answers.
+
+    strip_think=False: the raw output (think-block if any, then the
+    visible reply, then the STATE_MARKER tag) is preserved byte-for-
+    byte, exactly as before — parse_self_report()/`_clean_response()`
+    downstream already handle any <think> content themselves; changing
+    WHERE that stripping happens was not this mandate's job.
+
+    repeat_penalty/repeat_last_n go through extra_options (backend-
+    specific, not universal — see llm_gateway.client.complete()'s own
+    docstring): honored as-is by the Ollama-compat path and by the
+    local llama.cpp backend's repeat_penalty; repeat_last_n has no
+    per-call equivalent in llama-cpp-python (only at model-load time,
+    where its own library default already happens to be 64 — the exact
+    value requested here), and remote (OpenAI/Anthropic) backends have
+    no equivalent concept at all — both cases are a documented,
+    harmless no-op, never a silently-wrong substitution. stop sequences
+    ARE a universal concept, so they get llm_gateway.complete()'s own
+    first-class `stop` parameter, honestly translated per backend."""
+    from llm_gateway import complete as _llm_complete
+
+    system_list = [
+        _BASE_CHARACTER_PROMPT,
+        _memory_context_message(memory_ctx),
+        _STATE_FORMAT_INSTRUCTION,
     ]
-    full_msgs = system_msgs + messages
-    resp = s.post(
-        f"{_OLLAMA_URL}/api/chat",
-        json={
-            "model": model,
-            "messages": full_msgs,
-            "stream": False,
-            "options": {
-                "temperature": temperature,
-                "repeat_penalty": 1.3,
-                "repeat_last_n": 64,
-            },
-            "stop": _STOP_TOKENS,
-        },
-        timeout=60,
+    return _llm_complete(
+        model=model,
+        system=system_list,
+        messages=messages,
+        temperature=temperature,
+        stop=_STOP_TOKENS,
+        extra_options={"repeat_penalty": 1.3, "repeat_last_n": 64},
+        strip_think=False,
     )
-    resp.raise_for_status()
-    return resp.json().get("message", {}).get("content", "")
 
 
 def _apply_self_report(text: str, intensity) -> None:
@@ -197,7 +217,7 @@ def _respond_with_character(model: str, messages: list[dict], temperature: float
     last_user_text = next(
         (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "",
     )
-    raw = _call_ollama_raw(model, messages, temperature, memory_ctx)
+    raw = _call_model_raw(model, messages, temperature, memory_ctx)
     visible, intensity = parse_self_report(raw)
     _apply_self_report(last_user_text, intensity)
     return _clean_response(visible)
@@ -205,7 +225,10 @@ def _respond_with_character(model: str, messages: list[dict], temperature: float
 
 @router.post("/api/local/chat")
 async def local_chat(payload: dict):
-    """Приватный чат Помощника с Ollama. Не логируется в другие вкладки."""
+    """Приватный чат Помощника с моделью этой ноды. Не логируется в
+    другие вкладки. `model` — логическое имя: если владелец узла явно
+    настроил backend под этим именем, используется он (или честная
+    ошибка, без подмены); иначе — Ollama-совместимый дефолт."""
     model       = (payload.get("model") or "heretic:q8").strip()
     temperature = float(payload.get("temperature", 0.7))
     messages    = payload.get("messages", [])
@@ -223,12 +246,18 @@ async def local_chat(payload: dict):
 
 @router.get("/api/local/models")
 async def local_models():
-    """Список моделей в Ollama."""
-    import requests
+    """Модели, доступные ЭТОЙ НОДЕ — явно настроенные владельцем,
+    встроенный локальный дефолт, и Ollama-совместимые (если Ollama
+    сейчас отвечает). Раньше "local models" буквально означало "модели
+    Ollama"; после явного per-node выбора backend'а это больше не
+    так — endpoint/имя сохранены ради совместимости фронтенда, смысл
+    изменился (мандат "chat_local gateway migration"). Секреты/пути/
+    URL сюда никогда не попадают — см. llm_gateway.ModelInfo."""
+    from llm_gateway import list_models as _llm_list_models
     try:
-        s = requests.Session(); s.trust_env = False
-        r = s.get(f"{_OLLAMA_URL}/api/tags", timeout=5)
-        return {"models": [m["name"] for m in r.json().get("models", [])]}
+        loop = asyncio.get_event_loop()
+        infos = await loop.run_in_executor(None, _llm_list_models)
+        return {"models": [i.name for i in infos]}
     except Exception as e:
         return {"models": [], "error": str(e)}
 

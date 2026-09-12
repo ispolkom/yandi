@@ -6,25 +6,25 @@ Endpoint: /api/council/translate, /api/council/languages
 """
 from fastapi import APIRouter
 
-from pet.shared import OLLAMA_URL, OLLAMA_MOD, LANG_NAMES, LANG_FULL
+from pet.shared import OLLAMA_MOD, LANG_NAMES, LANG_FULL
 
 router = APIRouter()
 
 
-# ── Ollama utility (только для переводчика/тегировщика) ───────────────────────
+# ── LLM utility (только для переводчика/тегировщика) ───────────────────────
+# Было: прямой POST на локальную Ollama. Теперь — через llm_gateway.complete(),
+# ту же единую границу, что уже использует agent/ — этот файл (и 4 функции в
+# council_chat_server.py, которые вызывают эту же _ollama_mini) больше не
+# знает про Ollama/11434/формат её ответа. Имя модели (OLLAMA_MOD) и все
+# generation-параметры сохранены буквально — это инфраструктурная миграция,
+# не смена поведения. <think>-стрип не дублируем вручную — regex шлюза
+# (llm_gateway.client._THINK_TAG_RE) байт-в-байт совпадает с тем, что было
+# здесь раньше.
 
 def _ollama_mini(prompt: str, max_tokens: int = 60) -> str:
-    import requests, re
+    from llm_gateway import complete as _llm_complete
     try:
-        s = requests.Session(); s.trust_env = False
-        r = s.post(
-            f"{OLLAMA_URL}/api/generate",
-            json={"model": OLLAMA_MOD, "prompt": prompt, "stream": False,
-                  "options": {"temperature": 0.1, "num_predict": max_tokens}},
-            timeout=60,
-        )
-        raw = r.json().get("response", "").strip()
-        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        raw = _llm_complete(prompt, model=OLLAMA_MOD, temperature=0.1, max_tokens=max_tokens)
         for stop in ("<|endoftext|>", "<|im_start|>", "<|im_end|>", "</s>"):
             raw = raw.split(stop)[0]
         return raw.strip()

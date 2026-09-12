@@ -258,25 +258,22 @@ class BeliefManager:
 
     @staticmethod
     def _embed_batch(texts: List[str]):
-        """Один /api/embed вызов на N текстов вместо N отдельных вызовов."""
+        """Один batch-вызов llm_gateway.embed() на N текстов вместо N
+        отдельных (было: свой прямой POST на Ollama /api/embed — тот
+        же принцип "один batch", реализация теперь за шлюзом, вызывающий
+        код не знает про Ollama/эндпоинт/формат ответа).
+
+        OLD FAILURE BEHAVIOR: любая ошибка (сеть, формат) -> None.
+        NEW FAILURE BEHAVIOR: то же самое — EmbedError от шлюза тоже
+        ловится тем же except и превращается в None. Смысл не меняется:
+        вызывающий код (_find_similar) уже трактует None как "префильтр
+        недоступен, не выдумываем similarity"."""
         try:
-            import requests
             import numpy as np
+            from llm_gateway import embed as _llm_embed
 
-            session = requests.Session()
-            session.trust_env = False
-
-            resp = session.post(
-                "http://127.0.0.1:11434/api/embed",
-                json={
-                    "model": "embeddinggemma:latest",
-                    "input": [t[:2000] for t in texts],
-                },
-                timeout=60,
-            )
-            resp.raise_for_status()
-
-            vecs = np.array(resp.json()["embeddings"], dtype=np.float32)
+            result = _llm_embed([t[:2000] for t in texts], model="embeddinggemma:latest")
+            vecs = np.array(result.vectors, dtype=np.float32)
             norms = np.linalg.norm(vecs, axis=1, keepdims=True)
             norms[norms == 0] = 1.0
 
