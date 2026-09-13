@@ -5676,65 +5676,9 @@ impl P2PTransport {
     }
 
     // ========== Two-Phase Peer Verification (Stage 1.3) ==========
-
-    /// Phase 1: Verify self-certifying identity (FAST)
-    /// Checks that node_name == SHA256(public_key)
-    pub fn verify_peer_phase1(&self, hello_packet: &HelloPacket) -> Result<bool, String> {
-        if !hello_packet.verify_node_name() {
-            return Ok(false);
-        }
-        Ok(true)
-    }
-
-    /// Phase 2: Verify Ed25519 signature (SLOWER but necessary)
-    /// Checks cryptographic signature of (timestamp + nonce)
-    pub fn verify_peer_phase2(&self, hello_packet: &HelloPacket) -> Result<bool, String> {
-        let challenge = hello_packet.challenge_data();
-        let valid = NodeIdentity::verify_node(
-            &hello_packet.node_name,
-            &hello_packet.public_key,
-            &hello_packet.signature.0,
-            &challenge,
-        );
-        if !valid {
-            return Ok(false);
-        }
-
-        // Timestamp validation (prevent replay attacks)
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let time_diff = if now > hello_packet.timestamp { now - hello_packet.timestamp } else { hello_packet.timestamp - now };
-        
-        const MAX_TIME_DIFF: u64 = 5 * 60;
-        const MAX_FUTURE_DIFF: u64 = 30;
-        
-        if hello_packet.timestamp > now && time_diff > MAX_FUTURE_DIFF {
-            return Err(format!("Timestamp too far in future: diff={}s", time_diff));
-        }
-        if time_diff > MAX_TIME_DIFF {
-            return Err(format!("Timestamp too old: diff={}s", time_diff));
-        }
-        Ok(true)
-    }
-
-    /// Full handshake verification: Both Phase 1 and Phase 2
-    /// MAIN entry point for peer verification during handshakes
-    pub fn verify_peer_handshake(&self, hello_packet: &HelloPacket) -> Result<(), String> {
-        match self.verify_peer_phase1(hello_packet) {
-            Ok(true) => println!("[transport] ✅ Phase 1: Self-certifying identity verified"),
-            Ok(false) => return Err("Phase 1 FAILED: node_name mismatch".to_string()),
-            Err(e) => return Err(format!("Phase 1 ERROR: {}", e)),
-        }
-        match self.verify_peer_phase2(hello_packet) {
-            Ok(true) => println!("[transport] ✅ Phase 2: Signature verified"),
-            Ok(false) => return Err("Phase 2 FAILED: Invalid signature".to_string()),
-            Err(e) => return Err(format!("Phase 2 ERROR: {}", e)),
-        }
-        println!("[transport] 🎉 Handshake verified for peer {}", hex::encode(&hello_packet.node_name.0[..8]));
-        Ok(())
-    }
+    // The instance-method version (verify_peer_phase1/phase2/verify_peer_handshake)
+    // was superseded by verify_peer_handshake_static below and had no callers
+    // left anywhere in the codebase — removed as dead code.
 
     /// Static version: Full handshake verification (can be called without &self)
     pub fn verify_peer_handshake_static(hello_packet: &HelloPacket) -> Result<(), String> {
@@ -5750,8 +5694,14 @@ impl P2PTransport {
         
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         let time_diff = if now > hello_packet.timestamp { now - hello_packet.timestamp } else { hello_packet.timestamp - now };
-        
-        if time_diff > 5 * 60 {
+
+        const MAX_TIME_DIFF: u64 = 5 * 60;
+        const MAX_FUTURE_DIFF: u64 = 30;
+
+        if hello_packet.timestamp > now && time_diff > MAX_FUTURE_DIFF {
+            return Err(format!("Timestamp too far in future: diff={}s", time_diff));
+        }
+        if time_diff > MAX_TIME_DIFF {
             return Err(format!("Timestamp too old: diff={}s", time_diff));
         }
         
