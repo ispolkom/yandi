@@ -5695,13 +5695,14 @@ impl P2PTransport {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         let time_diff = if now > hello_packet.timestamp { now - hello_packet.timestamp } else { hello_packet.timestamp - now };
 
-        const MAX_TIME_DIFF: u64 = 5 * 60;
-        const MAX_FUTURE_DIFF: u64 = 30;
-
-        if hello_packet.timestamp > now && time_diff > MAX_FUTURE_DIFF {
-            return Err(format!("Timestamp too far in future: diff={}s", time_diff));
-        }
-        if time_diff > MAX_TIME_DIFF {
+        // Reverted to the original symmetric 5-minute window (was briefly
+        // tightened to 30s for future-dated timestamps during dead-code
+        // cleanup). That tightening was never requested and risked
+        // rejecting legitimate handshakes between machines with real
+        // clock drift — a live regression risk with no real security
+        // upside, since Barrier 3's nonce cache (check_replay) is what
+        // actually stops replay now, not this coarse timestamp window.
+        if time_diff > 5 * 60 {
             return Err(format!("Timestamp too old: diff={}s", time_diff));
         }
         
