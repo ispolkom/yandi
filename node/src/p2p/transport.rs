@@ -165,6 +165,18 @@ pub struct P2PTransport {
     /// SEC-10: IP → expected Ed25519 public key for bootstrap nodes with pinned fingerprints
     bootstrap_fingerprints: Arc<std::sync::RwLock<HashMap<String, [u8; 32]>>>,
 
+    /// SEC-11: (node_id, nonce) pairs already accepted within the freshness
+    /// window — this Hello layer (separate from netlayer::transport's own
+    /// Hello, which had and had fixed the identical gap) had NO timestamp
+    /// or nonce check at all: verify_signature() only proves internal
+    /// self-consistency, not freshness. A captured, validly-signed Hello
+    /// could be replayed later from a different address to hijack a
+    /// peer's registered addr/data_addr (every accepted Hello below
+    /// unconditionally overwrites the peer table entry). See
+    /// `identity_conflict`/`check_replay` in netlayer::transport for the
+    /// original writeup of this exact bug class.
+    seen_hello_nonces: Arc<Mutex<HashMap<(HashId, u64), std::time::Instant>>>,
+
     /// Statistics
     stats_sent_packets: Arc<AtomicU64>,
     stats_recv_packets: Arc<AtomicU64>,
@@ -244,6 +256,7 @@ impl P2PTransport {
             packet_cache: Arc::new(Mutex::new(PacketCache::new(16 * 1024 * 1024))),
             p2p_encryption: Arc::new(Mutex::new(P2PEncryptionManager::new(node_id))),
             bootstrap_fingerprints: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            seen_hello_nonces: Arc::new(Mutex::new(HashMap::new())),
             stats_sent_packets: Arc::new(AtomicU64::new(0)),
             stats_recv_packets: Arc::new(AtomicU64::new(0)),
             stats_sent_bytes: Arc::new(AtomicU64::new(0)),
@@ -268,9 +281,15 @@ impl P2PTransport {
         Ok(transport)
     }
 
-    /// Get discovery address (port 9000 - ОБЩИЙ)
+    /// Get discovery address — was hardcoded to the wrong, unrelated
+    /// "0.0.0.0:9000" (not even this module's own 9001 default) instead of
+    /// reflecting the actual bound socket; harmless as long as nothing
+    /// called it, but a real bug for any caller (found while adding a live
+    /// test for this module — see p2p_hello_replay_test.rs).
     pub fn discovery_addr(&self) -> String {
-        "0.0.0.0:9000".to_string()
+        self.discovery_socket.local_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| "0.0.0.0:9001".to_string())
     }
     pub fn data_addr(&self) -> String {
         format!("{}:9998", self.external_ip)
@@ -737,6 +756,24 @@ impl P2PTransport {
         }
     }
     /// Discovery listener for P2P handshake on port 9001
+    /// SEC-11: true (fresh, accept) the first time a (node_id, nonce) pair
+    /// is seen; false (replay, reject) on any repeat. Evicts entries older
+    /// than 5 minutes opportunistically — matching netlayer::transport's
+    /// own freshness window — so the map never grows unbounded.
+    fn check_replay(
+        seen: &mut HashMap<(HashId, u64), std::time::Instant>,
+        node_id: HashId,
+        nonce: u64,
+    ) -> bool {
+        let now = std::time::Instant::now();
+        seen.retain(|_, seen_at| now.duration_since(*seen_at) < std::time::Duration::from_secs(5 * 60));
+        if seen.contains_key(&(node_id, nonce)) {
+            return false;
+        }
+        seen.insert((node_id, nonce), now);
+        true
+    }
+
     async fn discovery_listener(self: Arc<Self>) {
         let socket = self.discovery_socket.clone();
         let mut buf = vec![0u8; 4096];
@@ -752,6 +789,37 @@ impl P2PTransport {
                             if let Err(e) = hello.verify_signature() {
                                 eprintln!("[P2P] ⚠️ Hello from {} rejected — bad signature: {}", from, e);
                                 continue;
+                            }
+
+                            // SEC-11: a valid signature only proves this Hello is
+                            // internally self-consistent — not that it was signed
+                            // just now rather than captured once and replayed
+                            // later. Reject any (node_id, nonce) already accepted.
+                            {
+                                let mut seen = self.seen_hello_nonces.lock().await;
+                                if !Self::check_replay(&mut seen, hello.node_id, hello.nonce) {
+                                    eprintln!("[P2P] ⛔ REJECTED: REPLAY — Hello for {} reuses a nonce already accepted within the freshness window (from {})", hex::encode(&hello.node_id.0[..8]), from);
+                                    continue;
+                                }
+                            }
+
+                            // SEC-12: a signature only proves THIS Hello's own
+                            // embedded key signed THIS Hello — never checked
+                            // against what key this node_id previously proved
+                            // ownership with. Without this, any new signing key
+                            // can silently steal an existing peer's node_id (the
+                            // general case; SEC-10 above only covers the narrow
+                            // case of a pinned bootstrap IP).
+                            {
+                                let peers = self.peers.lock().await;
+                                if let Some(existing) = peers.get(&hello.node_id) {
+                                    if let Some(known_key) = existing.ed25519_public {
+                                        if known_key != hello.ed25519_public {
+                                            eprintln!("[P2P] ⛔ REJECTED: IDENTITY_CONFLICT — {} previously verified with a different signing key (from {})", hex::encode(&hello.node_id.0[..8]), from);
+                                            continue;
+                                        }
+                                    }
+                                }
                             }
 
                             // SEC-10: if this source IP has a pinned bootstrap fingerprint,
