@@ -401,7 +401,7 @@ impl EncryptionManager {
     ///
     /// New format: [sender_id:32][nonce:12][encrypted_data][auth_tag:16]
     /// sender_id is PLAINTEXT and is the SENDER'S ID (who encrypted the packet)
-    pub fn decrypt(&self, peer_id: &HashId, data: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn decrypt(&mut self, peer_id: &HashId, data: &[u8]) -> Result<Vec<u8>, String> {
         // New format: [sender_id:32][nonce:12][encrypted_data][tag:16]
         if data.len() < 32 + 12 {
             return Err("Encrypted data too short (missing sender_id or nonce)".to_string());
@@ -420,19 +420,30 @@ impl EncryptionManager {
             ));
         }
 
-        let session = self.sessions.get(peer_id)
+        // Split nonce and ciphertext (skip sender_id:32)
+        let encrypted_part = &data[32..];
+        let (nonce_bytes, ciphertext) = encrypted_part.split_at(12);
+        let mut nonce_arr = [0u8; 12];
+        nonce_arr.copy_from_slice(nonce_bytes);
+        let nonce = Nonce::from_slice(nonce_bytes);
+
+        let session = self.sessions.get_mut(peer_id)
             .ok_or_else(|| format!("No session for peer: {}", hex::encode(&peer_id.0[..8])))?;
 
         let cipher = session.aes();
 
-        // Split nonce and ciphertext (skip sender_id:32)
-        let encrypted_part = &data[32..];
-        let (nonce_bytes, ciphertext) = encrypted_part.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
-
         // Decrypt data
         let decrypted = cipher.decrypt(nonce, ciphertext)
             .map_err(|e| format!("Decryption failed: {}", e))?;
+
+        // Node Identity Binding Fix — Barrier 4 (session-layer replay).
+        // A valid AEAD tag proves authenticity, not freshness — this is
+        // the real, live "You & I" chat/file/voice/video channel (port
+        // 9998), not a dead/unused module. Session::check_and_add_nonce
+        // already existed for exactly this but was never called anywhere.
+        if !session.check_and_add_nonce(&nonce_arr) {
+            return Err(format!("REPLAY: nonce already seen for peer {}", hex::encode(&peer_id.0[..8])));
+        }
 
         // Strip padding: first 2 bytes = original data length (LE).
         if decrypted.len() < 2 {
@@ -471,15 +482,9 @@ impl EncryptionManager {
     ///
     /// Extracts sender_id from packet, looks up sender in sessions, decrypts
     /// This is the preferred method for decrypting incoming packets
-    pub fn decrypt_by_peer_id(&self, data: &[u8]) -> Result<(HashId, Vec<u8>), String> {
+    pub fn decrypt_by_peer_id(&mut self, data: &[u8]) -> Result<(HashId, Vec<u8>), String> {
         // Extract sender_id from packet header
         let sender_id = Self::extract_peer_id(data)?;
-
-        // Check if we have a session for this sender
-        let session = self.sessions.get(&sender_id)
-            .ok_or_else(|| format!("No session for sender_id: {}", hex::encode(&sender_id.0[..8])))?;
-
-        let cipher = session.aes();
 
         // Split nonce and ciphertext (skip sender_id:32)
         if data.len() < 32 + 12 {
@@ -487,12 +492,26 @@ impl EncryptionManager {
         }
         let encrypted_part = &data[32..];
         let (nonce_bytes, ciphertext) = encrypted_part.split_at(12);
+        let mut nonce_arr = [0u8; 12];
+        nonce_arr.copy_from_slice(nonce_bytes);
         let nonce = Nonce::from_slice(nonce_bytes);
+
+        // Check if we have a session for this sender
+        let session = self.sessions.get_mut(&sender_id)
+            .ok_or_else(|| format!("No session for sender_id: {}", hex::encode(&sender_id.0[..8])))?;
+
+        let cipher = session.aes();
 
         // Decrypt data
         let decrypted = cipher.decrypt(nonce, ciphertext)
             .map_err(|e| format!("Decryption failed for sender {}: {}",
                 hex::encode(&sender_id.0[..8]), e))?;
+
+        // Node Identity Binding Fix — Barrier 4 (session-layer replay).
+        // See decrypt() above for the full rationale.
+        if !session.check_and_add_nonce(&nonce_arr) {
+            return Err(format!("REPLAY: nonce already seen for sender {}", hex::encode(&sender_id.0[..8])));
+        }
 
         // Silent logging for heartbeat
         let is_heartbeat = decrypted.len() >= 1 && (decrypted[0] == 0x01 || decrypted[0] == 0x02);
@@ -632,5 +651,42 @@ mod tests {
         let decrypted = manager_b.decrypt(&peer_a, &encrypted).unwrap();
 
         assert_eq!(plaintext.to_vec(), decrypted);
+    }
+
+    /// Node Identity Binding Fix — Barrier 4 live exploit + regression test.
+    /// This is the real "You & I" chat/file/voice/video channel (port
+    /// 9998) — same fix, same rationale as netlayer::encryption's test.
+    #[test]
+    fn replayed_ciphertext_is_rejected_but_fresh_messages_still_work() {
+        use crate::core::NodeIdentity;
+
+        let identity_a = NodeIdentity::new();
+        let identity_b = NodeIdentity::new();
+
+        let mut manager_a = EncryptionManager::new(identity_a.node_id());
+        let mut manager_b = EncryptionManager::new(identity_b.node_id());
+
+        let peer_a = identity_a.node_id();
+        let peer_b = identity_b.node_id();
+
+        manager_a.handle_key_exchange(peer_b, &manager_b.local_keys.public);
+        manager_b.handle_key_exchange(peer_a, &manager_a.local_keys.public);
+
+        let captured = manager_a.encrypt(&peer_b, b"chat: hey, got a minute?").unwrap();
+
+        let first = manager_b.decrypt_by_peer_id(&captured);
+        assert!(first.is_ok(), "the real, first delivery must be accepted");
+
+        let replay = manager_b.decrypt_by_peer_id(&captured);
+        assert!(
+            replay.is_err(),
+            "REPLAY SUCCEEDED: the exact same ciphertext was decrypted and accepted twice"
+        );
+        assert!(replay.unwrap_err().contains("REPLAY"));
+
+        let second_real = manager_a.encrypt(&peer_b, b"chat: still there?").unwrap();
+        assert_ne!(captured, second_real, "two calls to encrypt() must use different nonces");
+        let second = manager_b.decrypt_by_peer_id(&second_real);
+        assert!(second.is_ok(), "a genuinely new message must still be accepted");
     }
 }

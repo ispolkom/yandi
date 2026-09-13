@@ -929,7 +929,7 @@ impl P2PTransport {
 
         // SEC-01: decrypt payload if the encrypted flag is set
         if p2p_packet.encrypted {
-            let enc = self.p2p_encryption.lock().await;
+            let mut enc = self.p2p_encryption.lock().await;
             match enc.decrypt_by_peer_id(&p2p_packet.payload) {
                 Ok((sender_id, decrypted_padded)) => {
                     // Verify the claimed sender matches the cryptographic sender

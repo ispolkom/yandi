@@ -358,7 +358,7 @@ impl EncryptionManager {
     ///
     /// New format: [sender_id:32][nonce:12][encrypted_data][auth_tag:16]
     /// sender_id is PLAINTEXT and is the SENDER'S ID (who encrypted the packet)
-    pub fn decrypt(&self, peer: &PeerInfo, data: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn decrypt(&mut self, peer: &PeerInfo, data: &[u8]) -> Result<Vec<u8>, String> {
         // New format: [sender_id:32][nonce:12][encrypted_data][tag:16]
         if data.len() < 32 + 12 {
             return Err("Encrypted data too short (missing sender_id or nonce)".to_string());
@@ -377,19 +377,28 @@ impl EncryptionManager {
             ));
         }
 
-        let session = self.sessions.get(&peer.id)
+        // Split nonce and ciphertext (skip sender_id:32)
+        let encrypted_part = &data[32..];
+        let (nonce_bytes, ciphertext) = encrypted_part.split_at(12);
+        let mut nonce_arr = [0u8; 12];
+        nonce_arr.copy_from_slice(nonce_bytes);
+        let nonce = Nonce::from_slice(nonce_bytes);
+
+        let session = self.sessions.get_mut(&peer.id)
             .ok_or_else(|| format!("No session for peer: {}", hex::encode(&peer.id.0[..8])))?;
 
         let cipher = session.aes();
 
-        // Split nonce and ciphertext (skip sender_id:32)
-        let encrypted_part = &data[32..];
-        let (nonce_bytes, ciphertext) = encrypted_part.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
-
         // Decrypt data
         let decrypted = cipher.decrypt(nonce, ciphertext)
             .map_err(|e| format!("Decryption failed: {}", e))?;
+
+        // Node Identity Binding Fix — Barrier 4 (session-layer replay).
+        // See decrypt_by_peer_id() for the full rationale — same fix,
+        // same previously-dead check_and_add_nonce() mechanism.
+        if !session.check_and_add_nonce(&nonce_arr) {
+            return Err(format!("REPLAY: nonce already seen for peer {}", hex::encode(&peer.id.0[..8])));
+        }
 
         // Silent logging for heartbeat (check message type)
         let is_heartbeat = decrypted.len() >= 1 && (decrypted[0] == 0x01 || decrypted[0] == 0x02);
@@ -418,15 +427,9 @@ impl EncryptionManager {
     ///
     /// Extracts sender_id from packet, looks up sender in sessions, decrypts
     /// This is the preferred method for decrypting incoming packets
-    pub fn decrypt_by_peer_id(&self, data: &[u8]) -> Result<(HashId, Vec<u8>), String> {
+    pub fn decrypt_by_peer_id(&mut self, data: &[u8]) -> Result<(HashId, Vec<u8>), String> {
         // Extract sender_id from packet header
         let sender_id = Self::extract_peer_id(data)?;
-
-        // Check if we have a session for this sender
-        let session = self.sessions.get(&sender_id)
-            .ok_or_else(|| format!("No session for sender_id: {}", hex::encode(&sender_id.0[..8])))?;
-
-        let cipher = session.aes();
 
         // Split nonce and ciphertext (skip sender_id:32)
         if data.len() < 32 + 12 {
@@ -434,12 +437,34 @@ impl EncryptionManager {
         }
         let encrypted_part = &data[32..];
         let (nonce_bytes, ciphertext) = encrypted_part.split_at(12);
+        let mut nonce_arr = [0u8; 12];
+        nonce_arr.copy_from_slice(nonce_bytes);
         let nonce = Nonce::from_slice(nonce_bytes);
+
+        // Check if we have a session for this sender
+        let session = self.sessions.get_mut(&sender_id)
+            .ok_or_else(|| format!("No session for sender_id: {}", hex::encode(&sender_id.0[..8])))?;
+
+        let cipher = session.aes();
 
         // Decrypt data
         let decrypted = cipher.decrypt(nonce, ciphertext)
             .map_err(|e| format!("Decryption failed for sender {}: {}",
                 hex::encode(&sender_id.0[..8]), e))?;
+
+        // Node Identity Binding Fix — Barrier 4 (session-layer replay).
+        // The AEAD tag proves this ciphertext is authentic and unmodified —
+        // it does NOT prove it was sent just now rather than captured once
+        // and resent later. `Session::check_and_add_nonce` already existed
+        // for exactly this but was never called anywhere in the codebase;
+        // every message type routed through this decrypt path (chat, DHT,
+        // peer-exchange gossip, proxy/tunnel data, etc.) was silently
+        // replayable. Checked only AFTER a successful decrypt, so a
+        // sliding window fills with real, authenticated nonces only — an
+        // attacker without the session key can't waste it with garbage.
+        if !session.check_and_add_nonce(&nonce_arr) {
+            return Err(format!("REPLAY: nonce already seen for sender {}", hex::encode(&sender_id.0[..8])));
+        }
 
         // Silent logging for heartbeat
         let is_heartbeat = decrypted.len() >= 1 && (decrypted[0] == 0x01 || decrypted[0] == 0x02);
@@ -627,5 +652,56 @@ mod tests {
         assert_eq!(&decrypted[..plaintext.len()], plaintext.as_slice());
         // Хвост — нули (padding).
         assert!(decrypted[plaintext.len()..].iter().all(|&b| b == 0));
+    }
+
+    /// Node Identity Binding Fix — Barrier 4 live exploit + regression test.
+    /// A captured, real ciphertext (byte-for-byte, real AEAD tag) resent
+    /// later must be rejected as a replay, not decrypted and processed a
+    /// second time. Before this fix, `decrypt_by_peer_id`/`decrypt` never
+    /// called the already-existing `Session::check_and_add_nonce`, so any
+    /// message on this channel (chat/DHT/gossip/proxy/tunnel data — every
+    /// production caller) was silently replayable.
+    #[test]
+    fn replayed_ciphertext_is_rejected_but_fresh_messages_still_work() {
+        use crate::core::NodeIdentity;
+
+        let identity_a = NodeIdentity::new();
+        let identity_b = NodeIdentity::new();
+
+        let mut manager_a = EncryptionManager::new(identity_a.node_id());
+        let mut manager_b = EncryptionManager::new(identity_b.node_id());
+
+        let peer_a = PeerInfo::new(identity_a.node_id(), "127.0.0.1:9000");
+        let peer_b = PeerInfo::new(identity_b.node_id(), "127.0.0.1:9001");
+
+        manager_a.handle_key_exchange(&peer_b, &manager_b.local_keys.public).unwrap();
+        manager_b.handle_key_exchange(&peer_a, &manager_a.local_keys.public).unwrap();
+
+        // A real message, encrypted once by A — this is the "captured packet".
+        let captured = manager_a.encrypt(&peer_b, b"transfer: 1 hour to bob").unwrap();
+
+        // First delivery: B accepts it, exactly as normal.
+        let first = manager_b.decrypt_by_peer_id(&captured);
+        assert!(first.is_ok(), "the real, first delivery must be accepted");
+
+        // An attacker (or a dropped-and-retried network path) resends the
+        // exact same bytes later. Must now be rejected, not processed again.
+        let replay = manager_b.decrypt_by_peer_id(&captured);
+        assert!(
+            replay.is_err(),
+            "REPLAY SUCCEEDED: the exact same ciphertext was decrypted and accepted twice"
+        );
+        assert!(
+            replay.unwrap_err().contains("REPLAY"),
+            "rejection must be attributed to replay detection, not some other failure"
+        );
+
+        // A genuinely NEW message (fresh random nonce from encrypt()) from
+        // the same real peer must still go through normally — the fix must
+        // not break ordinary continued conversation.
+        let second_real = manager_a.encrypt(&peer_b, b"transfer: 1 hour to alice").unwrap();
+        assert_ne!(captured, second_real, "two calls to encrypt() must use different nonces");
+        let second = manager_b.decrypt_by_peer_id(&second_real);
+        assert!(second.is_ok(), "a genuinely new message must still be accepted");
     }
 }

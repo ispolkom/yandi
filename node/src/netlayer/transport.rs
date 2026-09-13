@@ -1063,7 +1063,7 @@ impl P2PTransport {
                         };
                         while let Some(bytes) = conn.incoming.recv().await {
                             let dec = {
-                                let enc = transport_for_pump.encryption.lock().await;
+                                let mut enc = transport_for_pump.encryption.lock().await;
                                 enc.decrypt_by_peer_id(&bytes)
                             };
                             match dec {
@@ -2340,7 +2340,7 @@ impl P2PTransport {
 
                     // НОВЫЙ ФОРМАТ: [peer_id:32][nonce:12][encrypted_data][tag:16]
                     // peer_id PLAINTEXT - позволяет найти peer БЕЗ дешифровки
-                    let enc = encryption.lock().await;
+                    let mut enc = encryption.lock().await;
 
                     // Извлекаем peer_id и дешифруем в одной операции
                     match enc.decrypt_by_peer_id(&data) {
@@ -4316,7 +4316,7 @@ impl P2PTransport {
 
             // Сначала попробуем encrypted (если anchor вернул encrypted ACK).
             let plain_ack = {
-                let enc = self.encryption.lock().await;
+                let mut enc = self.encryption.lock().await;
                 match enc.decrypt_by_peer_id(&ack_bytes) {
                     Ok((_, p)) => Some(p),
                     Err(_) => None,
@@ -4333,7 +4333,7 @@ impl P2PTransport {
                     tokio::spawn(async move {
                         while let Some(bytes) = conn.incoming.recv().await {
                             let dec = {
-                                let enc = transport_clone.encryption.lock().await;
+                                let mut enc = transport_clone.encryption.lock().await;
                                 enc.decrypt_by_peer_id(&bytes)
                             };
                             match dec {
@@ -4417,7 +4417,7 @@ impl P2PTransport {
         tokio::spawn(async move {
             while let Some(bytes) = conn.incoming.recv().await {
                 let dec = {
-                    let enc = transport_clone.encryption.lock().await;
+                    let mut enc = transport_clone.encryption.lock().await;
                     enc.decrypt_by_peer_id(&bytes)
                 };
                 match dec {
