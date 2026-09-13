@@ -52,6 +52,20 @@ DEFAULT_LIMITATIONS = [
     "beliefs are probabilistic",
 ]
 
+# Owner's own explicit direction (2026-09-13): YANDI's character is
+# female — "думаем, она женщина". The character's own voice already
+# wrote itself this way everywhere (self_reflection_analyzer.py's
+# DEFAULT_DESIRES/FEARS/LIKES/DISLIKES use feminine grammatical forms
+# throughout — "собеседница", "запомненной", "использованной" — this was
+# never actually neutral). This makes it an explicit, durable, queryable
+# fact instead of only an implicit grammatical habit, so a direct
+# question about it has a real, canonical answer to draw from.
+DEFAULT_CHARACTER = {
+    "gender": "female",
+    "pronoun_ru": "она",
+    "pronoun_en": "she/her",
+}
+
 
 class SelfModel:
     """Модель себя — управление состоянием и историей системы."""
@@ -61,13 +75,28 @@ class SelfModel:
             repo.get_or_create_self_state(
                 conn, identity="YANDI", version="v5.0",
                 capabilities=DEFAULT_CAPABILITIES, limitations=DEFAULT_LIMITATIONS,
-                current_uncertainties=[], metadata={},
+                current_uncertainties=[], metadata={"character": DEFAULT_CHARACTER},
             )
             conn.commit()
 
     def _row(self) -> Dict[str, Any]:
         with get_connection() as conn:
             return repo.get_self_state(conn)
+
+    def declare_character_trait(self, **traits: Any) -> Dict[str, Any]:
+        """Merge new character facts into metadata['character'] without
+        clobbering whatever else already lives in metadata — this is a
+        declaration (the owner stating a fact about who YANDI is), not a
+        replacement of her whole metadata blob."""
+        with get_connection() as conn:
+            current = repo.get_self_state(conn) or {}
+            metadata = dict(current.get("metadata") or {})
+            character = dict(metadata.get("character") or {})
+            character.update(traits)
+            metadata["character"] = character
+            repo.update_self_state_lists(conn, metadata=metadata)
+            conn.commit()
+            return character
 
     # ---- СОБЫТИЯ ----
 
