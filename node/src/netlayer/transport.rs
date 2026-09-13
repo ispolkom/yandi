@@ -400,6 +400,20 @@ pub struct P2PTransport {
     /// main.rs loads the peer directory and calls the setter.
     pinned_identities: Arc<tokio::sync::RwLock<HashMap<HashId, [u8; 32]>>>,
 
+    /// Node Identity Binding Fix — Barrier 3 (replay protection).
+    /// Two-Phase Verification (`verify_peer_handshake_static`) already checks
+    /// the Ed25519 signature and a ±5 minute timestamp window, but neither
+    /// proves a given Hello was freshly SIGNED now rather than captured once
+    /// and resent later within that same window — a captured Hello from a
+    /// pinned peer is still a byte-for-byte valid signature. Every accepted
+    /// Hello unconditionally overwrites the sender's PeerInfo.addr and DHT
+    /// entry with the packet's source address, so a replay from an attacker
+    /// address would silently redirect all future traffic meant for that
+    /// peer. Tracks (node_id, nonce) pairs already accepted within the
+    /// freshness window; a repeat is rejected as a replay, not processed as
+    /// a new handshake. See `check_replay()`.
+    seen_hello_nonces: Arc<tokio::sync::Mutex<HashMap<(HashId, u64), Instant>>>,
+
     /// New peer notification sender (optional, for P2P transport synchronization)
     new_peer_tx: Option<mpsc::Sender<PeerInfo>>,
     /** External IP address (detected via external service).
@@ -827,6 +841,7 @@ impl P2PTransport {
             ai_rpc_tx: Arc::new(tokio::sync::Mutex::new(None)),
             ai_rpc_response_tx: Arc::new(tokio::sync::Mutex::new(None)),
             pinned_identities: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            seen_hello_nonces: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
 
         // Create Arc<P2PTransport> for Station
@@ -1512,6 +1527,7 @@ impl P2PTransport {
         let external_ip = transport.external_ip.clone();
         let jurisdiction_index = transport.jurisdiction_index.clone();
         let pinned_identities = transport.pinned_identities.clone();
+        let seen_hello_nonces = transport.seen_hello_nonces.clone();
 
         tokio::spawn(async move {
             Self::discovery_listener(
@@ -1524,6 +1540,7 @@ impl P2PTransport {
                 external_ip,
                 jurisdiction_index,
                 pinned_identities,
+                seen_hello_nonces,
                 shutdown,
             ).await;
         });
@@ -1901,6 +1918,27 @@ impl P2PTransport {
         matches!(pins.get(&node_id), Some(pinned) if pinned != claimed_pubkey)
     }
 
+    /// Node Identity Binding Fix — Barrier 3: true (fresh, accept) the FIRST
+    /// time a (node_id, nonce) pair is seen; false (replay, reject) on any
+    /// repeat within the freshness window `verify_peer_handshake_static`
+    /// already enforces (±5 minutes). Opportunistically evicts entries older
+    /// than that window so the map never grows unbounded — anything older
+    /// would already fail the timestamp check on its own, so it can never
+    /// legitimately need to be remembered longer than that.
+    fn check_replay(
+        seen: &mut HashMap<(HashId, u64), Instant>,
+        node_id: HashId,
+        nonce: u64,
+    ) -> bool {
+        let now = Instant::now();
+        seen.retain(|_, seen_at| now.duration_since(*seen_at) < std::time::Duration::from_secs(5 * 60));
+        if seen.contains_key(&(node_id, nonce)) {
+            return false;
+        }
+        seen.insert((node_id, nonce), now);
+        true
+    }
+
     /// Discovery listener task (port 9000)
     ///
     /// Handles Hello Request/Ack packets
@@ -1914,6 +1952,7 @@ impl P2PTransport {
         external_ip: Arc<tokio::sync::RwLock<Option<String>>>,
         jurisdiction_index: Arc<crate::dht::JurisdictionIndex>,
         pinned_identities: Arc<tokio::sync::RwLock<HashMap<HashId, [u8; 32]>>>,
+        seen_hello_nonces: Arc<tokio::sync::Mutex<HashMap<(HashId, u64), Instant>>>,
         mut shutdown: Option<oneshot::Receiver<()>>,
     ) {
         let local_addr = socket.local_addr().ok();
@@ -1965,6 +2004,31 @@ impl P2PTransport {
                                 }
                                 Err(e) => {
                                     println!("[transport] ⚠️  REJECTED: {}", e);
+                                    continue;
+                                }
+                            }
+
+                            // 🔒 Node Identity Binding Fix — Barrier 3.
+                            // Signature + timestamp-window checks above prove
+                            // this Hello was validly signed within the last
+                            // ±5 minutes — NOT that it was signed just now.
+                            // A captured copy of a real, still-fresh Hello is
+                            // byte-for-byte re-signable by nobody but replay
+                            // needs no key at all: resending the same bytes
+                            // from a different source address would still
+                            // pass every check above, and every accepted
+                            // Hello below unconditionally overwrites the
+                            // sender's PeerInfo.addr + DHT entry with
+                            // whatever address it arrived from. Reject any
+                            // (node_id, nonce) pair already accepted inside
+                            // the freshness window.
+                            {
+                                let mut seen = seen_hello_nonces.lock().await;
+                                if !Self::check_replay(&mut seen, hello_packet.node_id, hello_packet.nonce) {
+                                    println!(
+                                        "[transport] ⛔ REJECTED: REPLAY — Hello for node_id {} reuses a nonce already accepted within the freshness window (from {})",
+                                        hex::encode(&hello_packet.node_id.0[..8]), from
+                                    );
                                     continue;
                                 }
                             }
