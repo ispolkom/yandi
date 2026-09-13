@@ -7,10 +7,23 @@ use crate::communication::{
 };
 use crate::util::HashId;
 use crate::p2p::{P2PTransport, P2PPacket, P2PPacketType};
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, Mutex};
 use anyhow::Result;
 use tracing::{info, error, debug};
+
+/// A message sitting in `Shipping`, waiting for the peer's ChatAck.
+/// Delivery underneath (Station dual-path) is fire-and-forget with no
+/// retransmission — if both copies of a wagon are lost, the train times
+/// out silently and no ACK/NACK signals it. Without this, a message could
+/// sit in `Shipping` forever with no visible failure. See
+/// `spawn_delivery_timeout_task`.
+struct PendingAck {
+    peer: HashId,
+    sent_at: Instant,
+}
 
 /// Менеджер чата
 pub struct ChatManager {
@@ -22,7 +35,14 @@ pub struct ChatManager {
     incoming_tx: mpsc::UnboundedSender<ChatMessage>,
     /// File Transfer Manager (опционально)
     file_transfer_manager: Option<std::sync::Arc<super::FileTransferManager>>,
+    /// Messages sent but not yet ACKed by the peer — see `PendingAck`.
+    pending_acks: Arc<Mutex<HashMap<HashId, PendingAck>>>,
 }
+
+/// How long to wait for a ChatAck before marking a message Failed.
+/// Station's own train_timeout is 30s; this gives a margin for dual-path
+/// completion + the ACK's own round trip before giving up.
+const CHAT_ACK_TIMEOUT: Duration = Duration::from_secs(45);
 
 impl ChatManager {
     /// Создать новый ChatManager
@@ -59,7 +79,51 @@ impl ChatManager {
             e2e_encryption,
             incoming_tx,
             file_transfer_manager: None,
+            pending_acks: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Background task: messages left in `Shipping` past `CHAT_ACK_TIMEOUT`
+    /// with no ChatAck are marked `Failed` so the sender actually finds out
+    /// delivery didn't happen, instead of the message sitting silently
+    /// unconfirmed forever. Mirrors Station's own `spawn_cleanup_task`.
+    pub fn spawn_delivery_timeout_task(self: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                self.sweep_expired_acks().await;
+            }
+        });
+    }
+
+    /// One sweep of `pending_acks`: anything older than `CHAT_ACK_TIMEOUT`
+    /// gets marked `Failed` and dropped from tracking. Split out from
+    /// `spawn_delivery_timeout_task` so it's directly callable (incl. from
+    /// tests) without waiting on the real interval.
+    async fn sweep_expired_acks(&self) {
+        let now = Instant::now();
+        let expired: Vec<(HashId, HashId)> = {
+            let pending = self.pending_acks.lock().await;
+            pending
+                .iter()
+                .filter(|(_, p)| now.duration_since(p.sent_at) > CHAT_ACK_TIMEOUT)
+                .map(|(msg_id, p)| (*msg_id, p.peer))
+                .collect()
+        };
+        if expired.is_empty() {
+            return;
+        }
+        let mut pending = self.pending_acks.lock().await;
+        for (msg_id, peer) in expired {
+            pending.remove(&msg_id);
+            if let Err(e) = self.storage.update_message_status(&peer, &msg_id, MessageStatus::Failed) {
+                error!("❌ Failed to mark message {} as Failed: {}", hex::encode(&msg_id.0[..8]), e);
+            } else {
+                error!("⏰ Message {} to {} never ACKed within {:?} — marked Failed",
+                    hex::encode(&msg_id.0[..8]), hex::encode(&peer.0[..8]), CHAT_ACK_TIMEOUT);
+            }
+        }
     }
 
 
@@ -114,6 +178,8 @@ impl ChatManager {
             Ok(_) => {
                 msg.status = MessageStatus::Shipping;  // В процессе доставки
                 info!("✅ Message sent to {}", hex::encode(&to.0[..8]));
+                // Track until ChatAck arrives — see spawn_delivery_timeout_task.
+                self.pending_acks.lock().await.insert(msg.msg_id, PendingAck { peer: to, sent_at: Instant::now() });
             }
             Err(e) => {
                 msg.status = MessageStatus::Pending;
@@ -196,6 +262,9 @@ impl ChatManager {
 
         // Обновить статус: Read
         self.storage.update_message_status(&from, &msg_id, MessageStatus::Read)?;
+
+        // Confirmed delivered — no longer at risk of a timeout marking it Failed.
+        self.pending_acks.lock().await.remove(&msg_id);
 
         Ok(())
     }
@@ -374,9 +443,74 @@ impl ChatManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::NodeIdentity;
+    use crate::p2p::P2PTransport;
 
     #[test]
     fn test_chat_storage() {
         // TODO: добавить тесты
+    }
+
+    /// p2p::P2PTransport's ports come from env vars, not constructor
+    /// params (see with_handlers) — process-global state, so both
+    /// delivery-timeout scenarios below share ONE ChatManager/transport
+    /// instead of racing each other over the same env vars in parallel
+    /// test threads.
+    async fn test_chat_manager() -> ChatManager {
+        std::env::set_var("YANDI_P2P_DISCOVERY_PORT", "19401");
+        std::env::set_var("YANDI_P2P_DATA_PORT", "19402");
+        let identity = NodeIdentity::new();
+        let my_node_id = identity.node_id();
+        let transport = P2PTransport::new(identity, 0)
+            .await
+            .expect("start transport");
+        ChatManager::new(my_node_id, transport).expect("create ChatManager")
+    }
+
+    /// Covers both delivery-timeout scenarios in one test (see
+    /// test_chat_manager's doc comment for why they share one instance):
+    ///
+    /// 1. A message that never gets a ChatAck must eventually be marked
+    ///    Failed — before this fix it stayed in Shipping forever with no
+    ///    way for the sender to know delivery silently didn't happen
+    ///    (Station's dual-path send has no retransmission/ACK of its own).
+    /// 2. A message that DOES get ACKed in time must NOT be touched by
+    ///    the timeout sweep — the fix must not turn reliable, timely
+    ///    delivery into a false failure.
+    #[tokio::test]
+    async fn delivery_timeout_marks_only_the_truly_unacked_message_failed() {
+        let cm = test_chat_manager().await;
+
+        let unacked_peer = crate::util::HashId::new_random();
+        let unacked_msg = ChatMessage::new(cm.my_node_id, unacked_peer, "hello?".to_string());
+        cm.storage.save_outgoing(&unacked_peer, &unacked_msg).unwrap();
+        // Simulate "sent long ago, no ACK ever arrived" without a real sleep.
+        cm.pending_acks.lock().await.insert(
+            unacked_msg.msg_id,
+            PendingAck { peer: unacked_peer, sent_at: Instant::now() - CHAT_ACK_TIMEOUT - Duration::from_secs(1) },
+        );
+
+        let acked_peer = crate::util::HashId::new_random();
+        let acked_msg = ChatMessage::new(cm.my_node_id, acked_peer, "hi".to_string());
+        cm.storage.save_outgoing(&acked_peer, &acked_msg).unwrap();
+        cm.pending_acks.lock().await.insert(
+            acked_msg.msg_id,
+            PendingAck { peer: acked_peer, sent_at: Instant::now() },
+        );
+        // Real ACK arrives promptly for this one.
+        let ack_data = serde_json::to_vec(&acked_msg.msg_id).unwrap();
+        cm.handle_ack(acked_peer, ack_data).await.unwrap();
+
+        cm.sweep_expired_acks().await;
+
+        let unacked_history = cm.storage.load_history(&unacked_peer, 10).unwrap();
+        let unacked_stored = unacked_history.iter().find(|m| m.msg_id == unacked_msg.msg_id).expect("message present");
+        assert_eq!(unacked_stored.status, MessageStatus::Failed, "never-ACKed message must be marked Failed");
+        assert!(!cm.pending_acks.lock().await.contains_key(&unacked_msg.msg_id));
+
+        let acked_history = cm.storage.load_history(&acked_peer, 10).unwrap();
+        let acked_stored = acked_history.iter().find(|m| m.msg_id == acked_msg.msg_id).expect("message present");
+        assert_eq!(acked_stored.status, MessageStatus::Read, "promptly-ACKed message must stay Read, never Failed");
+        assert!(!cm.pending_acks.lock().await.contains_key(&acked_msg.msg_id));
     }
 }

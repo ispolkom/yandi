@@ -525,6 +525,7 @@ async fn main() -> anyhow::Result<()> {
     chat_manager.set_file_transfer_manager(file_transfer_manager.clone());
 
     let chat_manager = std::sync::Arc::new(chat_manager);
+    chat_manager.clone().spawn_delivery_timeout_task();
 
     // Spawn Chat packet handler
     let chat_manager_clone = chat_manager.clone();
