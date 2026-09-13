@@ -413,7 +413,7 @@ impl TcpStation {
 
         // Расшифровываем
         let wagon_bytes = {
-            let enc = self.encryption.lock().await;
+            let mut enc = self.encryption.lock().await;
             let peer = crate::netlayer::peer::PeerInfo::new(source_id, "");
             enc.decrypt(&peer, &encrypted)
                 .map_err(|e| anyhow!("Decryption error: {}", e))?
