@@ -565,18 +565,32 @@ async fn api_auth_login(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> Response {
+    // Brute-force throttle: reject before even hashing the password if
+    // we're still cooling down from prior failures (see AuthState::
+    // login_backoff_remaining — the web UI has no rate limiting otherwise
+    // and defaults to binding 0.0.0.0).
+    if let Some(remaining) = state.auth_state.login_backoff_remaining() {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": format!("Слишком много попыток, подождите {}с", remaining.as_secs().max(1))})),
+        ).into_response();
+    }
     match crate::web::auth::verify_login(&body.login_password) {
         Ok(true) => {
+            state.auth_state.record_login_success();
             let token = state.auth_state.create_session(body.remember_me);
             let cookie = crate::web::auth::make_session_cookie(&token, body.remember_me);
             let mut resp_headers = HeaderMap::new();
             resp_headers.insert("Set-Cookie", cookie.parse().unwrap());
             (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true}))).into_response()
         }
-        Ok(false) => (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Неверный пароль"})),
-        ).into_response(),
+        Ok(false) => {
+            state.auth_state.record_login_failure();
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Неверный пароль"})),
+            ).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
@@ -638,13 +652,24 @@ async fn api_auth_rebind(
     State(state): State<AppState>,
     Json(body): Json<RebindRequest>,
 ) -> Response {
+    // Same brute-force throttle as api_auth_login — rebind also accepts a
+    // login password guess and was equally unthrottled.
+    if let Some(remaining) = state.auth_state.login_backoff_remaining() {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": format!("Слишком много попыток, подождите {}с", remaining.as_secs().max(1))})),
+        ).into_response();
+    }
     // Verify login password first
     match crate::web::auth::verify_login(&body.login_password) {
-        Ok(true) => {}
-        Ok(false) => return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Неверный пароль"})),
-        ).into_response(),
+        Ok(true) => { state.auth_state.record_login_success(); }
+        Ok(false) => {
+            state.auth_state.record_login_failure();
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Неверный пароль"})),
+            ).into_response();
+        }
         Err(e) => return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
