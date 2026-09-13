@@ -108,6 +108,53 @@ DOMAINS = [
     "coding", "science", "tech", "ai_ml", "general",
 ]
 
+# ── Relationship state machine ──────────────────────────────────────────────
+#
+# Owner's own framing (2026-09-13): a node's standing with another node
+# should not be only a slowly-drifting accuracy percentage — a percentage
+# can be eroded by many small negatives with no single moment that ever
+# crosses an alarm threshold, and it forgets old betrayals exactly as fast
+# as it forgets old good behavior. Real trust has asymmetric memory:
+# betrayal is remembered far longer than it takes to cause, and earning
+# your way back out of distrust costs much more than falling into it did.
+#
+# This adds a THIRD dimension alongside the existing accuracy/reputation
+# score: a qualitative relationship STATE (NEUTRAL / LOVE / HATE) with its
+# own accumulated, asymmetric evidence — not a replacement for the
+# accuracy score, a companion to it.
+REL_NEUTRAL = "neutral"
+REL_LOVE = "love"
+REL_HATE = "hate"
+
+# How much accumulated positive evidence it takes to earn LOVE from
+# NEUTRAL. Deliberately large — this must reflect sustained good behavior,
+# never a single interaction.
+LOVE_ENTER_THRESHOLD = 15.0
+
+# How much accumulated negative evidence it takes to fall into HATE from
+# NEUTRAL. Lower than LOVE_ENTER_THRESHOLD on purpose: distrust is
+# reasonable to develop faster than deep trust — the classic asymmetry
+# between "quick to distrust, slow to trust deeply".
+HATE_ENTER_THRESHOLD = 8.0
+
+# A node that was LOVEd and then betrays falls into HATE more easily than
+# one that was already neutral — betrayal from someone trusted cuts
+# deeper. Applied as a multiplier on HATE_ENTER_THRESHOLD while in LOVE.
+LOVE_BETRAYAL_MULTIPLIER = 0.5
+
+# How much accumulated positive evidence, earned AFTER falling into HATE,
+# it takes to climb back out to NEUTRAL. Deliberately much larger than
+# HATE_ENTER_THRESHOLD — redemption costs more than the betrayal did, and
+# HATE can only ever soften back to NEUTRAL, never straight to LOVE: love
+# has to be re-earned separately from a clean, neutral start.
+HATE_EXIT_THRESHOLD = 25.0
+
+# LOVE fades slowly from pure inactivity (no interaction at all) — even a
+# good relationship needs continued contact — but HATE does NOT decay on
+# its own with time; a grudge doesn't evaporate just because nothing new
+# happened. Points per day of total silence.
+LOVE_DECAY_PER_DAY = 0.05
+
 
 def _conn() -> sqlite3.Connection:
     c = sqlite3.connect(str(DB_FILE))
@@ -133,8 +180,129 @@ def _conn() -> sqlite3.Connection:
             PRIMARY KEY (node_id, domain)
         )
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS relationship (
+            node_id       TEXT PRIMARY KEY,
+            state         TEXT    DEFAULT 'neutral',
+            love_score    REAL    DEFAULT 0.0,
+            hate_score    REAL    DEFAULT 0.0,
+            entered_at    REAL    DEFAULT 0,
+            last_event_at REAL    DEFAULT 0
+        )
+    """)
     c.commit()
     return c
+
+
+def _evaluate_transition(state: str, love_score: float, hate_score: float) -> str:
+    """Pure state-transition function — no I/O, easy to test exhaustively.
+
+    Encodes the asymmetry: entering HATE is easier than entering LOVE;
+    leaving HATE is harder than entering it; HATE never softens straight
+    into LOVE, only back to NEUTRAL.
+    """
+    if state == REL_LOVE:
+        if hate_score >= HATE_ENTER_THRESHOLD * LOVE_BETRAYAL_MULTIPLIER:
+            return REL_HATE
+        return REL_LOVE
+    if state == REL_HATE:
+        if love_score >= HATE_EXIT_THRESHOLD:
+            return REL_NEUTRAL
+        return REL_HATE
+    # NEUTRAL
+    if hate_score >= HATE_ENTER_THRESHOLD:
+        return REL_HATE
+    if love_score >= LOVE_ENTER_THRESHOLD:
+        return REL_LOVE
+    return REL_NEUTRAL
+
+
+def record_relationship_signal(node_id: str, positive: bool, severity: float = 1.0) -> dict:
+    """Feed one interaction's outcome into the relationship state machine.
+
+    `severity` scales the weight of this one signal — an ordinary
+    right/wrong answer should stay near 1.0; a confirmed severe violation
+    (proven deception, an attack, a broken protocol guarantee) should be
+    called with a much higher severity so it can matter immediately rather
+    than needing many repeats to add up. Returns the relationship row
+    after the update (state may or may not have changed).
+    """
+    ts = time.time()
+    with _conn() as c:
+        row = c.execute(
+            "SELECT state, love_score, hate_score, entered_at, last_event_at FROM relationship WHERE node_id=?",
+            (node_id,),
+        ).fetchone()
+        if row:
+            state, love_score, hate_score, entered_at, last_event_at = row
+        else:
+            state, love_score, hate_score, entered_at, last_event_at = REL_NEUTRAL, 0.0, 0.0, ts, ts
+
+        # LOVE fades with pure inactivity; HATE never does on its own.
+        if state == REL_LOVE and last_event_at:
+            idle_days = max(0.0, (ts - last_event_at) / 86400.0)
+            love_score = max(0.0, love_score - LOVE_DECAY_PER_DAY * idle_days)
+
+        if positive:
+            love_score += severity
+        else:
+            hate_score += severity
+
+        new_state = _evaluate_transition(state, love_score, hate_score)
+
+        if new_state != state:
+            # Crossing into a new state resets BOTH accumulators — the
+            # evidence that caused this transition has done its job; the
+            # next transition (in either direction) needs its own fresh
+            # evidence, not leftover momentum from the last one.
+            love_score = 0.0
+            hate_score = 0.0
+            entered_at = ts
+
+        c.execute(
+            """
+            INSERT INTO relationship (node_id, state, love_score, hate_score, entered_at, last_event_at)
+            VALUES (?,?,?,?,?,?)
+            ON CONFLICT(node_id) DO UPDATE SET
+                state=excluded.state, love_score=excluded.love_score,
+                hate_score=excluded.hate_score, entered_at=excluded.entered_at,
+                last_event_at=excluded.last_event_at
+            """,
+            (node_id, new_state, love_score, hate_score, entered_at, ts),
+        )
+
+        return {
+            "node_id": node_id, "state": new_state,
+            "love_score": round(love_score, 3), "hate_score": round(hate_score, 3),
+            "entered_at": entered_at,
+        }
+
+
+def record_severe_violation(node_id: str, reason: str, severity: float = 4.0) -> dict:
+    """Explicit entry point for confirmed serious misconduct (proven lie,
+    attack, broken guarantee) — distinct from an ordinary wrong answer.
+    Default severity is well above HATE_ENTER_THRESHOLD/2 so a single
+    confirmed violation can matter on its own, without needing repeats."""
+    result = record_relationship_signal(node_id, positive=False, severity=severity)
+    with open(LOG_FILE, "a") as f:
+        f.write(json.dumps({
+            "node_id": node_id, "event": "severe_violation", "reason": reason,
+            "severity": severity, "ts": time.time(),
+        }) + "\n")
+    return result
+
+
+def get_relationship(node_id: str) -> dict:
+    """Current relationship state for a node — NEUTRAL if never recorded."""
+    with _conn() as c:
+        row = c.execute(
+            "SELECT state, love_score, hate_score, entered_at FROM relationship WHERE node_id=?",
+            (node_id,),
+        ).fetchone()
+        if not row:
+            return {"node_id": node_id, "state": REL_NEUTRAL, "love_score": 0.0, "hate_score": 0.0, "entered_at": None}
+        state, love_score, hate_score, entered_at = row
+        return {"node_id": node_id, "state": state, "love_score": love_score, "hate_score": hate_score, "entered_at": entered_at}
 
 
 def register_node(node_id: str, model: str, endpoint: str):
@@ -184,6 +352,13 @@ def _update_node_local(node_id: str, correct: bool, latency: float, domain: str 
             "node_id": node_id, "correct": correct,
             "latency": latency, "domain": domain, "ts": ts,
         }) + "\n")
+
+    # Ordinary interactions feed the relationship state too, at a low
+    # weight (0.3) — LOVE/HATE should mostly come from either sustained
+    # patterns over many interactions or an explicit severe violation
+    # (record_severe_violation, weight 4.0+), never from being merely
+    # wrong a handful of times.
+    record_relationship_signal(node_id, positive=correct, severity=0.3)
 
 
 def update_node(node_id: str, correct: bool, latency: float, domain: str = "general"):
