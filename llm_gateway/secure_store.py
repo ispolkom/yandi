@@ -144,6 +144,33 @@ def _connect() -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA journal_mode = WAL")
+
+    # Schema drift guard: an older version of this module stored
+    # model_config with a plaintext `model_name` primary key and no blind
+    # index (before the blind-index + hash-chained journal redesign).
+    # `CREATE TABLE IF NOT EXISTS` below never upgrades an existing table
+    # with the old layout — a node whose database predates the redesign
+    # would otherwise hit a confusing "no such column: name_index" deep
+    # inside get_model_entry/set_model_entry instead of a clear error
+    # here. An empty old-schema table is safe to drop and recreate; one
+    # that already holds rows is left alone and fails loud instead —
+    # migrating real encrypted data (under whatever old key scheme
+    # produced it) is a deliberate, owner-approved operation, not
+    # something to do silently on every connect.
+    existing_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(model_config)").fetchall()
+    }
+    if existing_cols and "name_index" not in existing_cols:
+        row_count = conn.execute("SELECT COUNT(*) FROM model_config").fetchone()[0]
+        if row_count > 0:
+            raise SecureStoreError(
+                f"{path} has an old model_config schema (pre blind-index/journal "
+                f"redesign) with {row_count} existing row(s) — refusing to touch it "
+                f"automatically. This needs a deliberate, owner-approved migration, "
+                f"not a silent drop."
+            )
+        conn.execute("DROP TABLE model_config")
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS model_config (

@@ -229,6 +229,60 @@ def main() -> int:
             with patch.dict("os.environ", env3):
                 check("a fresh KEK/DB environment starts with no data", cfg.list_models() == {})
 
+        # ── Fourth, independent temp dir: pre-blind-index schema drift ──
+        # A real node's database from before the blind-index/journal
+        # redesign has a plaintext `model_name` PRIMARY KEY, no
+        # `name_index`/`name_blob` columns, and no journal table.
+        # CREATE TABLE IF NOT EXISTS must not silently leave that in
+        # place — an empty old table should be transparently upgraded; a
+        # non-empty one must refuse, not silently discard real data.
+        with tempfile.TemporaryDirectory() as tmp4:
+            db_path4 = Path(tmp4) / "node.sqlite"
+            env4 = {"YANDI_KEK_PATH": str(Path(tmp4) / "kek.bin"), "YANDI_NODE_DB": str(db_path4)}
+
+            # Pre-create the OLD-shaped, empty table.
+            raw = sqlite3.connect(str(db_path4))
+            raw.execute(
+                "CREATE TABLE model_config (model_name TEXT PRIMARY KEY, config_blob BLOB NOT NULL, created_at_ms INTEGER NOT NULL)"
+            )
+            raw.commit()
+            raw.close()
+
+            with patch.dict("os.environ", env4):
+                try:
+                    cfg.set_model_entry("old-schema-empty", {"backend": "remote"})
+                    entry = cfg.get_model_entry("old-schema-empty")
+                    check("empty old-schema table is transparently upgraded and usable", entry == {"backend": "remote"}, f"got {entry}")
+                except Exception as e:
+                    check("empty old-schema table is transparently upgraded and usable", False, str(e))
+
+        # Same old shape, but with an existing row — must refuse, not drop.
+        with tempfile.TemporaryDirectory() as tmp5:
+            db_path5b = Path(tmp5) / "node.sqlite"
+            env5b = {"YANDI_KEK_PATH": str(Path(tmp5) / "kek.bin"), "YANDI_NODE_DB": str(db_path5b)}
+
+            raw = sqlite3.connect(str(db_path5b))
+            raw.execute(
+                "CREATE TABLE model_config (model_name TEXT PRIMARY KEY, config_blob BLOB NOT NULL, created_at_ms INTEGER NOT NULL)"
+            )
+            raw.execute(
+                "INSERT INTO model_config VALUES ('legacy-model', X'00', 0)"
+            )
+            raw.commit()
+            raw.close()
+
+            with patch.dict("os.environ", env5b):
+                try:
+                    cfg.get_model_entry("legacy-model")
+                    check("non-empty old-schema table refuses instead of silently dropping data", False, "did not raise")
+                except store.SecureStoreError:
+                    check("non-empty old-schema table refuses instead of silently dropping data", True)
+                # The old row must still be there untouched — refusing must not have deleted it either.
+                raw2 = sqlite3.connect(str(db_path5b))
+                row = raw2.execute("SELECT model_name FROM model_config").fetchone()
+                raw2.close()
+                check("the old row itself is left completely untouched after the refusal", row == ("legacy-model",), f"got {row}")
+
     print()
     print("=" * 72)
     if FAILURES:
