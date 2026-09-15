@@ -41,6 +41,22 @@ const ACK_ROUND_TIMEOUT_MS: u64 = 2000;
 const MAX_RETRY_ROUNDS: usize = 6;
 const MAX_PRESTART_CHUNKS_PER_FILE: usize = 256;
 
+/// Hard cap on a single incoming transfer's declared size. This
+/// mechanism (700B chunks) is sized for chat-style attachments, not
+/// bulk transfer — 200 MB is generous for that while keeping the
+/// resulting `total_chunks`, and the Vec<bool> allocated for it in
+/// `start_receiving`, bounded to a few hundred KB at most.
+///
+/// "Valid hostile peer" audit (2026-09-15/16): an already-authenticated
+/// peer's own FileChunkStart carries `file_size`/`total_chunks` as
+/// plain, self-reported fields with no prior validation at all. Before
+/// this fix, a single ~130-byte message declaring `total_chunks =
+/// u32::MAX` forced an immediate ~4 GB memory reservation (proven live,
+/// see node/tests/valid_peer_resource_exhaustion_test.rs) — transport
+/// authentication only proves who sent a message, never that its
+/// content is safe to act on.
+const MAX_FILE_TRANSFER_SIZE: u64 = 200 * 1024 * 1024;
+
 
 /// Сохранить чекпоинт передачи в файл
 fn save_checkpoint(file_id: &str, filename: &str, sent_chunks: u32, total_chunks: u32) -> Result<()> {
@@ -570,8 +586,27 @@ impl FileTransferManager {
 
     /// Начать приём файла
     pub async fn start_receiving(&self, from: HashId, start: crate::communication::FileChunkStart) -> Result<()> {
-        info!("📥 Receiving file: {} ({} bytes, {} chunks)", 
+        info!("📥 Receiving file: {} ({} bytes, {} chunks)",
             start.filename, start.file_size, start.total_chunks);
+
+        // Never trust a peer's self-reported size/chunk-count before
+        // allocating anything on their say-so — see MAX_FILE_TRANSFER_SIZE.
+        if start.file_size > MAX_FILE_TRANSFER_SIZE {
+            return Err(anyhow::anyhow!(
+                "rejected file transfer from {}: declared file_size {} exceeds max {} bytes",
+                hex::encode(&from.0[..8]), start.file_size, MAX_FILE_TRANSFER_SIZE
+            ));
+        }
+        // Mirrors the sender's own formula exactly (send_file_from_disk,
+        // line ~288) — including file_size=0 legitimately giving 0 chunks.
+        let expected_total_chunks =
+            ((start.file_size as usize + FILE_TRANSFER_CHUNK_SIZE - 1) / FILE_TRANSFER_CHUNK_SIZE) as u32;
+        if start.total_chunks != expected_total_chunks {
+            return Err(anyhow::anyhow!(
+                "rejected file transfer from {}: declared total_chunks {} inconsistent with file_size {} (expected {})",
+                hex::encode(&from.0[..8]), start.total_chunks, start.file_size, expected_total_chunks
+            ));
+        }
 
         self.completed_incoming.lock().await.remove(&start.file_id);
 

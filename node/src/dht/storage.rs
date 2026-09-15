@@ -551,3 +551,61 @@ impl ToFixed for HashId {
         key
     }
 }
+
+#[cfg(test)]
+mod hostile_peer_origin_isolation_tests {
+    use super::*;
+
+    /// "Valid hostile peer" audit (2026-09-15/16): netlayer::transport's
+    /// live STORE/FIND_VALUE handlers used to call the bare
+    /// `.store()`/`.get()` methods, which hardcode `origin="legacy"` —
+    /// meaning every peer on the network shared ONE rate-limit bucket
+    /// here, regardless of who actually sent the request. This proves
+    /// the fix (real per-peer origin, e.g. hex-encoded node_id) actually
+    /// isolates one abusive peer's rate limit from everyone else's,
+    /// using DhtStorage exactly as the live handlers now do.
+    #[test]
+    fn one_peer_exhausting_their_quota_does_not_block_a_different_peer() {
+        let mut storage = DhtStorage::new();
+        let attacker_origin = "attacker-node-id-hex".to_string();
+        let honest_origin = "honest-node-id-hex".to_string();
+
+        // Exhaust the Store rate limit (5/sec) for the attacker only.
+        let store_limit = get_rate_limit(RequestType::Store).per_second;
+        for i in 0..store_limit {
+            let key = HashId([i as u8; 32]);
+            storage.store_with_quota(key, vec![1, 2, 3], attacker_origin.clone())
+                .expect("attacker's own requests within their own limit must succeed");
+        }
+        let attacker_blocked = storage.store_with_quota(
+            HashId([200; 32]), vec![9], attacker_origin.clone(),
+        );
+        assert!(attacker_blocked.is_err(), "attacker must be rate-limited after exceeding their own quota");
+
+        // A genuinely different, honest peer's very next STORE must NOT
+        // be caught by the attacker's block — this is exactly the
+        // cross-peer DoS the shared "legacy" bucket used to cause.
+        let honest_result = storage.store_with_quota(
+            HashId([201; 32]), vec![4, 5, 6], honest_origin.clone(),
+        );
+        assert!(
+            honest_result.is_ok(),
+            "CROSS-PEER DOS: an honest peer's request was blocked by a DIFFERENT peer's rate limit: {:?}",
+            honest_result
+        );
+
+        // Same isolation for the read side (FIND_VALUE).
+        let key = HashId([201; 32]);
+        for _ in 0..get_rate_limit(RequestType::FindValue).per_second {
+            let _ = storage.get_with_quota(&key, &attacker_origin);
+        }
+        assert!(
+            storage.get_with_quota(&key, &attacker_origin).is_err(),
+            "attacker must be rate-limited on lookups too after exceeding their own quota"
+        );
+        assert!(
+            storage.get_with_quota(&key, &honest_origin).is_ok(),
+            "CROSS-PEER DOS: an honest peer's lookup was blocked by a DIFFERENT peer's rate limit"
+        );
+    }
+}
