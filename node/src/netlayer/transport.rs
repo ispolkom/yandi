@@ -3481,9 +3481,22 @@ impl P2PTransport {
 
                                                 // Сохраняем в storage
 
+                                                // "Valid hostile peer" audit (2026-09-15/16): the
+                                                // bare .store() hardcodes origin="legacy" for EVERY
+                                                // caller, so DhtStorage's own per-origin rate limit
+                                                // (5 STORE/sec, then a 300s block) was shared across
+                                                // the entire peer population instead of being per
+                                                // sender — a single peer could exhaust the "legacy"
+                                                // bucket and get every other peer's STORE requests
+                                                // blocked too. Uses store_with_quota with the real,
+                                                // cryptographically authenticated sender identity
+                                                // (never the source IP/address — that isn't YANDI
+                                                // identity) so the limit is local to this one peer.
                                                 let mut dht_lock = dht.lock().await;
 
-                                                dht_lock.storage.store(key, value);
+                                                if let Err(e) = dht_lock.storage.store_with_quota(key, value, hex::encode(&peer_id.0)) {
+                                                    println!("[dht] ⛔ STORE rejected from {}: {}", crate::util::mask_hash_id(&peer_id), e);
+                                                }
 
                                                 
 
@@ -3537,9 +3550,19 @@ impl P2PTransport {
 
                                                 // Ищем значение в storage
 
+                                                // Same fix as STORE above: real per-peer origin,
+                                                // never the shared "legacy" bucket. A rate-limited
+                                                // lookup fails closed (treated as "not found")
+                                                // rather than leaking whether a value exists.
                                                 let mut dht_lock = dht.lock().await;
 
-                                                let value = dht_lock.storage.get(&key);
+                                                let value = match dht_lock.storage.get_with_quota(&key, &hex::encode(&peer_id.0)) {
+                                                    Ok(v) => v,
+                                                    Err(e) => {
+                                                        println!("[dht] ⛔ FIND_VALUE rejected from {}: {}", crate::util::mask_hash_id(&peer_id), e);
+                                                        None
+                                                    }
+                                                };
 
                                                 
 
