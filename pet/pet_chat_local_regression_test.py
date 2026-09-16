@@ -87,9 +87,20 @@ def main() -> int:
 
                 sent = mock_post.call_args.kwargs["json"]
                 check("model name from the call is preserved in the wire request", sent["model"] == "heretic:q8")
+                # 2026-09-16: llm_gateway/client.py's _build_messages now merges
+                # multiple system strings into ONE system message — found live
+                # that heretic:q8's chat template hard-rejects more than one
+                # (400 "System message must be at the beginning"). A single
+                # merged message is compatible with every template; keeping all
+                # three as separate role:system entries was the actual bug.
+                system_messages = [m for m in sent["messages"] if m["role"] == "system"]
                 check(
-                    "all three system instructions present as SEPARATE messages, not merged into one string",
-                    sum(1 for m in sent["messages"] if m["role"] == "system") == 3,
+                    "all three system instructions present, merged into ONE system message",
+                    len(system_messages) == 1
+                    and all(part in system_messages[0]["content"] for part in (
+                        chat_local._BASE_CHARACTER_PROMPT,
+                        chat_local._STATE_FORMAT_INSTRUCTION,
+                    )),
                     repr(sent["messages"]),
                 )
                 check("full conversation history (messages_in) preserved after the system messages", sent["messages"][-1] == messages_in[-1])
