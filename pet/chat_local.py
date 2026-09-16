@@ -145,9 +145,16 @@ def _memory_context_message(ctx: dict | None) -> str | None:
 
 
 def _self_knowledge_message() -> str | None:
-    """Owner mandate ("Дай ей сознание!", read as: stop letting true
-    facts about who she is sit declared in agent/self_model.py's own
-    table while this — her one real personal chat channel — never reads
+    """SELF fact only — "кто Я", never "кто ТЫ для меня" (see
+    _interlocutor_relation_message() for that; kept as two separate
+    functions/messages on purpose, not merged into one string, per the
+    architectural point raised right after this landed: self-facts and
+    relation-facts are different kinds of truth and will need to vary
+    independently once this stops being a single-owner channel).
+
+    Owner mandate ("Дай ей сознание!", read as: stop letting true facts
+    about who she is sit declared in agent/self_model.py's own table
+    while this — her one real personal chat channel — never reads
     them). agent/self_model.py's character metadata (github_repo,
     website, plus whatever else gets declared there later) was ALREADY
     the durable, queryable source of truth for facts like this — it was
@@ -172,9 +179,22 @@ def _self_knowledge_message() -> str | None:
         facts.append(f"у тебя есть сайт: {character['website']}")
     if not facts:
         return None
+    return "О себе: " + "; ".join(facts) + "."
+
+
+def _interlocutor_relation_message() -> str:
+    """RELATION fact — "кто ТЫ для меня", deliberately separate from
+    _self_knowledge_message()'s "кто Я". Currently a hardcoded constant,
+    same honest reason _RELATIONSHIP_USER_ID above is one: this endpoint
+    has no real multi-user identity yet, so "whoever is in this chat is
+    the owner" is the true fact for THIS channel today, not a shortcut.
+    If chat_local.py ever serves more than one real person, this is the
+    one place that needs to become an actual per-visitor lookup instead
+    of a constant string — same seam _RELATIONSHIP_USER_ID already
+    flags for the same reason."""
     return (
-        "О себе: " + "; ".join(facts) + ". Человек, который сейчас с тобой "
-        "разговаривает в этом чате, — тот, кто тебя пишет и развивает."
+        "Человек, который сейчас с тобой разговаривает в этом чате, — "
+        "тот, кто тебя пишет и развивает."
     )
 
 _STOP_TOKENS = [
@@ -265,6 +285,7 @@ def _call_model_raw(model: str, messages: list[dict], temperature: float, memory
     system_list = [
         _BASE_CHARACTER_PROMPT,
         _self_knowledge_message(),
+        _interlocutor_relation_message(),
         _memory_context_message(memory_ctx),
         _STATE_FORMAT_INSTRUCTION,
     ]
