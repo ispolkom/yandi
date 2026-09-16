@@ -86,11 +86,67 @@ def _neutral(error: str) -> IntensityResult:
     return IntensityResult(ok=False, error=error, **_NEUTRAL_RESULT)
 
 
+def _parse_structured(data: dict) -> Tuple[str, IntensityResult] | None:
+    """STRUCTURED CONTRACT (mandate "structured self-report", live-
+    tested 2026-09-16 — see pet/chat_local.py's _STATE_SCHEMA docstring
+    for the full A/B/C/factorial/ablation series that motivated this):
+    when the backend honors llm_gateway's response_format=<schema>, the
+    ENTIRE raw generation is one JSON object {"reply": str, "state":
+    {...}} — no marker, no free-text-then-tag transition to regex out,
+    no natural-language worked example for the model to anchor on.
+    Returns None (not a result) when `data` doesn't have this shape, so
+    the caller falls through to the legacy STATE_MARKER path untouched —
+    this is a fallback-preserving ADD, never a replacement of it, since
+    not every backend honors response_format as a real schema (see
+    llm_gateway.remote_backend/llamacpp_backend: an unrecognized
+    response_format value is silently ignored there, not an error)."""
+    if "reply" not in data or "state" not in data:
+        return None
+    reply, state = data.get("reply"), data.get("state")
+    if not isinstance(reply, str) or not isinstance(state, dict):
+        return None
+    try:
+        result = IntensityResult(
+            ok=True,
+            is_insult=bool(state["is_insult"]),
+            is_apology=bool(state["is_apology"]),
+            severity=max(0.0, min(1.0, float(state["severity"]))),
+            sincerity=max(0.0, min(1.0, float(state["sincerity"]))),
+        )
+    except (KeyError, TypeError, ValueError) as e:
+        # Fail-open on the STRUCTURED DATA only (exactly like the legacy
+        # path) — the shape was right, the field values weren't; the
+        # reply the model actually wrote is still real and still shown.
+        return reply.strip(), _neutral(f"structured state missing/invalid fields: {e}")
+    if not reply.strip():
+        # Live-observed failure mode, same as the legacy tag-only case:
+        # a technically valid structured object with an empty reply is
+        # still "no visible reply" to the user, never fabricated text.
+        return "", IntensityResult(**{**result.__dict__, "error": "model produced no visible reply, tag only"})
+    return reply.strip(), result
+
+
 def parse_self_report(raw: str) -> Tuple[str, IntensityResult]:
     """Splits `raw` (the model's full, untouched generation) into
     (visible_reply, IntensityResult). `visible_reply` never contains the
     marker or the JSON that follows it — this is what pet/chat_local.py
-    is allowed to show the user."""
+    is allowed to show the user.
+
+    Tries the STRUCTURED contract first (see _parse_structured's own
+    docstring); falls through to the original free-text + trailing
+    "###YANDI_STATE###"-family tag parsing, UNCHANGED, for anything that
+    doesn't parse as that structured shape."""
+    stripped = raw.strip()
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            structured = _parse_structured(data)
+            if structured is not None:
+                return structured
+
     matches = list(_MARKER_RE.finditer(raw))
     if not matches:
         return raw.strip(), _neutral("no state marker found in model output")

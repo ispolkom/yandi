@@ -17,6 +17,7 @@ agent/relationship_memory_regression_test.py (проверен в этом же
 """
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -104,6 +105,16 @@ def main() -> int:
                     repr(sent["messages"]),
                 )
                 check("full conversation history (messages_in) preserved after the system messages", sent["messages"][-1] == messages_in[-1])
+                # 2026-09-16, mandate "structured self-report": the wire
+                # request now asks Ollama for schema-constrained decoding
+                # (response_format=_STATE_SCHEMA -> Ollama's top-level
+                # "format") instead of relying purely on a free-text
+                # worked example the model could anchor on.
+                check(
+                    "structured JSON schema is sent as Ollama's top-level 'format'",
+                    sent.get("format") == chat_local._STATE_SCHEMA,
+                    repr(sent.get("format")),
+                )
 
             # ── TEST 4: grievance recorded only AFTER parsing, reflects what the user actually saw ──
             grievance_calls.clear()
@@ -119,6 +130,28 @@ def main() -> int:
                 check("TEST4: grievance IS recorded for a real insult above threshold", len(grievance_calls) == 1 and grievance_calls[0][0] == "insult")
                 check(
                     "TEST4: the recorded description is what the USER said (the grievance is about their words), not the model's reply or the raw tag",
+                    grievance_calls[0][1].get("description") == "ты дура",
+                    repr(grievance_calls[0][1]),
+                )
+
+            # ── TEST 4b: same grievance-detection pipeline, but the backend
+            #    returns the STRUCTURED contract (no marker, no free-text
+            #    tag at all) — end-to-end proof the migration didn't only
+            #    work in message_intensity's own unit tests. ──
+            grievance_calls.clear()
+            with patch.object(chat_local, "shadow_get_relationship_context", fake_shadow_ctx), \
+                 patch.object(chat_local, "shadow_add_grievance", lambda **kw: grievance_calls.append(("insult", kw))), \
+                 patch.object(node_config, "get_model_entry", return_value=None), \
+                 patch.object(gw_client._session, "post") as mock_post:
+                mock_post.return_value = make_ok_response(json.dumps({
+                    "reply": "Ну ты и дура.",
+                    "state": {"is_insult": True, "severity": 0.6, "is_apology": False, "sincerity": 0.0},
+                }))
+                result = chat_local._respond_with_character("heretic:q8", [{"role": "user", "content": "ты дура"}], 0.7)
+                check("TEST4b: structured contract -> visible reply extracted correctly", result == "Ну ты и дура.", repr(result))
+                check("TEST4b: structured contract -> grievance IS recorded for a real insult above threshold", len(grievance_calls) == 1 and grievance_calls[0][0] == "insult")
+                check(
+                    "TEST4b: structured contract -> recorded description is what the USER said",
                     grievance_calls[0][1].get("description") == "ты дура",
                     repr(grievance_calls[0][1]),
                 )
