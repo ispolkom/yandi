@@ -58,7 +58,7 @@ from agent.db.sql.shadow_write import shadow_record_decision_event as add_decisi
 from agent.orch_query_archive import record_query as archive_query
 from agent.orch_schemas import OrchestratorResponse, OutcomeRecord
 from agent.experience_memory import get_experience_memory
-from agent.dataset_builder import get_dataset_builder
+from agent.memory_episodic import get_memory as get_episodic_memory
 from agent.orchestrator.epistemic.trust_gate import _calculate_delta_factors
 from agent.orchestrator.epistemic.canonical_trust import compute_canonical_trust
 from agent.orchestrator.runtime.profiling import report_pipeline_profile
@@ -583,37 +583,49 @@ def run_optimistic_respond(
                 "was_correct": synthesis_result.trust_level not in ["UNVERIFIED", "REJECTED"],
                 "had_conflict": False,
             })
-            # ---- СОХРАНЕНИЕ ЭПИЗОДА В DATASET ----
+            # ---- СОХРАНЕНИЕ ЭПИЗОДА В SQL-ПАМЯТЬ ----
             try:
-                dataset_builder = get_dataset_builder()
-                dataset_builder.record_episode({
+                episodic_memory = get_episodic_memory()
+                episodic_memory.add(
+                    event_type="query",
                     # Foundation Repair (episode<->trace identity): reuse the
                     # existing Trace identity (trace_id, already generated
                     # upstream and threaded through this whole function) as
-                    # the join key back to registry/dataset/orch_traces/*.jsonl
-                    # instead of leaving episodes unlinkable except by fragile
-                    # timestamp proximity (proven ~309s drift in the audit).
-                    "trace_id": trace_id,
-                    "query": query_to_use,
-                    "intent": intent_result.intent if intent_result else "unknown",
-                    "domain": epistemic_result.domain if not is_subjective_answer else "subjective",
-                    "trust": _canonical_trust_for_learning,
-                    "confidence": synthesis_result.confidence,
-                    "mistakes": reflection_result.mistakes if "reflection_result" in locals() else [],
-                    "lessons": reflection_result.lessons if "reflection_result" in locals() else [],
-                    "validation": {
-                        "accepted": claims_accepted if claims_accepted is not None else 0,
-                        "rejected": claims_rejected if claims_rejected is not None else 0,
-                        "total": total_claims if total_claims is not None else 0,
-                    },  # Закрываем validation
-                    "technical_errors": technical_errors if technical_errors is not None else [],
-                    "answer": synthesis_result.answer[:500] if synthesis_result.answer else "",
-                })
+                    # the join key back to persisted traces instead of leaving
+                    # episodes unlinkable except by fragile timestamp proximity
+                    # (proven ~309s drift in the audit). This writes to the
+                    # SQL-backed episode table through agent.memory_episodic,
+                    # not agent/dataset/episodes_*.jsonl.
+                    summary=f"Запрос: {query_to_use[:60]}",
+                    details={
+                        "trace_id": trace_id,
+                        "query": query_to_use,
+                        "intent": intent_result.intent if intent_result else "unknown",
+                        "domain": epistemic_result.domain if not is_subjective_answer else "subjective",
+                        "trust": _canonical_trust_for_learning,
+                        "confidence": synthesis_result.confidence,
+                        "mistakes": reflection_result.mistakes if "reflection_result" in locals() else [],
+                        "lessons": reflection_result.lessons if "reflection_result" in locals() else [],
+                        "validation": {
+                            "accepted": claims_accepted if claims_accepted is not None else 0,
+                            "rejected": claims_rejected if claims_rejected is not None else 0,
+                            "total": total_claims if total_claims is not None else 0,
+                        },
+                        "technical_errors": technical_errors if technical_errors is not None else [],
+                        "answer": synthesis_result.answer[:500] if synthesis_result.answer else "",
+                    },
+                    importance=synthesis_result.confidence,
+                    tags=[
+                        epistemic_result.domain if not is_subjective_answer else "subjective",
+                        intent_result.intent if intent_result else "unknown",
+                        _canonical_trust_for_learning,
+                    ],
+                )
                 if verbose:
-                    log("[V3] Эпизод сохранён в Dataset")
+                    log("[V3] Эпизод сохранён в SQL-память")
             except Exception as e:
                 if verbose:
-                    log(f"[V3] Ошибка сохранения Dataset: {e}")
+                    log(f"[V3] Ошибка сохранения эпизода в SQL-память: {e}")
 
             if not core_loop.state.is_running:
                 core_loop.run_cycle({

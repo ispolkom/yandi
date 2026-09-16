@@ -279,12 +279,12 @@ check(
     f"assign={_assign_idx} outcome_patch={_outcome_patch_idx} save={_save_trace_idx}",
 )
 
-# ── Foundation Repair P0-2: dataset/experience consumers (future
+# ── Foundation Repair P0-2: memory/experience consumers (future
 # ExperienceRecord material) must read a canonical-trust-derived value, not
 # the pre-cutover synthesizer-strand snapshot. ──
 check(
     "a canonical trust value is computed before the experience_memory / "
-    "dataset_builder writes (not just at the tail-end response cutover)",
+    "episodic_memory writes (not just at the tail-end response cutover)",
     "_canonical_trust_for_learning = _canonical_result[\"canonical_trust\"]" in wb_src,
     "",
 )
@@ -292,17 +292,17 @@ _learning_canonical_idx = next(
     (i for i, l in enumerate(_lines) if "_canonical_trust_for_learning = _canonical_result" in l),
     -1,
 )
-_dataset_write_idx = next(
-    (i for i, l in enumerate(_lines) if 'dataset_builder.record_episode(' in l),
+_episode_write_idx = next(
+    (i for i, l in enumerate(_lines) if 'episodic_memory.add(' in l),
     -1,
 )
 check(
-    "experience_memory.add_experience() and dataset_builder.record_episode() "
+    "experience_memory.add_experience() and episodic_memory.add() "
     "both consume the canonical trust value, computed before either call, "
     "not synthesis_result.trust_level's pre-reflection-downgrade snapshot",
-    0 <= _learning_canonical_idx < _dataset_write_idx
+    0 <= _learning_canonical_idx < _episode_write_idx
     and wb_src.count('"trust": _canonical_trust_for_learning,') == 2,
-    f"canonical_computed={_learning_canonical_idx} dataset_write={_dataset_write_idx} "
+    f"canonical_computed={_learning_canonical_idx} episode_write={_episode_write_idx} "
     f"occurrences={wb_src.count(chr(34) + 'trust' + chr(34) + ': _canonical_trust_for_learning,')}",
 )
 
