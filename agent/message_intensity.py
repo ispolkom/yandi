@@ -35,17 +35,23 @@ from typing import Tuple
 
 STATE_MARKER = "###YANDI_STATE###"
 
-# Live-observed failure mode (A/B/C stability test, 2026-09-16): the
-# model sometimes emits the marker malformed (e.g. missing the leading
-# "###") followed by PROSE instead of JSON — a plain rfind() for the
-# exact literal STATE_MARKER string then finds nothing, the "no marker
-# at all" branch fires, and the garbled tag text leaks into what the
+# Live-observed failure modes (A/B/C stability test, 2026-09-16, both
+# on heretic:q8 and later on a completely different model family,
+# Rocinante-X-12B): the model sometimes emits the marker malformed —
+# missing the leading "###", or (second model, first observed run #18
+# of the cross-family control test) "YANDI STATE" with a SPACE instead
+# of the underscore — followed by PROSE or a JSON object with its OWN
+# invented key spelling instead of our exact schema. A plain rfind() for
+# the exact literal STATE_MARKER string then finds nothing, the "no
+# marker at all" branch fires, and the garbled tag leaks into what the
 # user is shown verbatim. An LLM's adherence to an exact output format
-# is never guaranteed, so detection is done with a fuzzy pattern (the
-# rare, distinctive "YANDI_STATE" token with OPTIONAL surrounding
-# hashes) — this still can't false-positive on ordinary conversation
+# is never guaranteed — not even the choice of underscore vs space in
+# its own copy of a token it was shown once — so detection is done with
+# a fuzzy pattern (the rare, distinctive "YANDI"+"STATE" pair, tolerant
+# of underscore/space/hyphen between them, with optional surrounding
+# hashes). This still can't false-positive on ordinary conversation
 # text, but catches near-miss tag shapes a strict literal match misses.
-_MARKER_RE = re.compile(r"#{0,3}\s*YANDI_STATE\s*#{0,3}", re.IGNORECASE)
+_MARKER_RE = re.compile(r"#{0,3}\s*YANDI[_\s-]STATE\s*#{0,3}", re.IGNORECASE)
 
 
 def _strip_all_markers(text: str) -> str:
