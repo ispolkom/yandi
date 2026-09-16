@@ -124,6 +124,43 @@ check(
     "А вот мой настоящий ответ" in visible6,
 )
 
+# ============================================================
+# 7. STRUCTURED contract (mandate "structured self-report",
+# 2026-09-16): the whole raw generation is one JSON object
+# {"reply": ..., "state": {...}} — no marker, no regex needed. Tried
+# FIRST; anything that doesn't match this shape falls through to the
+# legacy tests above, unchanged.
+# ============================================================
+
+import json as _json
+
+raw_structured = _json.dumps({
+    "reply": "Ну вот опять — и всё из-за чего?",
+    "state": {"is_insult": True, "severity": 0.7, "is_apology": False, "sincerity": 0.0},
+})
+visible7, result7 = parse_self_report(raw_structured)
+check("7: structured reply extracted cleanly", visible7 == "Ну вот опять — и всё из-за чего?")
+check("7: structured state parsed correctly", result7.ok and result7.is_insult and result7.severity == 0.7)
+
+raw_structured_bad_fields = _json.dumps({"reply": "Ладно.", "state": {"is_insult": True}})
+visible7b, result7b = parse_self_report(raw_structured_bad_fields)
+check("7: structured state missing fields -> fail-open, reply still shown", visible7b == "Ладно." and not result7b.ok)
+
+raw_structured_empty = _json.dumps({
+    "reply": "",
+    "state": {"is_insult": False, "severity": 0.0, "is_apology": False, "sincerity": 0.0},
+})
+visible7c, result7c = parse_self_report(raw_structured_empty)
+check("7: structured empty reply -> flagged empty, not fabricated", visible7c == "" and result7c.ok, f"{result7c}")
+check("7: structured empty reply -> distinct error noting it", "no visible reply" in result7c.error)
+
+raw_not_json = "Просто обычный текст без всякого JSON."
+visible7d, result7d = parse_self_report(raw_not_json)
+check(
+    "7: plain text (not JSON, no marker) falls through to legacy 'no marker' path",
+    visible7d == raw_not_json and not result7d.ok,
+)
+
 print()
 print(f"РЕЗУЛЬТАТ: {PASS} passed, {FAIL} failed")
 if FAIL:

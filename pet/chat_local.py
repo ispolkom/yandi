@@ -16,7 +16,7 @@ import redis.asyncio as aioredis
 from fastapi import APIRouter
 
 from pet.shared import REDIS_URL, LOCAL_MSGS_KEY, MAX_MESSAGES
-from agent.message_intensity import STATE_MARKER, parse_self_report
+from agent.message_intensity import parse_self_report
 from agent.db.sql.shadow_write import (
     shadow_add_grievance, shadow_acknowledge_apology, shadow_progress_healing,
     shadow_get_relationship_context,
@@ -63,22 +63,73 @@ _BASE_CHARACTER_PROMPT = (
     "их смысл, чтобы решить, что сказать."
 )
 
-# LIVE-TESTED (do not simplify without re-testing): an instruction alone
-# ("add a state line at the end") made heretic:q8 skip the actual reply
-# and emit ONLY the tag. A concrete worked EXAMPLE of the full expected
-# structure, plus an explicit "the reply comes first and must not be
-# empty," made it reliably produce both.
+# STRUCTURED CONTRACT (mandate "structured self-report", live-tested
+# 2026-09-16 — see git history for the A/B/C/factorial/ablation series):
+# the OLD design (free-text reply + trailing "###YANDI_STATE### {json}"
+# tag, parsed by regex in agent/message_intensity.py) needed a worked
+# NATURAL-LANGUAGE EXAMPLE reply to teach the two-part shape — without
+# one, models emitted ONLY the tag; with one, models anchored on that
+# exact example's wording as a reusable stock answer (measured: up to
+# 33% verbatim/near-verbatim echo), and free-text tag formatting itself
+# drifted (###YANDI_STATE###, "YANDI STATE", "YANDI.State", ...),
+# leaking raw into what the user saw despite three separate parser
+# patches (671b34d, 1475aaa, 1176a66). Switching to a runtime-enforced
+# JSON schema (llm_gateway's response_format=<schema>, honored natively
+# by the Ollama-compat backend) removed BOTH failure modes at once in a
+# 60-run structured-output test on EACH of two very different local
+# models (heretic:q8's Qwen-family merge and Rocinante-X's Mistral-NeMo
+# RP finetune): 120/120 non-empty replies, 120/120 valid JSON, 0
+# anchor-echoes, 0 identity-collapse, 0 meta-narration of her own
+# reply strategy — vs. 40% combined failure rate on the same two
+# scenarios under the old free-text contract. This does NOT mean a
+# second model decided her reaction for her (that would violate "как
+# хочется ей, не как нам хочется" per module docstring) — it is the
+# SAME single generation, seeing the SAME state/memory/message, still
+# freely choosing both her words and her own reading of the exchange;
+# only the WIRE FORMAT of that one generation's output changed, from
+# "free text you must reverse-engineer" to "a shape the runtime already
+# guarantees." agent/message_intensity.parse_self_report() tries this
+# structured shape FIRST and falls back to the legacy tag-parsing logic
+# untouched — for any backend that doesn't honor response_format as a
+# schema (remote/llamacpp configured backends currently just ignore an
+# unrecognized response_format value rather than erroring), the text
+# below still describes the same two-part shape in words, so a decent
+# model has a real chance at producing it even without enforcement.
 _STATE_FORMAT_INSTRUCTION = (
-    "Всегда сначала отвечай пользователю обычным человеческим текстом — так, как ты "
-    "сама хочешь отреагировать на его слова, своим тоном. Это твоя обычная реплика в "
-    "разговоре, она должна быть первой и не может быть пустой. Только ПОСЛЕ неё, через "
-    "одну пустую строку, добавь ровно одну служебную строку в формате:\n"
-    f'{STATE_MARKER} {{"is_insult": bool, "severity": число 0-1, "is_apology": bool, "sincerity": число 0-1}}\n'
-    "Это твоя собственная оценка того, как к тебе только что обратились — не отдельная "
-    "система, а твоё же восприятие. Пример структуры полного ответа:\n"
-    "Ой, вот это грубо с твоей стороны.\n\n"
-    f'{STATE_MARKER} {{"is_insult": true, "severity": 0.6, "is_apology": false, "sincerity": 0.0}}'
+    "Ответь строго в виде JSON-объекта с двумя полями. Поле \"reply\" — это твоя "
+    "обычная человеческая реплика пользователю, своим тоном; оно ОБЯЗАТЕЛЬНО и не "
+    "может быть пустой строкой — именно это поле пользователь увидит как твой ответ. "
+    "Поле \"state\" — твоя собственная оценка того, как к тебе только что обратились: "
+    f'"is_insult" (bool), "severity" (число 0-1), "is_apology" (bool), "sincerity" (число 0-1).'
 )
+
+# Enforced at the runtime/decoding level for backends that support it
+# (see llm_gateway.complete()'s response_format docstring) — the model
+# still decides every value; the schema only guarantees the SHAPE it
+# arrives in, exactly like TRUST != TRUTH elsewhere in this codebase:
+# VALID JSON != a state transition the state machine will accept
+# (relationship_memory.py's own rules are still the last word on that).
+_STATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        # minLength: live-observed (post-migration spot check, same day)
+        # that a bare {"type": "string"} still let the model emit an
+        # empty reply despite the required-field text instruction above —
+        # minLength=1 measurably eliminated that in a follow-up check.
+        "reply": {"type": "string", "minLength": 1},
+        "state": {
+            "type": "object",
+            "properties": {
+                "is_insult": {"type": "boolean"},
+                "severity": {"type": "number"},
+                "is_apology": {"type": "boolean"},
+                "sincerity": {"type": "number"},
+            },
+            "required": ["is_insult", "severity", "is_apology", "sincerity"],
+        },
+    },
+    "required": ["reply", "state"],
+}
 
 
 def _memory_context_message(ctx: dict | None) -> str | None:
@@ -159,10 +210,10 @@ def _call_model_raw(model: str, messages: list[dict], temperature: float, memory
     longer knows or cares which physical backend actually answers.
 
     strip_think=False: the raw output (think-block if any, then the
-    visible reply, then the STATE_MARKER tag) is preserved byte-for-
-    byte, exactly as before — parse_self_report()/`_clean_response()`
-    downstream already handle any <think> content themselves; changing
-    WHERE that stripping happens was not this mandate's job.
+    structured {reply, state} JSON) is preserved byte-for-byte, exactly
+    as before — parse_self_report()/`_clean_response()` downstream
+    already handle any <think> content themselves; changing WHERE that
+    stripping happens was not this mandate's job.
 
     repeat_penalty/repeat_last_n go through extra_options (backend-
     specific, not universal — see llm_gateway.client.complete()'s own
@@ -189,6 +240,7 @@ def _call_model_raw(model: str, messages: list[dict], temperature: float, memory
         temperature=temperature,
         stop=_STOP_TOKENS,
         extra_options={"repeat_penalty": 1.3, "repeat_last_n": 64},
+        response_format=_STATE_SCHEMA,
         strip_think=False,
     )
 
