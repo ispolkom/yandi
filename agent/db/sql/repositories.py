@@ -650,7 +650,7 @@ def list_delayed_validation_events(conn, run_id: str, limit: int = 30) -> List[D
             (run_id, limit),
         )
         rows = cur.fetchall()
-    rows.reverse()
+    rows = list(reversed(rows))
     return rows
 
 
@@ -1458,7 +1458,7 @@ def get_episodes_by_type(conn, event_type: str, limit: int = 20) -> List[Dict[st
             (event_type, limit),
         )
         rows = cur.fetchall()
-    rows.reverse()
+    rows = list(reversed(rows))
     return [_decode_episode_json(r) for r in rows]
 
 
@@ -1470,7 +1470,7 @@ def get_episodes_by_tag(conn, tag: str, limit: int = 20) -> List[Dict[str, Any]]
             (tag, limit),
         )
         rows = cur.fetchall()
-    rows.reverse()
+    rows = list(reversed(rows))
     return [_decode_episode_json(r) for r in rows]
 
 
@@ -1488,7 +1488,7 @@ def get_recent_episodes(conn, limit: int = 20) -> List[Dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM episode ORDER BY created_at DESC LIMIT %s", (limit,))
         rows = cur.fetchall()
-    rows.reverse()
+    rows = list(reversed(rows))
     return [_decode_episode_json(r) for r in rows]
 
 
@@ -2117,7 +2117,7 @@ def list_decision_journal_entries(conn, user_id: str, limit: int = 1000) -> List
             (user_id, limit),
         )
         rows = cur.fetchall()
-    rows.reverse()
+    rows = list(reversed(rows))
     return [_decode_decision_journal_json(r) for r in rows]
 
 
@@ -2289,7 +2289,7 @@ def list_inner_state_events(conn, user_id: str, limit: int = 200) -> List[Dict[s
             (user_id, limit),
         )
         rows = cur.fetchall()
-    rows.reverse()
+    rows = list(reversed(rows))
     return rows
 
 
@@ -2393,7 +2393,7 @@ def list_trait_changes(conn, since=None, limit: int = 500) -> List[Dict[str, Any
             return cur.fetchall()
         cur.execute("SELECT * FROM trait_change ORDER BY created_at DESC LIMIT %s", (limit,))
         rows = cur.fetchall()
-    rows.reverse()
+    rows = list(reversed(rows))
     return rows
 
 
