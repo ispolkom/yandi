@@ -92,19 +92,25 @@ def _build_messages(
 
     Ровно один из (prompt, messages) должен быть задан — это проверяет
     сам вызывающий код (complete()), здесь просто сборка:
-    - system: одна строка (старое поведение, один system-message) ИЛИ
-      список строк (мандат "chat_local gateway migration" — несколько
-      независимых system-инструкций, как у pet/chat_local.py: характер,
-      память отношений, формат self-report — каждая own message, не
-      склеены в одну строку, чтобы не менять то, что уже живо
-      протестировано против конкретной модели).
+    - system: одна строка ИЛИ список строк (chat_local.py передаёт
+      несколько независимых system-инструкций: характер, память
+      отношений, формат self-report). Live-тест 2026-09-16 против
+      реально установленной модели (heretic:q8) нашёл, что предыдущее
+      поведение (каждая строка — отдельное role:system-сообщение) не
+      универсально: у этой модели Jinja-шаблон чата жёстко требует РОВНО
+      ОДНО system-сообщение и именно в начале — "System message must be
+      at the beginning", 400 Bad Request на что угодно ещё. Список
+      теперь склеивается в ОДНО system-сообщение (двойным переводом
+      строки — абзацами, содержимое не меняется) — это принимает любой
+      шаблон, тогда как N отдельных system-сообщений принимают не все.
     - messages, если задан — ПОЛНАЯ история разговора (уже включая
       последнюю реплику пользователя, как её присылает клиент) —
       заменяет одиночный prompt целиком, для настоящего multi-turn чата
       (chat_local.py), а не одноразовых prompt'ов, как везде в agent/.
     """
     sys_list = system if isinstance(system, list) else ([system] if system else [])
-    result = [{"role": "system", "content": s} for s in sys_list if s]
+    sys_list = [s for s in sys_list if s]
+    result = [{"role": "system", "content": "\n\n".join(sys_list)}] if sys_list else []
     if messages is not None:
         result.extend(messages)
     elif prompt is not None:
