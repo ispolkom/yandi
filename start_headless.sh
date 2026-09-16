@@ -7,6 +7,7 @@ set -e
 PORT=${1:-9010}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="python3"
+HOST="${YANDI_PET_HOST:-127.0.0.1}"
 
 # Зависимости
 pip install -q fastapi uvicorn redis requests pydantic httpx trafilatura 2>/dev/null
@@ -33,7 +34,7 @@ if getent group "$REQUIRED_SQL_GROUP" >/dev/null \
     END { exit found ? 0 : 1 }
   '; then
   sg "$REQUIRED_SQL_GROUP" -c \
-    "cd $(printf "%q" "$SCRIPT_DIR") && exec $(printf "%q" "$PYTHON") -m uvicorn pet.council_chat_server:app --host 0.0.0.0 --port $(printf "%q" "$PORT") --log-level warning"
+    "cd $(printf "%q" "$SCRIPT_DIR") && exec $(printf "%q" "$PYTHON") -m uvicorn pet.council_chat_server:app --host $(printf "%q" "$HOST") --port $(printf "%q" "$PORT") --log-level warning"
   exit $?
 fi
 
@@ -41,10 +42,11 @@ cd "$SCRIPT_DIR"
 
 echo "🧠 YANDI Knowledge Server (headless)"
 echo "   Port: $PORT"
+echo "   Host: $HOST"
 echo "   Mode: storage + orchestrator (no browser)"
 echo ""
 
 python3 -m uvicorn pet.council_chat_server:app \
-    --host 0.0.0.0 \
+    --host "$HOST" \
     --port "$PORT" \
     --log-level warning

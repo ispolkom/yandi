@@ -3377,7 +3377,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="YANDI PET — AI council chat server")
     parser.add_argument("--port",            type=int, default=9010,      help="HTTP port (default: 9010)")
-    parser.add_argument("--host",            default="0.0.0.0",            help="Bind host")
+    parser.add_argument("--host",            default="127.0.0.1",          help="Bind host")
     parser.add_argument("--allow-path",      action="append", dest="allow_paths", metavar="PATH",
                         help="Разрешить доступ tools к дополнительной папке (можно несколько)")
     parser.add_argument("--allow-shell-full", action="store_true",         help="Снять ограничения sandbox для shell")
