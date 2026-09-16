@@ -45,13 +45,15 @@ STATE_MARKER = "###YANDI_STATE###"
 # the exact literal STATE_MARKER string then finds nothing, the "no
 # marker at all" branch fires, and the garbled tag leaks into what the
 # user is shown verbatim. An LLM's adherence to an exact output format
-# is never guaranteed — not even the choice of underscore vs space in
-# its own copy of a token it was shown once — so detection is done with
-# a fuzzy pattern (the rare, distinctive "YANDI"+"STATE" pair, tolerant
-# of underscore/space/hyphen between them, with optional surrounding
-# hashes). This still can't false-positive on ordinary conversation
-# text, but catches near-miss tag shapes a strict literal match misses.
-_MARKER_RE = re.compile(r"#{0,3}\s*YANDI[_\s-]STATE\s*#{0,3}", re.IGNORECASE)
+# is never guaranteed — not even the choice of underscore vs space vs
+# period as separator in its own copy of a token it was shown once — so
+# detection is done with a fuzzy pattern (the rare, distinctive
+# "YANDI"+"STATE" pair, tolerant of underscore/space/hyphen/period
+# between them, with optional surrounding hashes). This still can't
+# false-positive on ordinary conversation text, but catches near-miss
+# tag shapes a strict literal match misses. Third live-observed variant
+# (example-ablation test, 2026-09-16): "###YANDI.State###".
+_MARKER_RE = re.compile(r"#{0,3}\s*YANDI[_\s.-]STATE\s*#{0,3}", re.IGNORECASE)
 
 
 def _strip_all_markers(text: str) -> str:
