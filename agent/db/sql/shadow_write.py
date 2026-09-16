@@ -661,15 +661,25 @@ def shadow_progress_healing(*, grievance_id: str, log=None, verbose: bool = Fals
 def shadow_get_relationship_context(*, user_id: str, log=None, verbose: bool = False) -> Optional[dict]:
     """Read-only: the RAW FACTS of the most severe active grievance (if
     any) — description/severity/status, nothing interpreted — for
-    pet/chat_local.py to state plainly in the system prompt. Returns
-    None (not an empty dict) both when SQL is unreachable AND when
-    there is genuinely no active grievance — the caller treats both
-    identically (nothing to mention), so this distinction doesn't need
-    to survive the shadow-write boundary."""
+    pet/chat_local.py to state plainly in the system prompt.
+
+    Returns:
+      {"available": True, "grievance": None} when memory is reachable
+      and empty;
+      {"available": True, "grievance": {...}} when an active grievance
+      exists;
+      None only when the SQL-backed memory could not be read.
+
+    This deliberately preserves UNKNOWN != EMPTY across the shadow
+    boundary. A SQL outage must not become the false statement
+    "there are no open grievances" in YANDI's own prompt."""
     def _do(conn):
         grievance = relationship_memory.most_severe_active_grievance(conn, user_id)
         if not grievance:
-            return None
-        return {"grievance_id": grievance["id"], **relationship_memory.memory_facts(grievance)}
+            return {"available": True, "grievance": None}
+        return {
+            "available": True,
+            "grievance": {"grievance_id": grievance["id"], **relationship_memory.memory_facts(grievance)},
+        }
 
     return _shadow(log, verbose, "get_relationship_context", _do)

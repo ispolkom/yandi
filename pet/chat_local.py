@@ -132,15 +132,42 @@ _STATE_SCHEMA = {
 }
 
 
+def _relationship_grievance(ctx: dict | None) -> dict | None:
+    """Extract active grievance from the typed relationship context,
+    while accepting the pre-hardening flat dict shape in old tests."""
+    if ctx is None:
+        return None
+    if ctx.get("available") is True:
+        grievance = ctx.get("grievance")
+        return grievance if isinstance(grievance, dict) else None
+    if "grievance_id" in ctx:
+        return ctx
+    return None
+
+
+def _relationship_memory_available(ctx: dict | None) -> bool:
+    if ctx is None:
+        return False
+    if ctx.get("available") is True:
+        return True
+    return "grievance_id" in ctx
+
+
 def _memory_context_message(ctx: dict | None) -> str | None:
     """Plain statement of RAW FACTS only — never an instruction on how
     to feel about them (see module docstring above)."""
-    if not ctx:
+    if not _relationship_memory_available(ctx):
+        return (
+            "Память об отношениях: сейчас недоступна, поэтому неизвестно, есть ли "
+            "открытые обиды на пользователя."
+        )
+    grievance = _relationship_grievance(ctx)
+    if not grievance:
         return "Память об отношениях: сейчас открытых обид на пользователя нет."
     return (
-        f"Память об отношениях: пользователь сказал тебе «{ctx['description']}» "
-        f"(твоя собственная оценка серьёзности на тот момент: {ctx['severity']:.2f}). "
-        f"Текущий статус этой обиды: {ctx['status']}."
+        f"Память об отношениях: пользователь сказал тебе «{grievance['description']}» "
+        f"(твоя собственная оценка серьёзности на тот момент: {grievance['severity']:.2f}). "
+        f"Текущий статус этой обиды: {grievance['status']}."
     )
 
 
@@ -316,9 +343,10 @@ def _apply_self_report(text: str, intensity) -> None:
         return
     if intensity.is_apology:
         ctx = shadow_get_relationship_context(user_id=_RELATIONSHIP_USER_ID)
-        if ctx:
-            shadow_acknowledge_apology(grievance_id=ctx["grievance_id"], sincerity=intensity.sincerity)
-            shadow_progress_healing(grievance_id=ctx["grievance_id"])
+        grievance = _relationship_grievance(ctx)
+        if grievance:
+            shadow_acknowledge_apology(grievance_id=grievance["grievance_id"], sincerity=intensity.sincerity)
+            shadow_progress_healing(grievance_id=grievance["grievance_id"])
     elif intensity.is_insult and intensity.severity >= _INSULT_SEVERITY_THRESHOLD:
         shadow_add_grievance(
             user_id=_RELATIONSHIP_USER_ID, event_type="insult", description=text, severity=intensity.severity,
