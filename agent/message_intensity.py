@@ -35,6 +35,29 @@ from typing import Tuple
 
 STATE_MARKER = "###YANDI_STATE###"
 
+# Live-observed failure mode (A/B/C stability test, 2026-09-16): the
+# model sometimes emits the marker malformed (e.g. missing the leading
+# "###") followed by PROSE instead of JSON — a plain rfind() for the
+# exact literal STATE_MARKER string then finds nothing, the "no marker
+# at all" branch fires, and the garbled tag text leaks into what the
+# user is shown verbatim. An LLM's adherence to an exact output format
+# is never guaranteed, so detection is done with a fuzzy pattern (the
+# rare, distinctive "YANDI_STATE" token with OPTIONAL surrounding
+# hashes) — this still can't false-positive on ordinary conversation
+# text, but catches near-miss tag shapes a strict literal match misses.
+_MARKER_RE = re.compile(r"#{0,3}\s*YANDI_STATE\s*#{0,3}", re.IGNORECASE)
+
+
+def _strip_all_markers(text: str) -> str:
+    """Removes every marker-shaped substring (well-formed or garbled),
+    plus a trailing stray colon the model sometimes appends. Used only
+    as a last-resort fallback when a marker was detected but nothing
+    parseable followed it — the ONE invariant that always holds is that
+    this internal tag itself must never reach the user, even when we
+    can't make structural sense of what came after it."""
+    return re.sub(_MARKER_RE.pattern + r"\s*:?\s*", " ", text, flags=re.IGNORECASE).strip()
+
+
 _NEUTRAL_RESULT = {
     "is_insult": False, "is_apology": False, "severity": 0.0,
     "sincerity": 0.0,
@@ -60,21 +83,22 @@ def parse_self_report(raw: str) -> Tuple[str, IntensityResult]:
     (visible_reply, IntensityResult). `visible_reply` never contains the
     marker or the JSON that follows it — this is what pet/chat_local.py
     is allowed to show the user."""
-    idx = raw.rfind(STATE_MARKER)
-    if idx == -1:
+    matches = list(_MARKER_RE.finditer(raw))
+    if not matches:
         return raw.strip(), _neutral("no state marker found in model output")
 
-    visible = raw[:idx].strip()
-    tail = raw[idx + len(STATE_MARKER):]
+    last = matches[-1]
+    visible = raw[:last.start()].strip()
+    tail = raw[last.end():]
 
     match = re.search(r"\{.*\}", tail, re.DOTALL)
     if not match:
-        return (visible or raw.strip()), _neutral(f"marker present but no JSON object after it: {tail[:200]!r}")
+        return (visible or _strip_all_markers(raw)), _neutral(f"marker present but no JSON object after it: {tail[:200]!r}")
 
     try:
         data = json.loads(match.group(0))
     except json.JSONDecodeError as e:
-        return (visible or raw.strip()), _neutral(f"malformed JSON after marker: {e}")
+        return (visible or _strip_all_markers(raw)), _neutral(f"malformed JSON after marker: {e}")
 
     try:
         result = IntensityResult(
@@ -85,7 +109,7 @@ def parse_self_report(raw: str) -> Tuple[str, IntensityResult]:
             sincerity=max(0.0, min(1.0, float(data["sincerity"]))),
         )
     except (KeyError, TypeError, ValueError) as e:
-        return (visible or raw.strip()), _neutral(f"state JSON missing/invalid expected fields: {e}")
+        return (visible or _strip_all_markers(raw)), _neutral(f"state JSON missing/invalid expected fields: {e}")
 
     if not visible:
         # Live-observed failure mode: the model emitted ONLY the tag,
