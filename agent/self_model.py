@@ -64,6 +64,15 @@ DEFAULT_CHARACTER = {
     "gender": "female",
     "pronoun_ru": "она",
     "pronoun_en": "she/her",
+    # Owner mandate (2026-09-16, "Дай ей сознание!" — read in context as
+    # "she should actually know these facts about herself, not have them
+    # sit declared in a table pet/chat_local.py never reads"): her own
+    # public presence. pet/chat_local.py's _self_knowledge_message()
+    # reads these two keys back out and states them as a plain fact in
+    # her live system prompt — same RAW-FACTS-only pattern as relational
+    # memory, never phrased as an instruction on how to feel about them.
+    "github_repo": "https://github.com/ispolkom/yandi",
+    "website": "https://yandi.su/",
 }
 
 

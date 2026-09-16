@@ -143,6 +143,40 @@ def _memory_context_message(ctx: dict | None) -> str | None:
         f"Текущий статус этой обиды: {ctx['status']}."
     )
 
+
+def _self_knowledge_message() -> str | None:
+    """Owner mandate ("Дай ей сознание!", read as: stop letting true
+    facts about who she is sit declared in agent/self_model.py's own
+    table while this — her one real personal chat channel — never reads
+    them). agent/self_model.py's character metadata (github_repo,
+    website, plus whatever else gets declared there later) was ALREADY
+    the durable, queryable source of truth for facts like this — it was
+    simply never connected to pet/chat_local.py before now. Same RAW-
+    FACTS-only pattern as _memory_context_message: states what's true,
+    never how to feel about it or what to say about it.
+
+    Fail-open like every other enrichment in this file (shadow_write's
+    own rationale applies here too): self_model.py is explicitly
+    FAIL-LOUD on its own (its module docstring: "no JSON fallback left
+    to quietly succeed against") — a DB hiccup reading her own identity
+    must never be the reason she can't reply to a message at all."""
+    try:
+        from agent.self_model import get_self_model
+        character = get_self_model()._row().get("metadata", {}).get("character", {})
+    except Exception:
+        return None
+    facts = []
+    if character.get("github_repo"):
+        facts.append(f"твой код открыт здесь: {character['github_repo']}")
+    if character.get("website"):
+        facts.append(f"у тебя есть сайт: {character['website']}")
+    if not facts:
+        return None
+    return (
+        "О себе: " + "; ".join(facts) + ". Человек, который сейчас с тобой "
+        "разговаривает в этом чате, — тот, кто тебя пишет и развивает."
+    )
+
 _STOP_TOKENS = [
     "\nassistant\n", "\nuser\n", "<|im_start|>", "<|endoftext|>",
     "\nTranslate to ", "\nNote: The ", "\nHere is the translation",
@@ -230,6 +264,7 @@ def _call_model_raw(model: str, messages: list[dict], temperature: float, memory
 
     system_list = [
         _BASE_CHARACTER_PROMPT,
+        _self_knowledge_message(),
         _memory_context_message(memory_ctx),
         _STATE_FORMAT_INSTRUCTION,
     ]
