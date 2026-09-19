@@ -218,6 +218,52 @@ _SEMANTIC_LEGACY_INSTRUCTION = (
 )
 
 
+def _state_schema_prompt_hint(state_schema: dict | None) -> str:
+    """Name the expected state fields in words, from the caller's own schema.
+
+    Live smoke test 2026-09-19 (real llama.cpp target, json_object
+    contract): the shared instruction said only "state (object or null),
+    use only the expected fields" and never NAMED them. With no decoder-
+    enforced schema on that contract the model returned "state": null on
+    4 of 5 turns and an invented {"mood": ..., "response_style": ...} on
+    the fifth — so no state ever reached the caller, and an insult/apology
+    changed nothing in persistent memory. After the field names were added,
+    a second live finding: the model put null into a listed field that did
+    not apply to that turn ("sincerity": null on a non-apology), the gateway
+    (which only checks that required KEYS are present) passed it, and the
+    caller's strict float() conversion then discarded the whole state — so
+    the hint also says listed fields may not be null. Where the decoder enforces the
+    schema (semantic_json_schema) the field names travel in the schema
+    itself; where it does not, the only place they can travel is the
+    prompt. Rendered generically from the schema (names, types, optional
+    range/description) — no PET-specific wording lives in the gateway.
+    """
+    if not isinstance(state_schema, dict):
+        return ""
+    props = state_schema.get("properties")
+    if not isinstance(props, dict) or not props:
+        return ""
+    required = set(state_schema.get("required") or [])
+    parts = []
+    for name, spec in props.items():
+        spec = spec if isinstance(spec, dict) else {}
+        details = [str(spec.get("type", "any"))]
+        if "minimum" in spec and "maximum" in spec:
+            details.append(f"от {spec['minimum']} до {spec['maximum']}")
+        if name in required:
+            details.append("обязательно")
+        if spec.get("description"):
+            details.append(str(spec["description"]))
+        parts.append(f'"{name}" ({", ".join(details)})')
+    return (
+        " Объект state должен содержать ровно эти поля: " + "; ".join(parts) + ". "
+        "Других полей не добавляй. Значения этих полей не могут быть null: если "
+        "поле неприменимо, используй 0 для числа и false для boolean. Всегда "
+        "заполняй state, когда можешь оценить ситуацию; null допустим только для "
+        "самого state, и только если оценить её невозможно."
+    )
+
+
 def _semantic_result_schema(requirement: SemanticOutputRequirement) -> dict:
     state_schema = requirement.state_schema or {"type": "object"}
     required = ["reply"]
@@ -243,9 +289,13 @@ def _semantic_contract_from_target(
             OutputContract(name="semantic_json_schema", response_format=_semantic_result_schema(requirement)),
             _SEMANTIC_JSON_INSTRUCTION,
         )
+    hint = _state_schema_prompt_hint(requirement.state_schema)
     if target.capabilities.json_object:
-        return OutputContract(name="semantic_json_object", response_format="json"), _SEMANTIC_JSON_INSTRUCTION
-    return OutputContract(name="semantic_legacy_marker", response_format=None), _SEMANTIC_LEGACY_INSTRUCTION
+        return (
+            OutputContract(name="semantic_json_object", response_format="json"),
+            _SEMANTIC_JSON_INSTRUCTION + hint,
+        )
+    return OutputContract(name="semantic_legacy_marker", response_format=None), _SEMANTIC_LEGACY_INSTRUCTION + hint
 
 
 def _append_system_instruction(system: str | list[str] | None, instruction: str) -> str | list[str]:

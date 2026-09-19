@@ -1092,6 +1092,72 @@ def _run_semantic_output_checks(client) -> None:
         check("semantic J: reverse fallback uses legacy contract for target B", second_legacy.calls[0][2].name == "semantic_legacy_marker", repr(second_legacy.calls[0][2]))
         check("semantic J: reverse fallback reply normalized", result.reply == "fallback legacy", repr(result))
 
+    # semantic K (live smoke test 2026-09-19, real llama.cpp target): on the
+    # json_object contract there is no decoder-enforced schema, and the
+    # instruction used to say only "state (object or null), expected
+    # fields" without NAMING them — the real model answered "state": null
+    # (4/5 turns) or invented {"mood": ...} (1/5), so no state ever reached
+    # the caller. The field names must travel in the prompt there.
+    def wire_system_text(adapter):
+        wire = adapter.calls[0][0].messages
+        return "\n".join(m["content"] for m in wire if m["role"] == "system")
+
+    fields = ("is_insult", "severity", "is_apology", "sincerity")
+    object_adapter_k = FakeAdapter(
+        '{"reply": "Ладно.", "state": {"is_insult": false, "severity": 0.0, "is_apology": false, "sincerity": 0.0}}',
+        BackendCapabilities(json_object=True, json_schema=False),
+    )
+    with patch.object(client, "resolve_target", return_value=make_target(object_adapter_k)):
+        client.complete_semantic(messages=[{"role": "user", "content": "q"}], model="m", requirement=requirement)
+        sys_text = wire_system_text(object_adapter_k)
+        check("semantic K: json_object prompt names every state field", all(f in sys_text for f in fields), sys_text)
+        check("semantic K: json_object prompt lists field types", "boolean" in sys_text and "number" in sys_text, sys_text)
+        check("semantic K: json_object prompt forbids inventing other fields", "Других полей не добавляй" in sys_text, sys_text)
+        check(
+            "semantic K: json_object prompt forbids null inside listed fields (live: sincerity=null on a non-apology voided the whole state)",
+            "не могут быть null" in sys_text and "0 для числа" in sys_text and "false для boolean" in sys_text,
+            sys_text,
+        )
+
+    legacy_adapter_k = FakeAdapter(
+        'Реплика\n\n###YANDI_STATE### {"is_insult": false, "severity": 0.0, "is_apology": false, "sincerity": 0.0}',
+        BackendCapabilities(json_object=False, json_schema=False),
+    )
+    with patch.object(client, "resolve_target", return_value=make_target(legacy_adapter_k)):
+        client.complete_semantic(messages=[{"role": "user", "content": "q"}], model="m", requirement=requirement)
+        check("semantic K: legacy marker prompt names every state field", all(f in wire_system_text(legacy_adapter_k) for f in fields), wire_system_text(legacy_adapter_k))
+
+    schema_adapter_k = FakeAdapter(
+        '{"reply": "Хорошо.", "state": {"is_insult": false, "severity": 0.0, "is_apology": false, "sincerity": 0.0}}',
+        BackendCapabilities(json_object=True, json_schema=True),
+    )
+    with patch.object(client, "resolve_target", return_value=make_target(schema_adapter_k)):
+        client.complete_semantic(messages=[{"role": "user", "content": "q"}], model="m", requirement=requirement)
+        check(
+            "semantic K: json_schema prompt is unchanged (field names travel in the enforced schema, not prompt text)",
+            "Других полей не добавляй" not in wire_system_text(schema_adapter_k),
+            wire_system_text(schema_adapter_k),
+        )
+
+    no_schema_req = SemanticOutputRequirement(kind="reply_state", state_schema=None, reply_required=True, state_required=False)
+    object_adapter_n = FakeAdapter(
+        '{"reply": "Ладно.", "state": null}', BackendCapabilities(json_object=True, json_schema=False),
+    )
+    with patch.object(client, "resolve_target", return_value=make_target(object_adapter_n)):
+        result = client.complete_semantic(messages=[{"role": "user", "content": "q"}], model="m", requirement=no_schema_req)
+        check(
+            "semantic K: no state_schema -> no field hint, no crash",
+            result.reply == "Ладно." and "Других полей не добавляй" not in wire_system_text(object_adapter_n),
+            repr(result),
+        )
+
+    range_hint = client._state_schema_prompt_hint({
+        "type": "object",
+        "properties": {"severity": {"type": "number", "minimum": 0, "maximum": 1, "description": "тяжесть"}},
+        "required": ["severity"],
+    })
+    check("semantic K: hint renders range, required and description from the schema", all(x in range_hint for x in ("от 0 до 1", "обязательно", "тяжесть")), range_hint)
+
     semantic_source = inspect.getsource(client._semantic_contract_from_target)
     check(
         "semantic: contract selection is capability-based, not adapter-name dispatch",
