@@ -324,35 +324,35 @@ import pet.chat_local as chat_local
 # backend physically answers is the PRINCIPLE: one user turn = one
 # LLM generation call = one self-report event, never a second
 # generation deciding накал after the fact. So this now checks the
-# gateway-agnostic function (_call_model_raw, wraps llm_gateway.
-# complete()) by the same structural discipline, not by naming Ollama.
+# gateway-agnostic function (_call_model_semantic, wraps llm_gateway.
+# complete_semantic()) by the same structural discipline, not by naming Ollama.
 _src_respond = inspect.getsource(chat_local._respond_with_character)
 check(
-    "4: _respond_with_character() makes exactly ONE generation call (_call_model_raw) — "
+    "4: _respond_with_character() makes exactly ONE generation call (_call_model_semantic) — "
     "накал recognition and the visible reply come from the SAME generation, regardless of "
     "which backend physically answers, not a separate classifier call feeding a second one",
-    _src_respond.count("_call_model_raw(") == 1,
+    _src_respond.count("_call_model_semantic(") == 1,
 )
-_pos_raw_call = _src_respond.find("_call_model_raw(")
-_pos_parse = _src_respond.find("parse_self_report(")
+_pos_raw_call = _src_respond.find("_call_model_semantic(")
+_pos_parse = _src_respond.find("intensity_from_state(")
 _pos_apply = _src_respond.find("_apply_self_report(")
 check(
-    "4: the model is called BEFORE her self-report is parsed, which happens BEFORE it's "
+    "4: the model is called BEFORE her normalized state is converted, which happens BEFORE it's "
     "written to memory (correct data dependency order)",
     -1 < _pos_raw_call < _pos_parse < _pos_apply,
     f"call={_pos_raw_call} parse={_pos_parse} apply={_pos_apply}",
 )
 
-_src_call_raw = inspect.getsource(chat_local._call_model_raw)
+_src_call_raw = inspect.getsource(chat_local._call_model_semantic)
 check(
-    "4: _call_model_raw() states memory as a plain FACT message (_memory_context_message), "
+    "4: _call_model_semantic() states memory as a plain FACT message (_memory_context_message), "
     "never a scripted reaction",
     "_memory_context_message(" in _src_call_raw,
 )
 check(
-    "4: _call_model_raw() goes through llm_gateway.complete() — not a direct HTTP call to "
+    "4: _call_model_semantic() goes through llm_gateway.complete_semantic() — not a direct HTTP call to "
     "any specific backend, own Ollama URL/endpoint knowledge removed from this file",
-    "_llm_complete(" in _src_call_raw and "requests" not in _src_call_raw,
+    "_llm_complete_semantic(" in _src_call_raw and "requests" not in _src_call_raw,
 )
 
 _src_memory_msg = inspect.getsource(chat_local._memory_context_message)

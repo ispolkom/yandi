@@ -62,6 +62,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import json
 from dataclasses import dataclass
 
 from . import vector_space
@@ -73,7 +74,10 @@ from . import config as node_config
 from . import llamacpp_backend
 from . import ollama_backend
 from . import remote_backend
-from .types import GenerationRequest, OutputContract, ResolvedInferenceTarget
+from .types import (
+    GenerationRequest, OutputContract, ResolvedInferenceTarget,
+    SemanticCompletionResult, SemanticOutputRequirement,
+)
 
 # HTTP_PROXY/HTTPS_PROXY выставлены в системе глобально и по умолчанию
 # заворачивают даже localhost-трафик — тот же самый источник багов,
@@ -188,6 +192,198 @@ def _contract_from_response_format(response_format: str | None) -> OutputContrac
     return OutputContract(
         name="json_object" if response_format == "json" else "plain_text",
         response_format=response_format,
+    )
+
+
+_SEMANTIC_STATE_MARKER = "###YANDI_STATE###"
+
+_SEMANTIC_REPLY_STATE_INSTRUCTION = (
+    "Сформируй один результат из двух частей: обычная человеческая реплика пользователю "
+    "и внутреннее состояние. Пользователь видит только реплику. Внутреннее состояние "
+    "никогда не является текстом ответа."
+)
+
+_SEMANTIC_JSON_INSTRUCTION = (
+    _SEMANTIC_REPLY_STATE_INSTRUCTION
+    + " Верни строго один JSON-объект с полями \"reply\" (непустая строка) и "
+    "\"state\" (объект или null). В поле state, если оно есть, используй только "
+    "ожидаемые внутренние поля состояния."
+)
+
+_SEMANTIC_LEGACY_INSTRUCTION = (
+    _SEMANTIC_REPLY_STATE_INSTRUCTION
+    + f" Сначала напиши только видимую пользователю реплику. Затем на новой строке "
+    f"добавь {_SEMANTIC_STATE_MARKER} и JSON-объект внутреннего состояния. "
+    "Маркер и JSON не являются частью реплики пользователя."
+)
+
+
+def _semantic_result_schema(requirement: SemanticOutputRequirement) -> dict:
+    state_schema = requirement.state_schema or {"type": "object"}
+    required = ["reply"]
+    if requirement.state_required:
+        required.append("state")
+    return {
+        "type": "object",
+        "properties": {
+            "reply": {"type": "string", "minLength": 1},
+            "state": state_schema,
+        },
+        "required": required,
+    }
+
+
+def _semantic_contract_from_target(
+    requirement: SemanticOutputRequirement, target: ResolvedInferenceTarget,
+) -> tuple[OutputContract, str]:
+    if requirement.kind != "reply_state":
+        raise LLMError(f"unsupported semantic output kind {requirement.kind!r}")
+    if target.capabilities.json_schema:
+        return (
+            OutputContract(name="semantic_json_schema", response_format=_semantic_result_schema(requirement)),
+            _SEMANTIC_JSON_INSTRUCTION,
+        )
+    if target.capabilities.json_object:
+        return OutputContract(name="semantic_json_object", response_format="json"), _SEMANTIC_JSON_INSTRUCTION
+    return OutputContract(name="semantic_legacy_marker", response_format=None), _SEMANTIC_LEGACY_INSTRUCTION
+
+
+def _append_system_instruction(system: str | list[str] | None, instruction: str) -> str | list[str]:
+    if isinstance(system, list):
+        return [*system, instruction]
+    if system:
+        return [system, instruction]
+    return instruction
+
+
+def _strip_think_blocks(text: str) -> str:
+    return _THINK_TAG_RE.sub("", text).replace("<think>", "").replace("</think>", "")
+
+
+def _looks_like_internal_state_fragment(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    state_keys = ("is_insult", "severity", "is_apology", "sincerity")
+    if sum(1 for key in state_keys if key in stripped) >= 2:
+        return True
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            return False
+        if isinstance(data, dict):
+            return sum(1 for key in state_keys if key in data) >= 2
+    return False
+
+
+def _state_valid_for_requirement(state: object, requirement: SemanticOutputRequirement) -> bool:
+    if state is None:
+        return not requirement.state_required
+    if not isinstance(state, dict):
+        return False
+    schema = requirement.state_schema or {}
+    required = schema.get("required") if isinstance(schema, dict) else None
+    if isinstance(required, list):
+        return all(isinstance(key, str) and key in state for key in required)
+    return True
+
+
+def _normalize_structured_semantic(
+    content: str, requirement: SemanticOutputRequirement,
+) -> tuple[str, dict[str, object] | None, bool, bool, bool, str | None]:
+    stripped = _strip_think_blocks(content).strip()
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError as e:
+        return "", None, False, False, False, f"malformed semantic JSON: {e}"
+    if not isinstance(data, dict):
+        return "", None, False, False, False, "semantic JSON root is not an object"
+
+    reply = data.get("reply")
+    state = data.get("state")
+    reply_ok = isinstance(reply, str) and (bool(reply.strip()) or not requirement.reply_required)
+    state_present = "state" in data and state is not None
+    state_ok = _state_valid_for_requirement(state, requirement)
+    if not reply_ok:
+        return "", None, False, False, False, "semantic result missing visible reply"
+    if state_present and not state_ok:
+        return reply.strip(), None, True, False, False, "semantic state malformed"
+    if requirement.state_required and not state_present:
+        return reply.strip(), None, True, False, False, "semantic result missing required state"
+    return reply.strip(), state if isinstance(state, dict) else None, True, state_ok, True, None
+
+
+def _normalize_legacy_semantic(
+    content: str, requirement: SemanticOutputRequirement,
+) -> tuple[str, dict[str, object] | None, bool, bool, bool, str | None]:
+    text = _strip_think_blocks(content).strip()
+    if not text:
+        return "", None, False, False, False, "empty semantic response"
+    marker_pos = text.rfind(_SEMANTIC_STATE_MARKER)
+    if marker_pos < 0:
+        if _looks_like_internal_state_fragment(text):
+            return "", None, False, False, False, "state-only response withheld from visible reply"
+        if requirement.state_required:
+            return "", None, False, False, False, "legacy semantic response missing required state marker"
+        return text, None, True, True, True, None
+
+    reply = text[:marker_pos].strip()
+    tail = text[marker_pos + len(_SEMANTIC_STATE_MARKER):]
+    if not reply and requirement.reply_required:
+        return "", None, False, False, False, "legacy semantic response missing visible reply"
+    match = re.search(r"\{.*\}", tail, re.DOTALL)
+    if not match:
+        if requirement.state_required:
+            return reply, None, bool(reply), False, False, "legacy semantic marker missing JSON state"
+        return reply, None, bool(reply), False, bool(reply), "legacy semantic marker missing JSON state"
+    try:
+        state = json.loads(match.group(0))
+    except json.JSONDecodeError as e:
+        if requirement.state_required:
+            return reply, None, bool(reply), False, False, f"legacy semantic state malformed: {e}"
+        return reply, None, bool(reply), False, bool(reply), f"legacy semantic state malformed: {e}"
+    state_ok = _state_valid_for_requirement(state, requirement)
+    if not state_ok:
+        if requirement.state_required:
+            return reply, None, bool(reply), False, False, "legacy semantic state malformed"
+        return reply, None, bool(reply), False, bool(reply), "legacy semantic state malformed"
+    return reply, state if isinstance(state, dict) else None, bool(reply), True, bool(reply), None
+
+
+def _normalize_semantic_completion(
+    content: str,
+    *,
+    requirement: SemanticOutputRequirement,
+    contract: OutputContract,
+    metadata: dict,
+) -> SemanticCompletionResult:
+    if contract.name in ("semantic_json_schema", "semantic_json_object"):
+        reply, state, reply_ok, state_ok, parse_ok, error = _normalize_structured_semantic(content, requirement)
+    else:
+        reply, state, reply_ok, state_ok, parse_ok, error = _normalize_legacy_semantic(content, requirement)
+    semantic_meta = {
+        "semantic_kind": requirement.kind,
+        "reply_required": requirement.reply_required,
+        "state_required": requirement.state_required,
+        "selected_output_contract": contract.name,
+        "semantic_parse_ok": parse_ok,
+        "reply_present": reply_ok,
+        "state_present": state is not None,
+        "state_valid": state_ok,
+    }
+    if error:
+        semantic_meta["semantic_error"] = error
+    result_meta = dict(metadata)
+    result_meta["_llm_gateway_semantic"] = semantic_meta
+    return SemanticCompletionResult(
+        reply=reply,
+        state=state if state_ok else None,
+        reply_ok=reply_ok,
+        state_ok=state_ok,
+        parse_ok=parse_ok,
+        error=error,
+        metadata=result_meta,
     )
 
 
@@ -516,6 +712,83 @@ def _do_complete(
     raw = dict(raw)
     raw["_llm_gateway_trace"] = trace
     return text.strip(), raw
+
+
+def complete_semantic(
+    prompt: str | None = None,
+    *,
+    model: str,
+    requirement: SemanticOutputRequirement,
+    system: str | list[str] | None = None,
+    messages: list[dict[str, str]] | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    timeout: int = DEFAULT_TIMEOUT,
+    base_url: str = DEFAULT_BASE_URL,
+    extra_options: dict[str, object] | None = None,
+    stop: list[str] | None = None,
+) -> SemanticCompletionResult:
+    """Generate a semantic result while keeping transport details in the gateway.
+
+    The caller states the semantic need (currently reply + internal
+    state). The gateway resolves the concrete inference target, chooses
+    an output contract from that target's capabilities, generates on
+    the same target, and normalizes the response before returning it.
+    """
+    if prompt is None and messages is None:
+        raise LLMError("complete_semantic() требует либо prompt, либо messages — ни один не задан")
+    if prompt is not None and messages is not None:
+        raise LLMError("complete_semantic() принимает либо prompt, либо messages, но не оба сразу")
+
+    trace: list[dict] = []
+    try:
+        target = resolve_target(model, base_url=base_url, attempt=1)
+    except Exception as e:
+        raise LLMError(
+            f"настроенный владельцем узла backend для модели {model!r} "
+            f"не сработал — автоматический переход на другой источник "
+            f"интеллекта запрещён явным выбором владельца: {e}"
+        ) from e
+
+    contract, instruction = _semantic_contract_from_target(requirement, target)
+    semantic_system = _append_system_instruction(system, instruction)
+    try:
+        text, raw = _generate_with_target(
+            target, prompt, system=semantic_system, messages=messages, temperature=temperature,
+            max_tokens=max_tokens, timeout=timeout, extra_options=extra_options,
+            contract=contract, stop=stop,
+        )
+        trace.append(_trace_attempt(target, contract, result="success"))
+    except Exception as e:
+        trace.append(_trace_attempt(target, contract, result="failed", error=e))
+        if target.source == "explicit_config":
+            raise LLMError(
+                f"настроенный владельцем узла backend для модели {model!r} "
+                f"не сработал — автоматический переход на другой источник "
+                f"интеллекта запрещён явным выбором владельца: {e}"
+            ) from e
+        if not target.fallback_allowed:
+            raise
+
+        print(f"[llm_gateway] встроенный дефолт не справился с {model!r} ({e}), откат на Ollama")
+        fallback = resolve_target(model, base_url=base_url, attempt=target.attempt + 1, fallback_from=target)
+        fallback_contract, fallback_instruction = _semantic_contract_from_target(requirement, fallback)
+        fallback_system = _append_system_instruction(system, fallback_instruction)
+        try:
+            text, raw = _generate_with_target(
+                fallback, prompt, system=fallback_system, messages=messages, temperature=temperature,
+                max_tokens=max_tokens, timeout=timeout, extra_options=extra_options,
+                contract=fallback_contract, stop=stop,
+            )
+            trace.append(_trace_attempt(fallback, fallback_contract, result="success"))
+            contract = fallback_contract
+        except Exception as fallback_error:
+            trace.append(_trace_attempt(fallback, fallback_contract, result="failed", error=fallback_error))
+            raise
+
+    raw = dict(raw)
+    raw["_llm_gateway_trace"] = trace
+    return _normalize_semantic_completion(text, requirement=requirement, contract=contract, metadata=raw)
 
 
 def complete(

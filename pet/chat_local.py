@@ -16,7 +16,7 @@ import redis.asyncio as aioredis
 from fastapi import APIRouter
 
 from pet.shared import REDIS_URL, LOCAL_MSGS_KEY, MAX_MESSAGES
-from agent.message_intensity import parse_self_report
+from agent.message_intensity import intensity_from_state
 from agent.db.sql.shadow_write import (
     shadow_add_grievance, shadow_acknowledge_apology, shadow_progress_healing,
     shadow_get_relationship_context,
@@ -63,73 +63,20 @@ _BASE_CHARACTER_PROMPT = (
     "их смысл, чтобы решить, что сказать."
 )
 
-# STRUCTURED CONTRACT (mandate "structured self-report", live-tested
-# 2026-09-16 — see git history for the A/B/C/factorial/ablation series):
-# the OLD design (free-text reply + trailing "###YANDI_STATE### {json}"
-# tag, parsed by regex in agent/message_intensity.py) needed a worked
-# NATURAL-LANGUAGE EXAMPLE reply to teach the two-part shape — without
-# one, models emitted ONLY the tag; with one, models anchored on that
-# exact example's wording as a reusable stock answer (measured: up to
-# 33% verbatim/near-verbatim echo), and free-text tag formatting itself
-# drifted (###YANDI_STATE###, "YANDI STATE", "YANDI.State", ...),
-# leaking raw into what the user saw despite three separate parser
-# patches (671b34d, 1475aaa, 1176a66). Switching to a runtime-enforced
-# JSON schema (llm_gateway's response_format=<schema>, honored natively
-# by the Ollama-compat backend) removed BOTH failure modes at once in a
-# 60-run structured-output test on EACH of two very different local
-# models (heretic:q8's Qwen-family merge and Rocinante-X's Mistral-NeMo
-# RP finetune): 120/120 non-empty replies, 120/120 valid JSON, 0
-# anchor-echoes, 0 identity-collapse, 0 meta-narration of her own
-# reply strategy — vs. 40% combined failure rate on the same two
-# scenarios under the old free-text contract. This does NOT mean a
-# second model decided her reaction for her (that would violate "как
-# хочется ей, не как нам хочется" per module docstring) — it is the
-# SAME single generation, seeing the SAME state/memory/message, still
-# freely choosing both her words and her own reading of the exchange;
-# only the WIRE FORMAT of that one generation's output changed, from
-# "free text you must reverse-engineer" to "a shape the runtime already
-# guarantees." agent/message_intensity.parse_self_report() tries this
-# structured shape FIRST and falls back to the legacy tag-parsing logic
-# untouched — for any backend that doesn't honor response_format as a
-# schema (remote/llamacpp configured backends currently just ignore an
-# unrecognized response_format value rather than erroring), the text
-# below still describes the same two-part shape in words, so a decent
-# model has a real chance at producing it even without enforcement.
-_STATE_FORMAT_INSTRUCTION = (
-    "Ответь строго в виде JSON-объекта с двумя полями. Поле \"reply\" — это твоя "
-    "обычная человеческая реплика пользователю, своим тоном; оно ОБЯЗАТЕЛЬНО и не "
-    "может быть пустой строкой — именно это поле пользователь увидит как твой ответ. "
-    "Поле \"state\" — твоя собственная оценка того, как к тебе только что обратились: "
-    f'"is_insult" (bool), "severity" (число 0-1), "is_apology" (bool), "sincerity" (число 0-1).'
-)
-
-# Enforced at the runtime/decoding level for backends that support it
-# (see llm_gateway.complete()'s response_format docstring) — the model
-# still decides every value; the schema only guarantees the SHAPE it
-# arrives in, exactly like TRUST != TRUTH elsewhere in this codebase:
-# VALID JSON != a state transition the state machine will accept
-# (relationship_memory.py's own rules are still the last word on that).
+# Semantic self-report state owned by PET. llm_gateway owns the transport
+# used to obtain this shape for the actually resolved inference target.
 _STATE_SCHEMA = {
     "type": "object",
     "properties": {
-        # minLength: live-observed (post-migration spot check, same day)
-        # that a bare {"type": "string"} still let the model emit an
-        # empty reply despite the required-field text instruction above —
-        # minLength=1 measurably eliminated that in a follow-up check.
-        "reply": {"type": "string", "minLength": 1},
-        "state": {
-            "type": "object",
-            "properties": {
-                "is_insult": {"type": "boolean"},
-                "severity": {"type": "number"},
-                "is_apology": {"type": "boolean"},
-                "sincerity": {"type": "number"},
-            },
-            "required": ["is_insult", "severity", "is_apology", "sincerity"],
-        },
+        "is_insult": {"type": "boolean"},
+        "severity": {"type": "number"},
+        "is_apology": {"type": "boolean"},
+        "sincerity": {"type": "number"},
     },
-    "required": ["reply", "state"],
+    "required": ["is_insult", "severity", "is_apology", "sincerity"],
 }
+
+_SEMANTIC_FAILURE_REPLY = "Прости, я сейчас не смогла нормально сформулировать ответ."
 
 
 def _relationship_grievance(ctx: dict | None) -> dict | None:
@@ -273,14 +220,8 @@ def _clean_response(raw: str) -> str:
     return _dedup_paragraphs(raw).strip()
 
 
-def _call_model_raw(model: str, messages: list[dict], temperature: float, memory_ctx: dict | None) -> str:
-    """Returns the model's FULL, UNCLEANED generation — including the
-    trailing self-report tag, if it produced one. Callers must run this
-    through parse_self_report() BEFORE _clean_response(): _clean_
-    response()'s own regexes were written for the visible reply only,
-    never tested against JSON tag content, and splitting the tag off
-    first avoids that interaction entirely rather than hoping it never
-    collides.
+def _call_model_semantic(model: str, messages: list[dict], temperature: float, memory_ctx: dict | None):
+    """Returns gateway-normalized semantic reply/state.
 
     Mandate "chat_local gateway migration": was a direct POST to local
     Ollama; now goes through llm_gateway.complete() — `model` is a
@@ -289,12 +230,6 @@ def _call_model_raw(model: str, messages: list[dict], temperature: float, memory
     failure if THAT fails, Ollama-compat fallback only if nothing was
     configured — see llm_gateway.client's own STEP 1/2/3). This file no
     longer knows or cares which physical backend actually answers.
-
-    strip_think=False: the raw output (think-block if any, then the
-    structured {reply, state} JSON) is preserved byte-for-byte, exactly
-    as before — parse_self_report()/`_clean_response()` downstream
-    already handle any <think> content themselves; changing WHERE that
-    stripping happens was not this mandate's job.
 
     repeat_penalty/repeat_last_n go through extra_options (backend-
     specific, not universal — see llm_gateway.client.complete()'s own
@@ -307,24 +242,27 @@ def _call_model_raw(model: str, messages: list[dict], temperature: float, memory
     harmless no-op, never a silently-wrong substitution. stop sequences
     ARE a universal concept, so they get llm_gateway.complete()'s own
     first-class `stop` parameter, honestly translated per backend."""
-    from llm_gateway import complete as _llm_complete
+    from llm_gateway import SemanticOutputRequirement, complete_semantic as _llm_complete_semantic
 
     system_list = [
         _BASE_CHARACTER_PROMPT,
         _self_knowledge_message(),
         _interlocutor_relation_message(),
         _memory_context_message(memory_ctx),
-        _STATE_FORMAT_INSTRUCTION,
     ]
-    return _llm_complete(
+    return _llm_complete_semantic(
         model=model,
+        requirement=SemanticOutputRequirement(
+            kind="reply_state",
+            state_schema=_STATE_SCHEMA,
+            reply_required=True,
+            state_required=False,
+        ),
         system=system_list,
         messages=messages,
         temperature=temperature,
         stop=_STOP_TOKENS,
         extra_options={"repeat_penalty": 1.3, "repeat_last_n": 64},
-        response_format=_STATE_SCHEMA,
-        strip_think=False,
     )
 
 
@@ -363,8 +301,9 @@ def _respond_with_character(model: str, messages: list[dict], temperature: float
     last_user_text = next(
         (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "",
     )
-    raw = _call_model_raw(model, messages, temperature, memory_ctx)
-    visible, intensity = parse_self_report(raw)
+    semantic = _call_model_semantic(model, messages, temperature, memory_ctx)
+    visible = semantic.reply if semantic.reply_ok else _SEMANTIC_FAILURE_REPLY
+    intensity = intensity_from_state(semantic.state) if semantic.state_ok and semantic.state is not None else intensity_from_state(None)
     _apply_self_report(last_user_text, intensity)
     return _clean_response(visible)
 

@@ -28,6 +28,38 @@ class OutputContract:
 
 
 @dataclass(frozen=True)
+class SemanticOutputRequirement:
+    """Gateway-level semantic shape requested by a caller.
+
+    This describes what the caller needs back, not which backend wire
+    format should be used to get it.
+    """
+
+    kind: str
+    state_schema: dict[str, Any] | None = None
+    reply_required: bool = True
+    state_required: bool = False
+
+
+@dataclass(frozen=True)
+class SemanticCompletionResult:
+    """Normalized semantic completion result.
+
+    `reply` is the only text a caller may show to a user. `state` is
+    internal data and must be applied by the caller's domain layer only
+    after semantic validation.
+    """
+
+    reply: str
+    state: dict[str, Any] | None
+    reply_ok: bool
+    state_ok: bool
+    parse_ok: bool
+    error: str | None
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class GenerationRequest:
     """Backend-neutral generation request handed to an adapter."""
 

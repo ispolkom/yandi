@@ -86,6 +86,28 @@ def _neutral(error: str) -> IntensityResult:
     return IntensityResult(ok=False, error=error, **_NEUTRAL_RESULT)
 
 
+def intensity_from_state(state: object, *, error: str = "") -> IntensityResult:
+    """Convert already-normalized semantic state into PET domain state.
+
+    This is deliberately not a transport parser: llm_gateway is
+    responsible for separating visible reply from internal state before
+    PET calls this function.
+    """
+    if not isinstance(state, dict):
+        return _neutral("semantic state missing or not an object")
+    try:
+        return IntensityResult(
+            ok=True,
+            is_insult=bool(state["is_insult"]),
+            is_apology=bool(state["is_apology"]),
+            severity=max(0.0, min(1.0, float(state["severity"]))),
+            sincerity=max(0.0, min(1.0, float(state["sincerity"]))),
+            error=error,
+        )
+    except (KeyError, TypeError, ValueError) as e:
+        return _neutral(f"semantic state missing/invalid fields: {e}")
+
+
 def _parse_structured(data: dict) -> Tuple[str, IntensityResult] | None:
     """STRUCTURED CONTRACT (mandate "structured self-report", live-
     tested 2026-09-16 — see pet/chat_local.py's _STATE_SCHEMA docstring
@@ -105,19 +127,12 @@ def _parse_structured(data: dict) -> Tuple[str, IntensityResult] | None:
     reply, state = data.get("reply"), data.get("state")
     if not isinstance(reply, str) or not isinstance(state, dict):
         return None
-    try:
-        result = IntensityResult(
-            ok=True,
-            is_insult=bool(state["is_insult"]),
-            is_apology=bool(state["is_apology"]),
-            severity=max(0.0, min(1.0, float(state["severity"]))),
-            sincerity=max(0.0, min(1.0, float(state["sincerity"]))),
-        )
-    except (KeyError, TypeError, ValueError) as e:
+    result = intensity_from_state(state)
+    if not result.ok:
         # Fail-open on the STRUCTURED DATA only (exactly like the legacy
         # path) — the shape was right, the field values weren't; the
         # reply the model actually wrote is still real and still shown.
-        return reply.strip(), _neutral(f"structured state missing/invalid fields: {e}")
+        return reply.strip(), _neutral(result.error.replace("semantic", "structured", 1))
     if not reply.strip():
         # Live-observed failure mode, same as the legacy tag-only case:
         # a technically valid structured object with an empty reply is

@@ -937,6 +937,169 @@ def _run_adapter_layer_checks(client) -> None:
     )
 
 
+def _run_semantic_output_checks(client) -> None:
+    """Semantic output: callers request reply+state; gateway selects a
+    transport contract from the resolved target capabilities and
+    normalizes reply/state before returning to PET."""
+    from llm_gateway.types import BackendCapabilities, GenerationRequest, OutputContract, ResolvedInferenceTarget, SemanticOutputRequirement
+
+    state_schema = {
+        "type": "object",
+        "properties": {
+            "is_insult": {"type": "boolean"},
+            "severity": {"type": "number"},
+            "is_apology": {"type": "boolean"},
+            "sincerity": {"type": "number"},
+        },
+        "required": ["is_insult", "severity", "is_apology", "sincerity"],
+    }
+    requirement = SemanticOutputRequirement(
+        kind="reply_state", state_schema=state_schema, reply_required=True, state_required=False,
+    )
+
+    class FakeAdapter:
+        adapter_id = "fake_semantic"
+
+        def __init__(self, content, caps, *, fail=False):
+            self.content = content
+            self.caps = caps
+            self.fail = fail
+            self.calls = []
+
+        def capabilities(self, target):
+            return self.caps
+
+        def generate(self, request: GenerationRequest, target, contract: OutputContract):
+            self.calls.append((request, target, contract))
+            if self.fail:
+                raise RuntimeError("boom")
+            return self.content, {"done_reason": "stop"}
+
+    def make_target(adapter, *, attempt=1, source="test", fallback_allowed=False, fallback_reason=None):
+        return ResolvedInferenceTarget(
+            logical_model="logical",
+            resolved_model="resolved",
+            adapter_id=adapter.adapter_id,
+            adapter=adapter,
+            capabilities=adapter.capabilities({}),
+            resolution_reason="test target",
+            attempt=attempt,
+            source=source,
+            provider="test",
+            runtime="test",
+            fallback_allowed=fallback_allowed,
+            fallback_reason=fallback_reason,
+            target={},
+        )
+
+    strict_adapter = FakeAdapter(
+        '{"reply": "Хорошо.", "state": {"is_insult": false, "severity": 0.0, "is_apology": false, "sincerity": 0.0}}',
+        BackendCapabilities(json_object=True, json_schema=True),
+    )
+    with patch.object(client, "resolve_target", return_value=make_target(strict_adapter)) as mock_resolve:
+        result = client.complete_semantic(messages=[{"role": "user", "content": "q"}], model="m", requirement=requirement)
+        contract = strict_adapter.calls[0][2]
+        check("semantic A: strict schema target selects schema contract", contract.name == "semantic_json_schema", repr(contract))
+        check("semantic A: strict schema response_format is schema object", isinstance(contract.response_format, dict), repr(contract.response_format))
+        check("semantic A: reply/state separated", result.reply == "Хорошо." and result.state and result.state["severity"] == 0.0, repr(result))
+        check("semantic O: success resolves exactly one target", mock_resolve.call_count == 1, repr(mock_resolve.call_count))
+
+    object_adapter = FakeAdapter(
+        '{"reply": "Ладно.", "state": {"is_insult": false, "severity": 0.0, "is_apology": false, "sincerity": 0.0}}',
+        BackendCapabilities(json_object=True, json_schema=False),
+    )
+    with patch.object(client, "resolve_target", return_value=make_target(object_adapter)):
+        result = client.complete_semantic(messages=[{"role": "user", "content": "q"}], model="m", requirement=requirement)
+        contract = object_adapter.calls[0][2]
+        check("semantic B: json_object target does not claim strict schema", contract.name == "semantic_json_object", repr(contract))
+        check("semantic B: broad JSON result still normalized", result.parse_ok and result.reply == "Ладно.", repr(result))
+
+    legacy_adapter = FakeAdapter(
+        'Нормальная пользовательская реплика\n\n###YANDI_STATE### {"is_insult": false, "severity": 0.0, "is_apology": false, "sincerity": 0.0}',
+        BackendCapabilities(json_object=False, json_schema=False),
+    )
+    with patch.object(client, "resolve_target", return_value=make_target(legacy_adapter)):
+        result = client.complete_semantic(messages=[{"role": "user", "content": "q"}], model="m", requirement=requirement)
+        contract = legacy_adapter.calls[0][2]
+        check("semantic C: no JSON capability selects legacy marker contract", contract.name == "semantic_legacy_marker", repr(contract))
+        check("semantic C: legacy marker stripped from visible reply", result.reply == "Нормальная пользовательская реплика", repr(result.reply))
+        check("semantic C: legacy state separated", result.state and result.state["is_insult"] is False, repr(result.state))
+
+    state_only_adapter = FakeAdapter(
+        '{"is_insult": true, "severity": 0.8, "is_apology": false, "sincerity": 0.0}',
+        BackendCapabilities(json_object=True, json_schema=False),
+    )
+    with patch.object(client, "resolve_target", return_value=make_target(state_only_adapter)):
+        result = client.complete_semantic(messages=[{"role": "user", "content": "q"}], model="m", requirement=requirement)
+        check("semantic D/M: state-only JSON is semantic failure", not result.parse_ok and not result.reply_ok, repr(result))
+        check("semantic D/M: state-only JSON never becomes visible reply", "is_insult" not in result.reply and result.reply == "", repr(result.reply))
+        check("semantic D/M: state-only JSON not returned as state to persist", result.state is None, repr(result.state))
+
+    missing_reply_adapter = FakeAdapter(
+        '{"state": {"is_insult": true, "severity": 0.8, "is_apology": false, "sincerity": 0.0}}',
+        BackendCapabilities(json_object=True, json_schema=False),
+    )
+    with patch.object(client, "resolve_target", return_value=make_target(missing_reply_adapter)):
+        result = client.complete_semantic(messages=[{"role": "user", "content": "q"}], model="m", requirement=requirement)
+        check("semantic E: missing reply is semantic failure", not result.parse_ok and result.state is None, repr(result))
+
+    malformed_state_adapter = FakeAdapter(
+        '{"reply": "Видимая реплика.", "state": {"is_insult": true}}',
+        BackendCapabilities(json_object=True, json_schema=False),
+    )
+    with patch.object(client, "resolve_target", return_value=make_target(malformed_state_adapter)):
+        result = client.complete_semantic(messages=[{"role": "user", "content": "q"}], model="m", requirement=requirement)
+        check("semantic F: valid reply survives malformed optional state", result.reply == "Видимая реплика." and result.reply_ok, repr(result))
+        check("semantic F: malformed state not persisted", result.state is None and not result.state_ok, repr(result))
+
+    malformed_json_adapter = FakeAdapter(
+        '{"is_insult": true, "severity":',
+        BackendCapabilities(json_object=True, json_schema=False),
+    )
+    with patch.object(client, "resolve_target", return_value=make_target(malformed_json_adapter)):
+        result = client.complete_semantic(messages=[{"role": "user", "content": "q"}], model="m", requirement=requirement)
+        check("semantic G: malformed JSON with service fragment not shown", result.reply == "" and not result.parse_ok, repr(result))
+
+    reply_only_adapter = FakeAdapter("Просто ответ без state.", BackendCapabilities(json_object=False, json_schema=False))
+    with patch.object(client, "resolve_target", return_value=make_target(reply_only_adapter)):
+        result = client.complete_semantic(messages=[{"role": "user", "content": "q"}], model="m", requirement=requirement)
+        check("semantic H: valid reply with no optional state is allowed", result.reply == "Просто ответ без state." and result.state is None and result.parse_ok, repr(result))
+
+    first_adapter = FakeAdapter("unused", BackendCapabilities(json_object=True, json_schema=False), fail=True)
+    second_adapter = FakeAdapter(
+        '{"reply": "fallback schema", "state": {"is_insult": false, "severity": 0.0, "is_apology": false, "sincerity": 0.0}}',
+        BackendCapabilities(json_object=True, json_schema=True),
+    )
+    first_target = make_target(first_adapter, source="builtin_registry", fallback_allowed=True)
+    second_target = make_target(second_adapter, attempt=2, source="builtin_fallback", fallback_reason="after first")
+    with patch.object(client, "resolve_target", side_effect=[first_target, second_target]):
+        result = client.complete_semantic(messages=[{"role": "user", "content": "q"}], model="m", requirement=requirement)
+        trace = result.metadata["_llm_gateway_trace"]
+        check("semantic I: fallback succeeds with second target", result.reply == "fallback schema", repr(result))
+        check("semantic I: fallback recalculates contract from target B", second_adapter.calls[0][2].name == "semantic_json_schema", repr(second_adapter.calls[0][2]))
+        check("semantic I: fallback trace has two attempts", len(trace) == 2 and trace[1]["attempt"] == 2, repr(trace))
+
+    first_strict = FakeAdapter("unused", BackendCapabilities(json_object=True, json_schema=True), fail=True)
+    second_legacy = FakeAdapter(
+        'fallback legacy\n\n###YANDI_STATE### {"is_insult": false, "severity": 0.0, "is_apology": false, "sincerity": 0.0}',
+        BackendCapabilities(json_object=False, json_schema=False),
+    )
+    with patch.object(client, "resolve_target", side_effect=[
+        make_target(first_strict, source="builtin_registry", fallback_allowed=True),
+        make_target(second_legacy, attempt=2, source="builtin_fallback", fallback_reason="after first"),
+    ]):
+        result = client.complete_semantic(messages=[{"role": "user", "content": "q"}], model="m", requirement=requirement)
+        check("semantic J: reverse fallback uses legacy contract for target B", second_legacy.calls[0][2].name == "semantic_legacy_marker", repr(second_legacy.calls[0][2]))
+        check("semantic J: reverse fallback reply normalized", result.reply == "fallback legacy", repr(result))
+
+    semantic_source = inspect.getsource(client._semantic_contract_from_target)
+    check(
+        "semantic: contract selection is capability-based, not adapter-name dispatch",
+        "adapter_id ==" not in semantic_source and "ollama" not in semantic_source.lower(),
+        semantic_source,
+    )
+
+
 def main() -> int:
     import tempfile
     from pathlib import Path
@@ -971,6 +1134,7 @@ def main() -> int:
 
             _run_unified_resolver_checks(client)
             _run_adapter_layer_checks(client)
+            _run_semantic_output_checks(client)
 
     print()
     print("=" * 72)
