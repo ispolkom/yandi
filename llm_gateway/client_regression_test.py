@@ -12,8 +12,11 @@ llm_gateway/client_regression_test.py
 """
 from __future__ import annotations
 
+import inspect
 import sys
 from unittest.mock import MagicMock, patch
+
+from llm_gateway import ollama_backend
 
 FAILURES: list[str] = []
 
@@ -212,7 +215,7 @@ def _run_backend_dispatch_checks(client) -> None:
     # единой правки с их стороны.
     with patch.object(llamacpp_backend, "has_model", return_value=True), \
          patch.object(llamacpp_backend, "generate") as mock_gen, \
-         patch.object(client, "_do_complete_ollama", return_value=("ответ ollama", {})) as mock_ollama:
+         patch.object(ollama_backend, "generate", return_value=("ответ ollama", {})) as mock_ollama:
         out = client.complete("q", model="heretic:q8")
         check("local engine untouched by default (opt-in, not opt-out)", mock_gen.call_count == 0)
         check("default behavior still goes through Ollama", out == "ответ ollama")
@@ -222,7 +225,7 @@ def _run_backend_dispatch_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(llamacpp_backend, "has_model", return_value=True), \
          patch.object(llamacpp_backend, "generate", return_value=("ответ движка", {})) as mock_gen, \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         out = client.complete("q", model="heretic:q8")
         check("local engine used when enabled and has_model() is True", out == "ответ движка", repr(out))
         check("Ollama path never called when local engine succeeds", mock_ollama.call_count == 0)
@@ -232,7 +235,7 @@ def _run_backend_dispatch_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(llamacpp_backend, "has_model", return_value=False), \
          patch.object(llamacpp_backend, "generate") as mock_gen, \
-         patch.object(client, "_do_complete_ollama", return_value=("ответ ollama", {})) as mock_ollama:
+         patch.object(ollama_backend, "generate", return_value=("ответ ollama", {})) as mock_ollama:
         out = client.complete("q", model="unknown-model")
         check("unregistered model skips local engine entirely", mock_gen.call_count == 0)
         check("unregistered model falls through to Ollama", out == "ответ ollama")
@@ -242,7 +245,7 @@ def _run_backend_dispatch_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(llamacpp_backend, "has_model", return_value=True), \
          patch.object(llamacpp_backend, "generate", side_effect=RuntimeError("GPU OOM")), \
-         patch.object(client, "_do_complete_ollama", return_value=("ответ ollama", {})) as mock_ollama:
+         patch.object(ollama_backend, "generate", return_value=("ответ ollama", {})) as mock_ollama:
         out = client.complete("q", model="heretic:q8")
         check("local engine failure falls back to Ollama silently", out == "ответ ollama")
         check("Ollama is actually called on fallback", mock_ollama.call_count == 1)
@@ -252,7 +255,7 @@ def _run_backend_dispatch_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(llamacpp_backend, "has_model", return_value=True), \
          patch.object(llamacpp_backend, "generate") as mock_gen, \
-         patch.object(client, "_do_complete_ollama", return_value=("ответ удалённой ноды", {})) as mock_ollama:
+         patch.object(ollama_backend, "generate", return_value=("ответ удалённой ноды", {})) as mock_ollama:
         out = client.complete("q", model="heretic:q8", base_url="http://10.0.0.9:11434")
         check("non-default base_url skips local engine even if model is registered", mock_gen.call_count == 0)
         check("non-default base_url goes straight to Ollama", out == "ответ удалённой ноды")
@@ -272,7 +275,7 @@ def _run_node_config_dispatch_checks(client) -> None:
          patch.object(node_config, "get_model_entry", return_value={"backend": "llamacpp", "path": "/своя/папка/модель.gguf"}), \
          patch.object(llamacpp_backend, "generate_at_spec", return_value=("ответ своей модели", {})) as mock_spec, \
          patch.object(llamacpp_backend, "generate") as mock_builtin, \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         out = client.complete("heretic:q8", model="heretic:q8")
         check("user-configured local model wins over the built-in default", out == "ответ своей модели", repr(out))
         check("built-in registry never consulted when user config exists", mock_builtin.call_count == 0)
@@ -288,7 +291,7 @@ def _run_node_config_dispatch_checks(client) -> None:
              "api_key_env": "MY_CLAUDE_KEY",
          }), \
          patch.object(remote_backend, "generate", return_value=("ответ клода", {})) as mock_remote, \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         out = client.complete("q", model="мой-клод")
         check("user-configured remote model is used", out == "ответ клода", repr(out))
         check("Ollama never consulted for a configured remote model", mock_ollama.call_count == 0)
@@ -308,7 +311,7 @@ def _run_node_config_dispatch_checks(client) -> None:
     # это и было нарушением главного инварианта, найденным аудитом.)
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(node_config, "get_model_entry", return_value={"backend": "carrier-pigeon"}), \
-         patch.object(client, "_do_complete_ollama", return_value=("ответ ollama", {})) as mock_ollama:
+         patch.object(ollama_backend, "generate", return_value=("ответ ollama", {})) as mock_ollama:
         try:
             client.complete("q", model="странная-модель")
             check("unknown backend type in EXPLICIT node config raises, never falls back to Ollama", False, "no exception raised")
@@ -316,13 +319,26 @@ def _run_node_config_dispatch_checks(client) -> None:
             check("unknown backend type in EXPLICIT node config raises, never falls back to Ollama", True)
         check("Ollama not called for a broken explicit config", mock_ollama.call_count == 0)
 
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(node_config, "get_model_entry", return_value={
+             "backend": "remote", "protocol": "carrier-pigeon",
+             "base_url": "https://example.invalid", "model": "m",
+         }), \
+         patch.object(ollama_backend, "generate", return_value=("ответ ollama", {})) as mock_ollama:
+        try:
+            client.complete("q", model="remote-with-unknown-protocol")
+            check("unknown remote protocol in EXPLICIT node config raises, never falls back to Ollama", False, "no exception raised")
+        except client.LLMError:
+            check("unknown remote protocol in EXPLICIT node config raises, never falls back to Ollama", True)
+        check("Ollama not called for unknown remote protocol", mock_ollama.call_count == 0)
+
     # Ничего не настроено под этим именем -> обычное поведение
     # встроенного дефолта, без изменений.
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(node_config, "get_model_entry", return_value=None), \
          patch.object(llamacpp_backend, "has_model", return_value=True), \
          patch.object(llamacpp_backend, "generate", return_value=("ответ дефолта", {})) as mock_gen, \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         out = client.complete("q", model="heretic:q8")
         check("no node config for this name -> falls through to built-in default unaffected", out == "ответ дефолта", repr(out))
 
@@ -352,7 +368,7 @@ def _run_explicit_backend_invariant_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(node_config, "get_model_entry", return_value=remote_entry), \
          patch.object(remote_backend, "generate", return_value=("успех", {})) as mock_remote, \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         out = client.complete("q", model="test-remote")
         check("TEST1: explicit remote backend success -> returned as-is", out == "успех", repr(out))
         check("TEST1: Ollama not called", mock_ollama.call_count == 0)
@@ -361,7 +377,7 @@ def _run_explicit_backend_invariant_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(node_config, "get_model_entry", return_value=remote_entry), \
          patch.object(remote_backend._session, "post", side_effect=requests.ConnectionError("connection refused")), \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         try:
             client.complete("q", model="test-remote")
             check("TEST2: connection refused on explicit remote -> raises LLMError", False, "no exception")
@@ -373,7 +389,7 @@ def _run_explicit_backend_invariant_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(node_config, "get_model_entry", return_value=anthropic_entry), \
          patch.object(remote_backend._session, "post", return_value=_fake_response({"error": "unauthorized"}, status_code=401)), \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         try:
             client.complete("q", model="my-claude")
             check("TEST3: HTTP 401 on explicit Anthropic backend -> raises LLMError", False, "no exception")
@@ -385,7 +401,7 @@ def _run_explicit_backend_invariant_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(node_config, "get_model_entry", return_value=anthropic_entry), \
          patch.object(remote_backend._session, "post", return_value=_fake_response({"error": "rate_limited"}, status_code=429)), \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         try:
             client.complete("q", model="my-claude")
             check("TEST4: HTTP 429 on explicit Anthropic backend -> raises LLMError", False, "no exception")
@@ -398,7 +414,7 @@ def _run_explicit_backend_invariant_checks(client) -> None:
     #  явно по номеру мандата, плюс отсутствующее обязательное поле как отдельный вариант.)
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(node_config, "get_model_entry", return_value={"backend": "remote"}), \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         # protocol отсутствует -> remote_backend.generate() получит protocol="openai" по
         # умолчанию (см. _try_configured_backend), а base_url будет KeyError -> раскрывается
         # как настоящая ошибка конфигурации, не тихий переход на Ollama.
@@ -418,7 +434,7 @@ def _run_explicit_backend_invariant_checks(client) -> None:
          patch.object(llamacpp_backend, "generate_at_spec", side_effect=RuntimeError("GGUF-файл не найден")), \
          patch.object(llamacpp_backend, "has_model", return_value=True), \
          patch.object(llamacpp_backend, "generate") as mock_builtin_gen, \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         try:
             client.complete("heretic:q8", model="heretic:q8")
             check("TEST6: explicit local backend load failure -> raises LLMError", False, "no exception")
@@ -432,7 +448,7 @@ def _run_explicit_backend_invariant_checks(client) -> None:
          patch.object(node_config, "get_model_entry", return_value=None), \
          patch.object(llamacpp_backend, "has_model", return_value=True), \
          patch.object(llamacpp_backend, "generate", return_value=("дефолт сработал", {})) as mock_gen, \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         out = client.complete("q", model="heretic:q8")
         check("TEST7: no config, built-in default works -> used normally", out == "дефолт сработал")
         check("TEST7: Ollama not called when built-in default succeeds", mock_ollama.call_count == 0)
@@ -442,7 +458,7 @@ def _run_explicit_backend_invariant_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(node_config, "get_model_entry", return_value=None), \
          patch.object(llamacpp_backend, "has_model", return_value=False), \
-         patch.object(client, "_do_complete_ollama", return_value=("ответ ollama", {})) as mock_ollama:
+         patch.object(ollama_backend, "generate", return_value=("ответ ollama", {})) as mock_ollama:
         out = client.complete("q", model="совсем-неизвестная-модель")
         check("TEST8: no config, no local candidate -> falls back to Ollama (allowed, Case A)", out == "ответ ollama")
 
@@ -452,7 +468,7 @@ def _run_explicit_backend_invariant_checks(client) -> None:
          patch.object(node_config, "get_model_entry", return_value=None), \
          patch.object(llamacpp_backend, "has_model", return_value=True), \
          patch.object(llamacpp_backend, "generate", side_effect=RuntimeError("GPU OOM")), \
-         patch.object(client, "_do_complete_ollama", side_effect=client.LLMError("ollama тоже недоступна")):
+         patch.object(ollama_backend, "generate", side_effect=client.LLMError("ollama тоже недоступна")):
         try:
             client.complete("q", model="heretic:q8")
             check("TEST9: nothing works (no config) -> raises a real LLMError", False, "no exception")
@@ -466,7 +482,7 @@ def _run_explicit_backend_invariant_checks(client) -> None:
          patch.object(remote_backend, "generate", return_value=("единственный ответ", {})), \
          patch.object(llamacpp_backend, "generate") as mock_builtin, \
          patch.object(llamacpp_backend, "has_model") as mock_has_model, \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         out = client.complete("q", model="test-remote")
         check("TEST10: successful explicit backend result returned as-is", out == "единственный ответ")
         check("TEST10: built-in default never even checked", mock_has_model.call_count == 0 and mock_builtin.call_count == 0)
@@ -478,7 +494,7 @@ def _run_explicit_backend_invariant_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(node_config, "get_model_entry", return_value=remote_entry), \
          patch.object(remote_backend, "generate", return_value=("", {})), \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         out = client.complete("q", model="test-remote")
         check("empty string from explicit backend is treated as success, not a trigger to fall back", out == "")
         check("Ollama not called for an empty-but-successful explicit response", mock_ollama.call_count == 0)
@@ -487,7 +503,7 @@ def _run_explicit_backend_invariant_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(node_config, "get_model_entry", return_value=remote_entry), \
          patch.object(remote_backend._session, "post", return_value=_fake_response({"totally": "unexpected"})), \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         try:
             client.complete("q", model="test-remote")
             check("malformed response from explicit backend -> raises, no fallback", False, "no exception")
@@ -499,7 +515,7 @@ def _run_explicit_backend_invariant_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(node_config, "get_model_entry", return_value=remote_entry), \
          patch.object(remote_backend._session, "post", return_value=_fake_response({"error": "internal"}, status_code=500)), \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         try:
             client.complete("q", model="test-remote")
             check("HTTP 500 from explicit backend -> raises, no fallback", False, "no exception")
@@ -513,7 +529,7 @@ def _run_explicit_backend_invariant_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(node_config, "get_model_entry", return_value=remote_entry), \
          patch.object(remote_backend, "generate", return_value=None), \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         try:
             client.complete("q", model="test-remote")
             check("backend violating (text, meta) contract (returns bare None) -> raises, no fallback", False, "no exception")
@@ -526,7 +542,7 @@ def _run_explicit_backend_invariant_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", True), \
          patch.object(node_config, "get_model_entry", return_value=remote_entry), \
          patch.object(remote_backend, "generate", return_value=("ответ при дефолтном base_url", {})), \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         out = client.complete("q", model="test-remote", base_url=client.DEFAULT_BASE_URL)
         check("explicit config still checked first even when base_url equals DEFAULT_BASE_URL", out == "ответ при дефолтном base_url")
         check("Ollama not called", mock_ollama.call_count == 0)
@@ -555,7 +571,7 @@ def _run_flag_independence_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", False), \
          patch.object(node_config, "get_model_entry", return_value=remote_entry), \
          patch.object(remote_backend, "generate", return_value=("ответ remote", {})), \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         out = client.complete("q", model="m")
         check("TEST1: flag absent, explicit remote works -> used", out == "ответ remote")
         check("TEST1: Ollama not called", mock_ollama.call_count == 0)
@@ -564,7 +580,7 @@ def _run_flag_independence_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", False), \
          patch.object(node_config, "get_model_entry", return_value=anthropic_entry), \
          patch.object(remote_backend, "generate", return_value=("ответ клода", {})), \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         out = client.complete("q", model="my-claude")
         check("TEST2: flag absent, explicit Anthropic works -> used", out == "ответ клода")
         check("TEST2: Ollama not called", mock_ollama.call_count == 0)
@@ -573,7 +589,7 @@ def _run_flag_independence_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", False), \
          patch.object(node_config, "get_model_entry", return_value=remote_entry), \
          patch.object(remote_backend._session, "post", side_effect=requests.ConnectionError("down")), \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         try:
             client.complete("q", model="m")
             check("TEST3: flag absent, explicit remote fails -> raises LLMError", False, "no exception")
@@ -586,7 +602,7 @@ def _run_flag_independence_checks(client) -> None:
     with patch.object(client, "_LOCAL_ENABLED", False), \
          patch.object(node_config, "get_model_entry", return_value=remote_entry), \
          patch.object(remote_backend, "generate", return_value=("ответ remote", {})), \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         out = client.complete("q", model="m")
         check("TEST4: flag='0'-equivalent, explicit remote still used", out == "ответ remote")
         check("TEST4: Ollama not called", mock_ollama.call_count == 0)
@@ -596,7 +612,7 @@ def _run_flag_independence_checks(client) -> None:
         with patch.object(client, "_LOCAL_ENABLED", flag_value), \
              patch.object(node_config, "get_model_entry", return_value=remote_entry), \
              patch.object(remote_backend, "generate", return_value=("ответ remote", {})), \
-             patch.object(client, "_do_complete_ollama") as mock_ollama:
+             patch.object(ollama_backend, "generate") as mock_ollama:
             out = client.complete("q", model="m")
             check(f"TEST5: explicit config wins regardless of flag value ({flag_value})", out == "ответ remote")
             check(f"TEST5: Ollama not called (flag={flag_value})", mock_ollama.call_count == 0)
@@ -608,7 +624,7 @@ def _run_flag_independence_checks(client) -> None:
          patch.object(llamacpp_backend, "generate_at_spec", return_value=("ответ своей локальной модели", {})), \
          patch.object(llamacpp_backend, "has_model") as mock_has_model, \
          patch.object(llamacpp_backend, "generate") as mock_builtin, \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         out = client.complete("heretic:q8", model="heretic:q8")
         check("TEST6: flag absent, explicit LOCAL config still used", out == "ответ своей локальной модели")
         check("TEST6: built-in default (has_model/generate) never even checked", mock_has_model.call_count == 0 and mock_builtin.call_count == 0)
@@ -619,7 +635,7 @@ def _run_flag_independence_checks(client) -> None:
          patch.object(node_config, "get_model_entry", return_value=None), \
          patch.object(llamacpp_backend, "has_model") as mock_has_model, \
          patch.object(llamacpp_backend, "generate") as mock_gen, \
-         patch.object(client, "_do_complete_ollama", return_value=("ответ ollama", {})) as mock_ollama:
+         patch.object(ollama_backend, "generate", return_value=("ответ ollama", {})) as mock_ollama:
         out = client.complete("q", model="heretic:q8")
         check("TEST7: flag absent, no config -> built-in default never even checked", mock_has_model.call_count == 0 and mock_gen.call_count == 0)
         check("TEST7: falls to Ollama (allowed, Case A)", out == "ответ ollama")
@@ -629,7 +645,7 @@ def _run_flag_independence_checks(client) -> None:
          patch.object(node_config, "get_model_entry", return_value=None), \
          patch.object(llamacpp_backend, "has_model", return_value=True), \
          patch.object(llamacpp_backend, "generate", return_value=("ответ дефолта", {})), \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         out = client.complete("q", model="heretic:q8")
         check("TEST8: flag=1, no config -> built-in default used", out == "ответ дефолта")
         check("TEST8: Ollama not called", mock_ollama.call_count == 0)
@@ -637,7 +653,7 @@ def _run_flag_independence_checks(client) -> None:
     # TEST 9 — флаг отсутствует, explicit config нет, Ollama доступна -> старый фоллбэк работает.
     with patch.object(client, "_LOCAL_ENABLED", False), \
          patch.object(node_config, "get_model_entry", return_value=None), \
-         patch.object(client, "_do_complete_ollama", return_value=("ответ ollama", {})) as mock_ollama:
+         patch.object(ollama_backend, "generate", return_value=("ответ ollama", {})) as mock_ollama:
         out = client.complete("q", model="совсем-неизвестная-модель")
         check("TEST9: flag absent, no config -> Ollama fallback still works", out == "ответ ollama")
 
@@ -648,7 +664,7 @@ def _run_flag_independence_checks(client) -> None:
          patch.object(remote_backend._session, "post", side_effect=requests.ConnectionError("down")), \
          patch.object(llamacpp_backend, "has_model") as mock_has_model, \
          patch.object(llamacpp_backend, "generate") as mock_gen, \
-         patch.object(client, "_do_complete_ollama") as mock_ollama:
+         patch.object(ollama_backend, "generate") as mock_ollama:
         try:
             client.complete("q", model="m")
             check("TEST10: flag=1, explicit config fails -> raises, no local/Ollama fallback", False, "no exception")
@@ -677,7 +693,7 @@ def _run_flag_independence_checks(client) -> None:
             )
             with patch.object(node_config, "get_model_entry", return_value=remote_entry), \
                  patch.object(remote_backend, "generate", return_value=("явный ответ", {})), \
-                 patch.object(reloaded, "_do_complete_ollama") as mock_ollama:
+                patch.object(ollama_backend, "generate") as mock_ollama:
                 out = reloaded.complete("q", model="m")
                 check(f"TEST11: explicit config honored after reload regardless of flag (env={env_value!r})", out == "явный ответ")
                 check(f"TEST11: Ollama not called (env={env_value!r})", mock_ollama.call_count == 0)
@@ -687,6 +703,238 @@ def _run_flag_independence_checks(client) -> None:
         else:
             _os.environ["LLM_GATEWAY_ENABLE_LOCAL"] = orig_env
         importlib.reload(client)
+
+
+def _run_unified_resolver_checks(client) -> None:
+    """Phase 1 unified backend resolver: backend identity/capability is
+    resolved once per generation attempt, and fallback is a second attempt
+    with its own resolved backend."""
+    from llm_gateway import config as node_config
+    from llm_gateway import llamacpp_backend, remote_backend
+
+    remote_entry = {
+        "backend": "remote", "protocol": "openai",
+        "base_url": "https://my-own-server.example", "model": "my-model",
+        "api_key_env": "MY_KEY",
+    }
+
+    # Explicit config wins deterministically and no builtin/Ollama routing is attempted.
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(node_config, "get_model_entry", return_value=remote_entry) as mock_entry, \
+         patch.object(remote_backend, "generate", return_value=("ok", {"done_reason": "stop"})), \
+         patch.object(llamacpp_backend, "has_model") as mock_has_model, \
+         patch.object(ollama_backend, "generate") as mock_ollama:
+        text, raw = client._do_complete(
+            "q", model="heretic:q8", system=None, messages=None, temperature=None,
+            max_tokens=None, timeout=client.DEFAULT_TIMEOUT, base_url=client.DEFAULT_BASE_URL,
+            strip_think=True, extra_options=None, response_format="json", stop=None,
+        )
+        trace = raw["_llm_gateway_trace"]
+        check("resolver: explicit config returns text", text == "ok", repr(text))
+        check("resolver: explicit config resolved once", mock_entry.call_count == 1, repr(mock_entry.call_count))
+        check("resolver: explicit config skips builtin has_model", mock_has_model.call_count == 0)
+        check("resolver: explicit config skips Ollama", mock_ollama.call_count == 0)
+        check("resolver: trace records remote adapter", trace[0]["adapter_id"] == "openai_compatible", repr(trace))
+        check("resolver: trace records logical model", trace[0]["logical_model"] == "heretic:q8", repr(trace))
+        check("resolver: trace records resolved model", trace[0]["resolved_model"] == "my-model", repr(trace))
+        check("resolver: response_format='json' contract preserved", trace[0]["output_contract"] == "json_object", repr(trace))
+
+    # Explicit failure remains fail-loud and does not silently fallback.
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(node_config, "get_model_entry", return_value=remote_entry), \
+         patch.object(remote_backend, "generate", side_effect=RuntimeError("remote down")), \
+         patch.object(llamacpp_backend, "has_model") as mock_has_model, \
+         patch.object(ollama_backend, "generate") as mock_ollama:
+        try:
+            client.complete("q", model="heretic:q8")
+            check("resolver: explicit failure raises", False, "no exception")
+        except client.LLMError:
+            check("resolver: explicit failure raises", True)
+        check("resolver: explicit failure does not check builtin", mock_has_model.call_count == 0)
+        check("resolver: explicit failure does not call Ollama", mock_ollama.call_count == 0)
+
+    # Builtin success is one attempt; Ollama is not touched.
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(node_config, "get_model_entry", return_value=None), \
+         patch.object(llamacpp_backend, "has_model", return_value=True) as mock_has_model, \
+         patch.object(llamacpp_backend, "generate", return_value=("builtin ok", {"done_reason": "stop"})) as mock_gen, \
+         patch.object(ollama_backend, "generate") as mock_ollama:
+        text, raw = client._do_complete(
+            "q", model="heretic:q8", system=None, messages=None, temperature=None,
+            max_tokens=None, timeout=client.DEFAULT_TIMEOUT, base_url=client.DEFAULT_BASE_URL,
+            strip_think=True, extra_options=None, response_format=None, stop=None,
+        )
+        trace = raw["_llm_gateway_trace"]
+        check("resolver: builtin success text", text == "builtin ok", repr(text))
+        check("resolver: builtin has_model checked once", mock_has_model.call_count == 1, repr(mock_has_model.call_count))
+        check("resolver: builtin generate called once", mock_gen.call_count == 1, repr(mock_gen.call_count))
+        check("resolver: builtin success does not call Ollama", mock_ollama.call_count == 0)
+        check("resolver: builtin trace has one attempt", len(trace) == 1 and trace[0]["adapter_id"] == "llama_cpp", repr(trace))
+
+    # Builtin failure resolves Ollama as a second attempt; contract is attached to the second backend too.
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(node_config, "get_model_entry", return_value=None) as mock_entry, \
+         patch.object(llamacpp_backend, "has_model", return_value=True), \
+         patch.object(llamacpp_backend, "generate", side_effect=RuntimeError("GPU OOM")), \
+         patch.object(ollama_backend, "generate", return_value=("ollama ok", {"done_reason": "stop"})) as mock_ollama:
+        text, raw = client._do_complete(
+            "q", model="heretic:q8", system=None, messages=None, temperature=None,
+            max_tokens=None, timeout=client.DEFAULT_TIMEOUT, base_url=client.DEFAULT_BASE_URL,
+            strip_think=True, extra_options=None, response_format="json", stop=None,
+        )
+        trace = raw["_llm_gateway_trace"]
+        check("resolver: builtin fallback text", text == "ollama ok", repr(text))
+        check("resolver: fallback does not re-read node_config", mock_entry.call_count == 1, repr(mock_entry.call_count))
+        check("resolver: fallback calls Ollama once", mock_ollama.call_count == 1, repr(mock_ollama.call_count))
+        check(
+            "resolver: fallback trace is two attempts with new backend",
+            len(trace) == 2
+            and trace[0]["adapter_id"] == "llama_cpp"
+            and trace[0]["result"] == "failed"
+            and trace[1]["adapter_id"] == "ollama_compatible"
+            and trace[1]["result"] == "success",
+            repr(trace),
+        )
+        check("resolver: fallback attempt keeps response_format='json'", trace[1]["output_contract"] == "json_object", repr(trace))
+
+
+def _run_adapter_layer_checks(client) -> None:
+    """Phase A/B adapter layer: resolution picks an adapter once, then
+    generation calls that adapter rather than a central backend switch."""
+    from llm_gateway import adapters, config as node_config
+    from llm_gateway import llamacpp_backend, remote_backend
+    from llm_gateway.types import BackendCapabilities, GenerationRequest, OutputContract
+
+    ids = adapters.list_adapter_ids()
+    expected = {"llama_cpp", "ollama_compatible", "openai_compatible", "anthropic"}
+    check("adapters: registry contains current adapters", expected.issubset(set(ids)), repr(ids))
+    check("adapters: adapter ids are unique", len(ids) == len(set(ids)), repr(ids))
+
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(node_config, "get_model_entry", return_value={"backend": "llamacpp", "path": "/x/model.gguf"}):
+        resolved = client.resolve_target("local-model", base_url=client.DEFAULT_BASE_URL)
+        check("adapters: explicit llama.cpp resolves LlamaCppAdapter", resolved.adapter_id == "llama_cpp", repr(resolved))
+        check("target: legacy llama.cpp config records logical_model", resolved.logical_model == "local-model", repr(resolved))
+        check("target: legacy llama.cpp config records resolved_model", resolved.resolved_model == "local-model", repr(resolved))
+        check("target: legacy llama.cpp config records runtime", resolved.runtime == "llama_cpp", repr(resolved))
+        check("target: legacy llama.cpp config records provider=local", resolved.provider == "local", repr(resolved))
+        check("target: legacy llama.cpp config records file location", resolved.location == "/x/model.gguf", repr(resolved))
+        check("target: legacy llama.cpp config has sanitized config_ref", resolved.config_ref == "secure_store:local-model", repr(resolved))
+
+    with patch.object(client, "_LOCAL_ENABLED", False), \
+         patch.object(node_config, "get_model_entry", return_value=None):
+        resolved = client.resolve_target("unknown", base_url=client.DEFAULT_BASE_URL)
+        check("adapters: default fallback resolves OllamaCompatAdapter", resolved.adapter_id == "ollama_compatible", repr(resolved))
+
+    openai_entry = {
+        "backend": "remote", "protocol": "openai",
+        "base_url": "https://server.example", "model": "provider-model",
+        "api_key_env": "K",
+    }
+    with patch.object(node_config, "get_model_entry", return_value=openai_entry):
+        resolved = client.resolve_target("remote-openai", base_url=client.DEFAULT_BASE_URL)
+        check("adapters: OpenAI-compatible remote resolves OpenAICompatibleAdapter", resolved.adapter_id == "openai_compatible", repr(resolved))
+        check("target: OpenAI legacy config supports logical_model != resolved_model", resolved.logical_model == "remote-openai" and resolved.resolved_model == "provider-model", repr(resolved))
+        check("target: OpenAI legacy config records runtime", resolved.runtime == "external_server", repr(resolved))
+        check("target: OpenAI legacy config records provider separately from adapter", resolved.provider == "openai_compatible" and resolved.provider != "remote", repr(resolved))
+        check("target: OpenAI legacy config records URL as location data", resolved.location == "https://server.example", repr(resolved))
+
+    anthropic_entry = {
+        "backend": "remote", "protocol": "anthropic",
+        "base_url": "https://api.anthropic.com", "model": "claude",
+        "api_key_env": "K",
+    }
+    with patch.object(node_config, "get_model_entry", return_value=anthropic_entry):
+        resolved = client.resolve_target("remote-anthropic", base_url=client.DEFAULT_BASE_URL)
+        check("adapters: Anthropic remote resolves AnthropicAdapter", resolved.adapter_id == "anthropic", repr(resolved))
+        check("target: Anthropic legacy config records provider", resolved.provider == "anthropic", repr(resolved))
+        check("target: Anthropic legacy config records runtime=provider", resolved.runtime == "provider", repr(resolved))
+
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(node_config, "get_model_entry", return_value=None), \
+         patch.object(llamacpp_backend, "has_model") as mock_has_model:
+        resolved = client.resolve_target("any-model", base_url="http://10.0.0.9:11434")
+        check("target: legacy non-default base_url normalizes to explicit Ollama-compatible target", resolved.adapter_id == "ollama_compatible", repr(resolved))
+        check("target: non-default base_url is stored as location data", resolved.location == "http://10.0.0.9:11434", repr(resolved))
+        check("target: non-default base_url skips builtin registry", mock_has_model.call_count == 0, repr(mock_has_model.call_count))
+
+    http_openai_entry = {
+        "backend": "remote", "protocol": "openai",
+        "base_url": "http://host:9000", "model": "server-model",
+        "api_key_env": "K",
+    }
+    with patch.object(node_config, "get_model_entry", return_value=http_openai_entry):
+        resolved = client.resolve_target("http-openai", base_url=client.DEFAULT_BASE_URL)
+        check("target: URL location does not force Ollama adapter after normalization", resolved.adapter_id == "openai_compatible", repr(resolved))
+
+    class FakeAdapter:
+        adapter_id = "fake_test_adapter"
+
+        def capabilities(self, target):
+            return BackendCapabilities(json_object=True)
+
+        def generate(self, request: GenerationRequest, target, contract: OutputContract):
+            return f"{self.adapter_id}:{request.model}:{contract.name}", {"done_reason": "stop"}
+
+    fake = FakeAdapter()
+    fake_registry = adapters.AdapterRegistry()
+    fake_registry.register(fake)
+    from llm_gateway.types import ResolvedInferenceTarget
+
+    resolved = ResolvedInferenceTarget(
+        logical_model="fake-logical",
+        resolved_model="fake-model",
+        adapter_id=fake.adapter_id,
+        adapter=fake,
+        capabilities=fake.capabilities({}),
+        resolution_reason="test-only adapter",
+        attempt=1,
+        source="test",
+        provider="test",
+        runtime="test",
+        target={},
+    )
+    text, raw = client._generate_with_target(
+        resolved, "q", system=None, messages=None, temperature=None, max_tokens=None,
+        timeout=client.DEFAULT_TIMEOUT, extra_options=None,
+        contract=OutputContract(name="json_object", response_format="json"), stop=None,
+    )
+    check("adapters: fake adapter can generate without central dispatch branch", text == "fake_test_adapter:fake-model:json_object", repr((text, raw)))
+
+    with patch.object(client, "_LOCAL_ENABLED", False), \
+         patch.object(node_config, "get_model_entry", return_value=None), \
+         patch.object(ollama_backend, "generate", return_value=("json ok", {"done_reason": "stop"})) as mock_ollama:
+        out = client.complete("q", model="m", response_format="json")
+        check("adapters: response_format='json' behavior unchanged", out == "json ok", repr(out))
+        check("adapters: response_format reaches Ollama adapter", mock_ollama.call_args.kwargs["response_format"] == "json", repr(mock_ollama.call_args))
+
+    with patch.object(client, "_LOCAL_ENABLED", True), \
+         patch.object(node_config, "get_model_entry", return_value=None), \
+         patch.object(llamacpp_backend, "has_model", return_value=True), \
+         patch.object(llamacpp_backend, "generate", side_effect=RuntimeError("GPU OOM")), \
+         patch.object(ollama_backend, "generate", return_value=("fallback ok", {"done_reason": "stop"})):
+        text, raw = client._do_complete(
+            "q", model="heretic:q8", system=None, messages=None, temperature=None,
+            max_tokens=None, timeout=client.DEFAULT_TIMEOUT, base_url=client.DEFAULT_BASE_URL,
+            strip_think=True, extra_options=None, response_format=None, stop=None,
+        )
+        trace = raw["_llm_gateway_trace"]
+        check("adapters: fallback semantics unchanged", text == "fallback ok", repr(text))
+        check(
+            "adapters: fallback gets a new resolved adapter",
+            trace[0]["adapter_id"] == "llama_cpp" and trace[1]["adapter_id"] == "ollama_compatible",
+            repr(trace),
+        )
+        check("target: fallback creates second attempt", trace[0]["attempt"] == 1 and trace[1]["attempt"] == 2, repr(trace))
+        check("target: fallback records reason", trace[1]["fallback_reason"] is not None, repr(trace))
+        check("target: fallback capabilities come from fallback adapter", trace[1]["capabilities"]["json_schema"] is True, repr(trace))
+
+    generated_source = inspect.getsource(client._generate_with_target)
+    check(
+        "target: central generation path has no adapter_id/backend dispatch",
+        "adapter_id ==" not in generated_source and "backend_id" not in generated_source,
+        generated_source,
+    )
 
 
 def main() -> int:
@@ -720,6 +968,9 @@ def main() -> int:
             _run_explicit_backend_invariant_checks(client)
 
             _run_flag_independence_checks(client)
+
+            _run_unified_resolver_checks(client)
+            _run_adapter_layer_checks(client)
 
     print()
     print("=" * 72)

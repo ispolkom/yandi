@@ -68,16 +68,18 @@ from . import vector_space
 
 import requests
 
+from . import adapters
 from . import config as node_config
 from . import llamacpp_backend
+from . import ollama_backend
 from . import remote_backend
+from .types import GenerationRequest, OutputContract, ResolvedInferenceTarget
 
 # HTTP_PROXY/HTTPS_PROXY выставлены в системе глобально и по умолчанию
 # заворачивают даже localhost-трафик — тот же самый источник багов,
 # что не раз всплывал в других частях проекта. trust_env=False обходит
 # это раз и навсегда прямо тут, а не в каждом файле по отдельности.
-_session = requests.Session()
-_session.trust_env = False
+_session = ollama_backend._session
 
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
@@ -164,96 +166,252 @@ def _do_complete_ollama(
     response_format: str | None,
     stop: list[str] | None,
 ) -> tuple[str, dict]:
-    """HTTP-путь через Ollama — оригинальный бэкенд, теперь фоллбэк."""
+    """Compatibility wrapper for the Ollama-compatible transport."""
     wire_messages = _build_messages(prompt, system, messages)
-
-    options: dict[str, object] = dict(extra_options) if extra_options else {}
-    if temperature is not None:
-        options["temperature"] = temperature
-    if max_tokens is not None:
-        options["num_predict"] = max_tokens
-    if stop:
-        # Ollama принимает stop-последовательности как список внутри options.
-        options["stop"] = list(stop)
-
-    payload: dict[str, object] = {"model": model, "messages": wire_messages, "stream": False}
-    if response_format is not None:
-        payload["format"] = response_format
-    if options:
-        payload["options"] = options
-
     try:
-        resp = _session.post(f"{base_url}/api/chat", json=payload, timeout=timeout)
-        resp.raise_for_status()
-    except requests.RequestException as e:
+        return ollama_backend.generate(
+            wire_messages,
+            model=model,
+            base_url=base_url,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+            extra_options=extra_options,
+            response_format=response_format,
+            stop=stop,
+        )
+    except ollama_backend.OllamaBackendError as e:
         raise LLMError(f"{model}: {e}") from e
 
-    try:
-        raw = resp.json()
-        text = raw["message"]["content"]
-    except (KeyError, ValueError, TypeError) as e:
-        raise LLMError(f"{model}: неожиданный формат ответа: {e}") from e
 
-    return text, raw
+def _contract_from_response_format(response_format: str | None) -> OutputContract:
+    return OutputContract(
+        name="json_object" if response_format == "json" else "plain_text",
+        response_format=response_format,
+    )
 
 
-def _try_configured_backend(
+def resolve_target(
     model: str,
+    *,
+    base_url: str,
+    attempt: int = 1,
+    fallback_from: ResolvedInferenceTarget | None = None,
+) -> ResolvedInferenceTarget:
+    """Resolve exactly one inference target for one generation attempt.
+
+    This function decides identity and capabilities only. It never
+    generates text. Every fallback is a new call to resolve_target(), so
+    the fallback attempt gets its own capabilities and output contract.
+    """
+    if fallback_from is not None:
+        if fallback_from.source != "builtin_registry":
+            raise RuntimeError(f"target from {fallback_from.source!r} has no automatic fallback")
+        adapter = adapters.get_adapter("ollama_compatible")
+        target = {"base_url": base_url}
+        return ResolvedInferenceTarget(
+            logical_model=model,
+            resolved_model=model,
+            adapter_id=adapter.adapter_id,
+            adapter=adapter,
+            capabilities=adapter.capabilities(target),
+            resolution_reason="legacy compatibility fallback after builtin llama.cpp failed",
+            attempt=attempt,
+            source="builtin_fallback",
+            location=base_url,
+            runtime="external_server",
+            provider="ollama_compatible",
+            config_ref="legacy:ollama_fallback",
+            fallback_reason=f"fallback after {fallback_from.adapter_id} target failed",
+            target=target,
+        )
+
+    if base_url != DEFAULT_BASE_URL:
+        adapter = adapters.get_adapter("ollama_compatible")
+        target = {"base_url": base_url}
+        return ResolvedInferenceTarget(
+            logical_model=model,
+            resolved_model=model,
+            adapter_id=adapter.adapter_id,
+            adapter=adapter,
+            capabilities=adapter.capabilities(target),
+            resolution_reason="legacy non-default base_url normalized as Ollama-compatible target",
+            attempt=attempt,
+            source="explicit_base_url",
+            location=base_url,
+            runtime="external_server",
+            provider="ollama_compatible",
+            config_ref="legacy:explicit_base_url",
+            target=target,
+        )
+
+    entry = node_config.get_model_entry(model)
+    if entry is not None:
+        backend = entry.get("backend")
+        if backend == "llamacpp":
+            adapter = adapters.get_adapter("llama_cpp")
+            spec = llamacpp_backend.ModelSpec(
+                path=entry["path"],
+                n_ctx=entry.get("n_ctx", 8192),
+                n_gpu_layers=entry.get("n_gpu_layers", -1),
+            )
+            target = {"spec": spec, "location": entry["path"], "runtime": "llama_cpp"}
+            return ResolvedInferenceTarget(
+                logical_model=model,
+                resolved_model=model,
+                adapter_id=adapter.adapter_id,
+                adapter=adapter,
+                capabilities=adapter.capabilities(target),
+                resolution_reason="legacy explicit node config normalized from backend=llamacpp",
+                attempt=attempt,
+                source="explicit_config",
+                location=entry["path"],
+                runtime="llama_cpp",
+                provider="local",
+                config_ref=f"secure_store:{model}",
+                target=target,
+            )
+        if backend == "remote":
+            protocol = entry.get("protocol", "openai")
+            if protocol == "openai":
+                adapter_id = "openai_compatible"
+            elif protocol == "anthropic":
+                adapter_id = "anthropic"
+            else:
+                raise RuntimeError(f"неизвестный remote protocol {protocol!r} в настройке узла для модели {model!r}")
+            adapter = adapters.get_adapter(adapter_id)
+            target = {
+                "base_url": entry["base_url"],
+                "provider": protocol,
+                "runtime": "external_server",
+                "api_key_env": entry.get("api_key_env"),
+            }
+            provider = "anthropic" if protocol == "anthropic" else "openai_compatible"
+            runtime = "provider" if protocol == "anthropic" else "external_server"
+            return ResolvedInferenceTarget(
+                logical_model=model,
+                resolved_model=entry.get("model", model),
+                adapter_id=adapter.adapter_id,
+                adapter=adapter,
+                capabilities=adapter.capabilities(target),
+                resolution_reason=f"legacy explicit node config normalized from backend=remote protocol={protocol}",
+                attempt=attempt,
+                source="explicit_config",
+                location=entry["base_url"],
+                runtime=runtime,
+                provider=provider,
+                config_ref=f"secure_store:{model}",
+                target=target,
+            )
+        raise RuntimeError(f"неизвестный backend {backend!r} в настройке узла для модели {model!r}")
+
+    if _LOCAL_ENABLED and llamacpp_backend.has_model(model):
+        adapter = adapters.get_adapter("llama_cpp")
+        target = {"runtime": "llama_cpp", "registry": "builtin"}
+        return ResolvedInferenceTarget(
+            logical_model=model,
+            resolved_model=model,
+            adapter_id=adapter.adapter_id,
+            adapter=adapter,
+            capabilities=adapter.capabilities(target),
+            resolution_reason="no explicit config; local engine enabled and builtin registry has model",
+            attempt=attempt,
+            source="builtin_registry",
+            runtime="llama_cpp",
+            provider="local",
+            config_ref="builtin_registry",
+            fallback_allowed=True,
+            target=target,
+        )
+
+    adapter = adapters.get_adapter("ollama_compatible")
+    target = {"base_url": base_url}
+    return ResolvedInferenceTarget(
+        logical_model=model,
+        resolved_model=model,
+        adapter_id=adapter.adapter_id,
+        adapter=adapter,
+        capabilities=adapter.capabilities(target),
+        resolution_reason="no explicit config and no builtin local candidate; legacy Ollama-compatible fallback",
+        attempt=attempt,
+        source="ollama_fallback",
+        location=base_url,
+        runtime="external_server",
+        provider="ollama_compatible",
+        config_ref="legacy:ollama_fallback",
+        target=target,
+    )
+
+
+def _location_kind(location: str | None) -> str:
+    if not location:
+        return "none"
+    if location.startswith(("http://", "https://")):
+        return "url"
+    return "file"
+
+
+def _trace_attempt(
+    target: ResolvedInferenceTarget, contract: OutputContract, *, result: str, error: Exception | None = None,
+) -> dict:
+    item: dict[str, object] = {
+        "attempt": target.attempt,
+        "logical_model": target.logical_model,
+        "resolved_model": target.resolved_model,
+        "adapter_id": target.adapter_id,
+        "runtime": target.runtime,
+        "provider": target.provider,
+        "location_kind": _location_kind(target.location),
+        "source": target.source,
+        "resolution_reason": target.resolution_reason,
+        "fallback_reason": target.fallback_reason,
+        "capabilities": {
+            "plain_text": target.capabilities.plain_text,
+            "json_object": target.capabilities.json_object,
+            "json_schema": target.capabilities.json_schema,
+            "streaming": target.capabilities.streaming,
+        },
+        "output_contract": contract.name,
+        "result": result,
+    }
+    if error is not None:
+        item["error_class"] = type(error).__name__
+        item["error"] = str(error)
+    return item
+
+
+def _generate_with_target(
+    target: ResolvedInferenceTarget,
     prompt: str | None,
     *,
     system: str | list[str] | None,
     messages: list[dict[str, str]] | None,
     temperature: float | None,
     max_tokens: int | None,
-    response_format: str | None,
+    timeout: int,
     extra_options: dict[str, object] | None,
+    contract: OutputContract,
     stop: list[str] | None,
-) -> tuple[str, dict] | None:
-    """Владелец узла сам настроил эту модель (llm_gateway.setup) —
-    локальный файл в СВОЕЙ папке или свой удалённый сервер (свой Клод,
-    свой OpenAI-совместимый сервер, что угодно). Проверяется ПЕРЕД
-    встроенным дефолтом — явный выбор владельца узла всегда важнее
-    зашитого в код примера. None, если для этого имени ничего не
-    настроено (не ошибка — просто нечего пробовать)."""
-    entry = node_config.get_model_entry(model)
-    if entry is None:
-        # Единственный легитимный None — нечего пробовать, NO_CONFIGURED_BACKEND.
-        return None
-
+) -> tuple[str, dict]:
+    """Generate through the already resolved inference target."""
     wire_messages = _build_messages(prompt, system, messages)
+    request = GenerationRequest(
+        messages=wire_messages,
+        model=target.resolved_model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        extra_options=extra_options,
+        stop=stop,
+    )
+    try:
+        result = target.adapter.generate(request, target.target or {}, contract)
+    except ollama_backend.OllamaBackendError as e:
+        raise LLMError(str(e)) from e
 
-    backend = entry.get("backend")
-    if backend == "llamacpp":
-        spec = llamacpp_backend.ModelSpec(
-            path=entry["path"],
-            n_ctx=entry.get("n_ctx", 8192),
-            n_gpu_layers=entry.get("n_gpu_layers", -1),
-        )
-        result = llamacpp_backend.generate_at_spec(
-            wire_messages, spec=spec, temperature=temperature,
-            max_tokens=max_tokens, response_format=response_format,
-            extra_options=extra_options, stop=stop,
-        )
-    elif backend == "remote":
-        result = remote_backend.generate(
-            wire_messages,
-            base_url=entry["base_url"], protocol=entry.get("protocol", "openai"),
-            model=entry.get("model", model), api_key_env=entry.get("api_key_env"),
-            temperature=temperature, max_tokens=max_tokens,
-            response_format=response_format, stop=stop,
-        )
-    else:
-        raise RuntimeError(f"неизвестный backend {backend!r} в настройке узла для модели {model!r}")
-
-    # Запись НАЙДЕНА (entry не None) — значит мы уже внутри CONFIGURED,
-    # не NO_CONFIGURED_BACKEND. Если backend-функция ведёт себя не по
-    # контракту (вернула не (текст, метаданные), например голый None) —
-    # это ОШИБКА ЭТОГО backend'а, а не сигнал "ничего не настроено".
-    # Нельзя позволить такому результату случайно совпасть с легитимным
-    # None выше и провалиться в автоматический fallback.
-    if not (isinstance(result, tuple) and len(result) == 2):
+    if target.source == "explicit_config" and not (isinstance(result, tuple) and len(result) == 2):
         raise RuntimeError(
-            f"backend {backend!r}, настроенный владельцем узла для модели {model!r}, "
+            f"adapter {target.adapter_id!r}, настроенный владельцем узла для модели {target.logical_model!r}, "
             f"вернул некорректный результат вместо (текст, метаданные): {result!r}"
         )
     return result
@@ -280,8 +438,8 @@ def _do_complete(
     LLM_GATEWAY_ENABLE_LOCAL):
 
     STEP 1 — ВСЕГДА (независимо от _LOCAL_ENABLED) проверить, настроил
-    ли владелец узла backend для точного имени модели
-    (_try_configured_backend()). Если настроил: успех — используем как
+    ли владелец узла explicit inference target для точного имени модели
+    (resolve_target()). Если настроил: успех — используем как
     есть и уходим; сбой — LLMError наружу и уходим. Никакого дальнейшего
     шага в обоих случаях. Единственное условие входа в STEP 1 —
     `base_url == DEFAULT_BASE_URL`: явная настройка — это свойство ЭТОГО
@@ -306,65 +464,57 @@ def _do_complete(
     if prompt is not None and messages is not None:
         raise LLMError("complete() принимает либо prompt, либо messages, но не оба сразу")
 
-    text: str | None = None
-    raw: dict = {}
-    resolved = False
+    trace: list[dict] = []
+    contract = _contract_from_response_format(response_format)
 
-    if base_url == DEFAULT_BASE_URL:
-        # STEP 1 — явная настройка владельца узла. Проверяется ВСЕГДА,
-        # LLM_GATEWAY_ENABLE_LOCAL тут ни при чём.
-        try:
-            configured_result = _try_configured_backend(
-                model, prompt, system=system, messages=messages, temperature=temperature,
-                max_tokens=max_tokens, response_format=response_format,
-                extra_options=extra_options, stop=stop,
-            )
-        except Exception as e:
-            # CONFIGURED_BACKEND_FAILED — владелец узла явно выбрал этот
-            # backend для этой модели. Автоматический переход на другой
-            # источник интеллекта здесь запрещён категорически (см.
-            # докстринг выше) — наружу идёт честная ошибка ИМЕННО этого
-            # backend'а, а не тихая подмена. Сообщение не содержит
-            # api-ключей/секретов — они не попадают в текст исключений
-            # backend-модулей (см. remote_backend.py/llamacpp_backend.py).
+    try:
+        target = resolve_target(model, base_url=base_url, attempt=1)
+    except Exception as e:
+        raise LLMError(
+            f"настроенный владельцем узла backend для модели {model!r} "
+            f"не сработал — автоматический переход на другой источник "
+            f"интеллекта запрещён явным выбором владельца: {e}"
+        ) from e
+
+    try:
+        text, raw = _generate_with_target(
+            target, prompt, system=system, messages=messages, temperature=temperature,
+            max_tokens=max_tokens, timeout=timeout, extra_options=extra_options,
+            contract=contract, stop=stop,
+        )
+        trace.append(_trace_attempt(target, contract, result="success"))
+    except Exception as e:
+        trace.append(_trace_attempt(target, contract, result="failed", error=e))
+        if target.source == "explicit_config":
+            # CONFIGURED_TARGET_FAILED — владелец узла явно выбрал этот
+            # target для этой модели. Автоматический переход на другой
+            # источник интеллекта здесь запрещён категорически.
             raise LLMError(
                 f"настроенный владельцем узла backend для модели {model!r} "
                 f"не сработал — автоматический переход на другой источник "
                 f"интеллекта запрещён явным выбором владельца: {e}"
             ) from e
+        if not target.fallback_allowed:
+            raise
 
-        if configured_result is not None:
-            # Успех явно настроенного backend'а — используем как есть,
-            # ничего больше не пробуем, даже если текст оказался пустым
-            # (пустой ответ — это тоже ответ ИМЕННО этого backend'а, а
-            # не сигнал попробовать что-то ещё).
-            text, raw = configured_result
-            resolved = True
-        elif _LOCAL_ENABLED and llamacpp_backend.has_model(model):
-            # STEP 2 — NO_CONFIGURED_BACKEND, флаг включён, имя есть во
-            # встроенном дефолтном реестре — старое автоматическое
-            # поведение не меняется.
-            try:
-                text, raw = llamacpp_backend.generate(
-                    _build_messages(prompt, system, messages), model=model, temperature=temperature,
-                    max_tokens=max_tokens, response_format=response_format,
-                    extra_options=extra_options, stop=stop,
-                )
-                resolved = True
-            except Exception as e:
-                print(f"[llm_gateway] встроенный дефолт не справился с {model!r} ({e}), откат на Ollama")
-
-    if not resolved:
-        # STEP 3 — Ollama HTTP. Достижимо только если владелец ничего не
-        # настроил (или base_url не локальный — валидатор чужой ноды).
-        text, raw = _do_complete_ollama(
-            prompt, model=model, system=system, messages=messages, temperature=temperature,
-            max_tokens=max_tokens, timeout=timeout, base_url=base_url,
-            extra_options=extra_options, response_format=response_format, stop=stop,
-        )
+        print(f"[llm_gateway] встроенный дефолт не справился с {model!r} ({e}), откат на Ollama")
+        fallback = resolve_target(model, base_url=base_url, attempt=target.attempt + 1, fallback_from=target)
+        fallback_contract = _contract_from_response_format(response_format)
+        try:
+            text, raw = _generate_with_target(
+                fallback, prompt, system=system, messages=messages, temperature=temperature,
+                max_tokens=max_tokens, timeout=timeout, extra_options=extra_options,
+                contract=fallback_contract, stop=stop,
+            )
+            trace.append(_trace_attempt(fallback, fallback_contract, result="success"))
+        except Exception as fallback_error:
+            trace.append(_trace_attempt(fallback, fallback_contract, result="failed", error=fallback_error))
+            raise
 
     if strip_think:
         text = _THINK_TAG_RE.sub("", text)
+    raw = dict(raw)
+    raw["_llm_gateway_trace"] = trace
     return text.strip(), raw
 
 
