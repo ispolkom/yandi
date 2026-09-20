@@ -66,4 +66,5 @@ identity or per-user relationship state yet.
   reference-machine paths. They are indexed in [README.md](README.md) and were not moved because
   source comments refer to them by name.
 - `node/mobile/` contains a Flutter client whose local build caches are no longer tracked.
-- No top-level `LICENSE` file exists; see the README.
+- No top-level `LICENSE` file exists. `node/Cargo.toml` declares MIT for the Rust crate only; the
+  license of the rest of the project is undecided (see the README).

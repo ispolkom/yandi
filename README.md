@@ -209,5 +209,10 @@ long-form self-learning plan is in [ROADMAP_v7.md](ROADMAP_v7.md).
 
 ## License
 
-Licensing terms have not yet been finalized. The Rust crate manifest (`node/Cargo.toml`) declares
-`MIT` for the node crate; the repository as a whole has no license file yet.
+Licensing of the project as a whole has **not been decided**, and no top-level `LICENSE` file
+exists. Until one is added, no license is granted for the repository's contents beyond what GitHub's
+terms allow (viewing and forking).
+
+The one exception is the Rust node crate: `node/Cargo.toml` declares `license = "MIT"`, and that
+declaration applies to the crate in `node/` only. It is not the license of `agent/`,
+`llm_gateway/`, `pet/`, or the documentation.

@@ -4,6 +4,8 @@ version = "0.2.0"
 edition = "2021"
 authors = ["YANDI Team"]
 description = "Clean P2P network refactored from NET"
+# MIT applies to this Rust crate (node/) only. The YANDI project as a whole has no
+# license yet; do not read this line as the license of agent/, llm_gateway/, pet/ or docs.
 license = "MIT"
 
 [dependencies]

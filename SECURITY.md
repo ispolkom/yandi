@@ -7,10 +7,9 @@ sensitive data, and do not expose its servers to untrusted networks.
 
 ## Reporting a vulnerability
 
-- If the repository's **Security** tab offers **Report a vulnerability**, use it. That keeps the
-  report private.
-- Otherwise open a GitHub issue that says you have a security report and ask for a private way to
-  send details. **Do not put exploit details, credentials, or personal data in a public issue.**
+- Use **Report a vulnerability** on the repository's **Security** tab
+  (GitHub private vulnerability reporting). That keeps the report private.
+- **Do not put exploit details, credentials, or personal data in a public issue.**
 
 Please include what is affected, how to reproduce it, and the impact you expect. Reports are handled
 on a best-effort basis; there is no service-level commitment.
