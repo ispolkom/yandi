@@ -1210,11 +1210,15 @@ def find_similar_open_grievance(conn, user_id: str, description: str) -> Optiona
 def bump_grievance(conn, grievance_id: str, new_severity: float, timestamp=None) -> None:
     """Existing-grievance-recurred path: severity rises, status resets
     to 'registered' (a fresh instance of the same old grievance is not
-    automatically still 'healing')."""
+    automatically still 'healing'), and the previous cycle's apology /
+    understanding timestamps and sincerity are cleared: a healing phase
+    belongs to ONE offense cycle, so an earlier apology cannot start the
+    clock for, or count as understanding of, the new offense."""
     timestamp = _coerce_datetime(timestamp) or _now()
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE grievance SET severity=%s, status='registered', updated_at=%s WHERE id=%s",
+            "UPDATE grievance SET severity=%s, status='registered', apology_sincerity=0.0, "
+            "apology_at=NULL, understood_at=NULL, updated_at=%s WHERE id=%s",
             (new_severity, timestamp, grievance_id),
         )
 

@@ -11,12 +11,6 @@ history, but the model often omits or invents the quote, so some genuine insults
 dropped. The guard is fail-safe (an event may be missed, never fabricated). Improving recall is open
 work and must not weaken the provenance check.
 
-## Healing clock semantics
-
-Minimum healing time is computed from the grievance's creation time, not from the apology or
-healing event. A sincere apology about an old grievance can therefore satisfy the time condition
-immediately.
-
 ## Embedding routing
 
 Embeddings do not yet fully use `ResolvedInferenceTarget` and an adapter. Embedding calls still take

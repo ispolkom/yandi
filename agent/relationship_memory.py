@@ -49,11 +49,22 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _age_hours(row: Dict[str, Any]) -> float:
-    created = row["created_at"]
-    if isinstance(created, str):
-        created = datetime.fromisoformat(created)
-    return (_now() - created).total_seconds() / 3600.0
+def _healing_age_hours(row: Dict[str, Any]) -> Optional[float]:
+    """Hours since the CURRENT healing phase began: the first ACCEPTED
+    (understood) apology of this offense cycle (`understood_at`). None if no
+    apology has been accepted yet; a plain low-sincerity "sorry" that was only
+    acknowledged does not start healing.
+
+    This is a different clock from the AGE OF THE OFFENSE (`created_at`, or
+    `updated_at` for a recurrence, see _offense_time()). An old grievance that
+    is apologised for today has a healing age of about zero, not of its
+    offense age."""
+    started = row.get("understood_at")
+    if isinstance(started, str):
+        started = datetime.fromisoformat(started)
+    if started is None:
+        return None
+    return (_now() - started).total_seconds() / 3600.0
 
 
 def add_grievance(
@@ -92,10 +103,15 @@ def acknowledge_apology(conn, grievance_id: str, sincerity: float) -> bool:
     if not grievance:
         return False
     now = _now()
+    # The healing clock starts when an apology is first ACCEPTED (understood)
+    # in this offense cycle: a repeated sincere apology neither restarts it
+    # nor is ignored, and a plain "sorry" never starts it. A recurrence
+    # resets the cycle (repo.bump_grievance).
     if sincerity > SINCERITY_AUTO_UNDERSTAND_THRESHOLD:
         repo.update_grievance_status(
             conn, grievance_id, "understood",
-            apology_sincerity=sincerity, apology_at=now, understood_at=now,
+            apology_sincerity=sincerity, apology_at=now,
+            understood_at=grievance.get("understood_at") or now,
         )
         _adjust_capacity(conn, grievance["user_id"], delta=sincerity * 5)
     else:
@@ -109,8 +125,10 @@ def acknowledge_apology(conn, grievance_id: str, sincerity: float) -> bool:
 def progress_healing(conn, grievance_id: str) -> bool:
     """Advances the healing process one step. Returns True iff the
     grievance is (now, or already was) forgiven. Same six conditions as
-    ForgivenessModel._check_forgiveness_conditions(): a real apology, a
-    real understanding, sincerity >= 0.4, at least 2 hours elapsed,
+    ForgivenessModel._check_forgiveness_conditions() (except that the elapsed time is
+    measured from the healing phase, not the offense): a real apology, a
+    real understanding, sincerity >= 0.4, at least 2 hours since the healing phase
+    began (the first accepted apology of this offense cycle, NOT the offense),
     forgiveness_capacity >= 30, and no more than 2 other unforgiven
     grievances outstanding."""
     grievance = repo.get_grievance(conn, grievance_id)
@@ -140,7 +158,8 @@ def _forgiveness_conditions_met(conn, grievance: Dict[str, Any]) -> bool:
         return False
     if grievance["apology_sincerity"] < FORGIVENESS_MIN_SINCERITY:
         return False
-    if _age_hours(grievance) < MIN_HEALING_HOURS:
+    healing_age = _healing_age_hours(grievance)
+    if healing_age is None or healing_age < MIN_HEALING_HOURS:
         return False
     capacity = repo.get_forgiveness_capacity(conn, grievance["user_id"])
     if capacity["capacity"] < FORGIVENESS_MIN_CAPACITY:

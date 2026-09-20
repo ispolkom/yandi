@@ -53,6 +53,22 @@ class FakeCursor:
         G = self.conn.grievances
         if upper.startswith("SELECT * FROM GRIEVANCE WHERE ID=%S"):
             self._one = dict(G[params[0]]) if params[0] in G else None
+        elif upper.startswith("INSERT INTO GRIEVANCE"):
+            gid, user_id, event_type, description, severity, context, created_at, updated_at = params
+            G[gid] = {
+                "id": gid, "user_id": user_id, "event_type": event_type, "description": description,
+                "severity": severity, "status": "registered", "apology_sincerity": 0.0, "context": context,
+                "created_at": created_at, "apology_at": None, "understood_at": None, "forgiven_at": None,
+                "updated_at": updated_at}
+        elif "STATUS != 'FORGIVEN'" in upper:
+            user_id, prefix = params
+            rows = [g for g in G.values() if g["user_id"] == user_id and g["status"] != "forgiven"
+                    and g["description"][:20] == prefix]
+            self._one = dict(sorted(rows, key=lambda g: g["created_at"], reverse=True)[0]) if rows else None
+        elif upper.startswith("UPDATE GRIEVANCE SET SEVERITY=%S"):
+            severity, updated_at, gid = params
+            G[gid].update(severity=severity, status="registered", apology_sincerity=0.0, apology_at=None,
+                          understood_at=None, updated_at=updated_at)
         elif "STATUS NOT IN" in upper:
             rows = [g for g in G.values() if g["user_id"] == params[0] and g["status"] not in ("forgiven", "unforgiven")]
             self._all = [dict(g) for g in sorted(rows, key=lambda g: g["created_at"])]

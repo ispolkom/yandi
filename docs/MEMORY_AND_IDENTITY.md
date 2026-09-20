@@ -37,8 +37,14 @@ registered → acknowledged → understood → healing → forgiven | unforgiven
 
 - A sincere-enough apology advances a grievance to `understood`; a plain low-sincerity one only to
   `acknowledged`.
-- Forgiveness additionally needs a minimum elapsed time, enough remaining *forgiveness capacity*,
-  and not too many other unforgiven grievances. A simple "sorry" is deliberately not enough.
+- Forgiveness additionally needs a minimum time of **healing**, enough remaining *forgiveness
+  capacity*, and not too many other unforgiven grievances. A simple "sorry" is deliberately not
+  enough.
+- Two clocks are kept apart: the age of the **offense** (`created_at`, or the last recurrence) and
+  the age of the current **healing phase**, which starts when an apology is first *accepted*
+  (understood) in the current offense cycle. An old grievance apologised for today starts healing
+  now; a plain low-sincerity "sorry" does not start it; a recurrence of the offense clears the
+  cycle so an earlier apology cannot forgive the new offense.
 - An open grievance is any not yet `forgiven`/`unforgiven`.
 
 ### Current-event provenance

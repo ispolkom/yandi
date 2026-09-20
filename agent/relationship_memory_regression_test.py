@@ -108,6 +108,9 @@ class FakeCursor:
             severity, updated_at, gid = params
             self.conn.grievances[gid]["severity"] = severity
             self.conn.grievances[gid]["status"] = "registered"
+            self.conn.grievances[gid]["apology_sincerity"] = 0.0
+            self.conn.grievances[gid]["apology_at"] = None
+            self.conn.grievances[gid]["understood_at"] = None
             self.conn.grievances[gid]["updated_at"] = updated_at
         elif upper.startswith("UPDATE GRIEVANCE SET"):
             # Fixed shape from repositories.update_grievance_status():
@@ -261,7 +264,7 @@ check(
 
 healed_too_soon = rm.progress_healing(conn2, gid)
 check(
-    "3: progress_healing() refuses too soon (< 2 hours since created_at) even with a "
+    "3: progress_healing() refuses too soon (< 2 hours since the apology was accepted) even with a "
     "sincere, understood apology",
     healed_too_soon is False,
 )
@@ -270,8 +273,8 @@ check(
     repo.get_grievance(conn2, gid)["status"] == "healing",
 )
 
-# Simulate 3 hours having passed.
-conn2.grievances[gid]["created_at"] = datetime.utcnow() - timedelta(hours=3)
+# Simulate 3 hours having passed since the apology was accepted (began the healing phase).
+conn2.grievances[gid]["understood_at"] = datetime.utcnow() - timedelta(hours=3)
 healed_now = rm.progress_healing(conn2, gid)
 check("3: progress_healing() succeeds once enough time has passed and all conditions hold", healed_now is True)
 check("3: the grievance's status is now 'forgiven'", repo.get_grievance(conn2, gid)["status"] == "forgiven")
