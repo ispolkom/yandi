@@ -11,7 +11,7 @@ match_apology_grievance / apply_apology), without a second model call.
 Everything here runs on a synthetic user and an in-memory fake SQL
 connection. Owner memory is never touched.
 
-Run: /home/iam/venv/bin/python3 -m agent.relationship_apology_matching_regression_test
+Run: python -m agent.relationship_apology_matching_regression_test
 """
 from __future__ import annotations
 

@@ -4,7 +4,7 @@ Regression: production writeback must persist YANDI's lived query
 episodes through SQL-backed EpisodicMemory, not agent/dataset/*.jsonl.
 
 Run:
-  PYTHONPATH=/home/iam/yandi /home/iam/venv/bin/python -m agent.writeback_episodic_sql_regression_test
+  python -m agent.writeback_episodic_sql_regression_test
 """
 
 from pathlib import Path

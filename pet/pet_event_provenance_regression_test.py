@@ -24,7 +24,7 @@ result boundary; SQL effects are recorded, never executed) - they prove PET's
 behaviour GIVEN a model output, including a contaminated one. How often the
 real model contaminates is measured separately by the live experiment.
 
-Run: /home/iam/venv/bin/python3 -m pet.pet_event_provenance_regression_test
+Run: python -m pet.pet_event_provenance_regression_test
 """
 from __future__ import annotations
 

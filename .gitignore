@@ -1,18 +1,57 @@
-proxy.txt
+# Python
+**/__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
 
 # Rust build artifacts
 node/target/
 
-# Python
-**/__pycache__/
-*.pyc
+# Local runtime / personal agent state (never published)
+registry/
+agent/dataset/episodes_*.jsonl
+*.db
+*.sqlite
+*.db-wal
+*.db-shm
+*.db-journal
+*.log
+logs/
+
+# Local secrets and machine-specific config
+.env
+.env.*
+proxy.txt
+pet/council_config.json
+node/mobile/yandi_mobile/android/local.properties
+node/mobile/yandi_mobile/.flutter-plugins
+node/mobile/yandi_mobile/.flutter-plugins-dependencies
+node/mobile/yandi_mobile/.dart_tool/
+
+# Model weights
+*.gguf
+
+# Local build caches
+node/mobile/yandi_mobile/android/.gradle/
 
 # Manual backup snapshots (use git history instead)
 *.bak_*
 *.backup*
+*.py.before_*
 
-# Local runtime/personal agent state (per README: not tracked)
-registry/
-
-# Local tool config (machine-specific, not project source)
+# Local tool config and editor/OS files
 .claude/
+.codex
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Unrelated private working directories that may sit next to the repo
+/ai/
+/goodwin.su/
+/*.pdf

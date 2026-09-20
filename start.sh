@@ -6,7 +6,13 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${1:-9010}"
-PYTHON="/home/iam/venv/bin/python3"
+# Python interpreter: $YANDI_PYTHON, else ./.venv, else ~/venv, else python3
+PYTHON="${YANDI_PYTHON:-}"
+if [ -z "$PYTHON" ]; then
+  if [ -x "$SCRIPT_DIR/.venv/bin/python3" ]; then PYTHON="$SCRIPT_DIR/.venv/bin/python3"
+  elif [ -x "$HOME/venv/bin/python3" ]; then PYTHON="$HOME/venv/bin/python3"
+  else PYTHON="python3"; fi
+fi
 
 # Проверка Redis
 if ! redis-cli ping &>/dev/null; then
