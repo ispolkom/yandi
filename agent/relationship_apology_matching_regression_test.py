@@ -6,7 +6,7 @@ Invariant under test: A VALID APOLOGY DOES NOT IMPLY THE HEAVIEST
 GRIEVANCE IS ITS TARGET. The old rule applied every recognised apology to
 most_severe_active_grievance(); the target is now chosen from the apology's
 own text and the events' own record (agent/relationship_memory.py,
-match_apology_grievance / apply_apology), without a second model call.
+match_grievance_target / apply_apology), without a second model call.
 
 Everything here runs on a synthetic user and an in-memory fake SQL
 connection. Owner memory is never touched.
@@ -121,8 +121,14 @@ MILD_TEXT = "Ты какая-то бесполезная"
 
 
 def apply(conn, text, sincerity=0.8):
+    """The live flow: resolve the focus from the current text (before the
+    reply), then let the apology change only that grievance."""
     before = conn.snapshot()
-    result = rm.apply_apology(conn, USER, text, sincerity)
+    focus = rm.resolve_relationship_focus(conn, USER, text)
+    target = focus["grievance"]["id"] if focus["grievance"] else None
+    outcome = rm.apply_apology(conn, USER, target, sincerity)
+    result = {"target": outcome["target"], "basis": focus["basis"], "candidates": focus["open_count"],
+              "acknowledged": outcome["acknowledged"], "forgiven": outcome["forgiven"]}
     return result, conn.changed(before)
 
 
@@ -231,7 +237,7 @@ def main() -> int:
     same_time = c.grievances
     for gid in same_time:
         same_time[gid]["created_at"] = same_time[gid]["updated_at"] = datetime(2026, 1, 1)
-    pick = rm.match_apology_grievance(text, list(same_time.values()), [])
+    pick = rm.match_grievance_target(text, list(same_time.values()), [])
     check("F: identical time and severity -> id order (still deterministic)", pick.grievance_id == "g_a", repr(pick.grievance_id))
     sev = FakeConnection()
     sev.add("g_lo", "Ты ржавая консерва", 0.3, age=10 * MIN)
@@ -239,7 +245,7 @@ def main() -> int:
     for g in sev.grievances.values():
         g["created_at"] = g["updated_at"] = datetime(2026, 1, 1)
     check("F: identical time -> severity is the third tie-break",
-          rm.match_apology_grievance(text, list(sev.grievances.values()), []).grievance_id == "g_hi")
+          rm.match_grievance_target(text, list(sev.grievances.values()), []).grievance_id == "g_hi")
 
     # ── recurrence bumps: 'registered' updated_at is the last offense time ──
     bumped = FakeConnection()
@@ -288,11 +294,11 @@ def main() -> int:
     check("one apology changes at most one grievance even when several match", len(ch) == 1, repr(ch))
 
     # ── matcher is pure and takes no relational-state input ──
-    src = inspect.getsource(rm.match_apology_grievance) + inspect.getsource(rm._overlap) + inspect.getsource(rm._offense_time)
+    src = inspect.getsource(rm.match_grievance_target) + inspect.getsource(rm._overlap) + inspect.getsource(rm._offense_time)
     check("RELATIONAL STATE != EVENT IDENTITY: matcher never reads capacity / affection / trust",
           not any(w in src.lower() for w in ("capacity", "affection", "trust", "forgiv")), "")
     check("matcher signature takes no connection (pure over already-read rows)",
-          "conn" not in inspect.signature(rm.match_apology_grievance).parameters)
+          "conn" not in inspect.signature(rm.match_grievance_target).parameters)
 
     # ── PET level: G, and the apology reaching the memory layer with the CURRENT text ──
     import pet.chat_local as chat_local
@@ -302,19 +308,21 @@ def main() -> int:
         return SemanticCompletionResult(reply=reply, state=state, reply_ok=True, state_ok=state is not None,
                                         parse_ok=True, error=None, metadata={})
 
+    import agent.db.sql.shadow_write as shadow_write
+
+    OWNER = chat_local._RELATIONSHIP_USER_ID
+
     def pet_turn(conn, messages, reply, state):
-        def bridge(**kw):
-            return rm.apply_apology(conn, USER, kw["apology_text"], kw["sincerity"])
-        with patch.object(chat_local, "shadow_get_relationship_context", lambda **kw: {"available": True, "grievance": None}), \
+        """Real chat_local + real shadow_write wrappers, over the fake connection."""
+        with patch.object(shadow_write, "_shadow", lambda log, verbose, label, fn: fn(conn)), \
              patch.object(chat_local, "_self_knowledge_message", lambda: None), \
              patch.object(chat_local, "_call_model_semantic", lambda *a, **k: sem(reply, state)), \
-             patch.object(chat_local, "shadow_add_grievance", lambda **kw: None), \
-             patch.object(chat_local, "shadow_apply_apology", bridge):
+             patch.object(chat_local, "shadow_add_grievance", lambda **kw: None):
             return chat_local._respond_with_character("heretic:q8", messages, 0.7)
 
     conn = FakeConnection()
-    conn.add("g_old", OLD_SEVERE_TEXT, 0.9, age=3 * DAY)
-    conn.add("g_mild", MILD_TEXT, 0.35, age=5 * MIN)
+    conn.add("g_old", OLD_SEVERE_TEXT, 0.9, age=3 * DAY, user_id=OWNER)
+    conn.add("g_mild", MILD_TEXT, 0.35, age=5 * MIN, user_id=OWNER)
     before = conn.snapshot()
     pet_turn(conn, [{"role": "user", "content": "Извини, что только что назвал тебя бесполезной."}], "Ладно.",
              {"is_insult": False, "severity": 0.0, "is_apology": True, "sincerity": 0.8, "evidence": "Извини"})
@@ -322,8 +330,8 @@ def main() -> int:
           conn.changed(before) == ["g_mild"], repr(conn.changed(before)))
 
     conn = FakeConnection()
-    conn.add("g_old", OLD_SEVERE_TEXT, 0.9, age=3 * DAY, status="healing")
-    conn.add("g_mild", MILD_TEXT, 0.35, age=5 * MIN)
+    conn.add("g_old", OLD_SEVERE_TEXT, 0.9, age=3 * DAY, status="healing", user_id=OWNER)
+    conn.add("g_mild", MILD_TEXT, 0.35, age=5 * MIN, user_id=OWNER)
     before = conn.snapshot()
     hist = [{"role": "user", "content": "Извини, я зря это сказал."}, {"role": "assistant", "content": "Ладно, проехали."},
             {"role": "user", "content": "Как ты?"}]
@@ -333,9 +341,10 @@ def main() -> int:
         check(f"G: neutral current message + historical apology + contaminated state ({label}) -> provenance guard: no grievance touched",
               conn.changed(before) == [], repr(conn.changed(before)))
 
-    chat_src = inspect.getsource(chat_local._apply_self_report)
-    check("PET no longer picks the apology target itself (no most_severe / context lookup in the apology branch)",
-          "most_severe" not in chat_src and "shadow_get_relationship_context" not in chat_src and chat_src.count("shadow_apply_apology(") == 1)
+    chat_src = inspect.getsource(chat_local._apply_current_turn_event)
+    check("PET does not pick the apology target itself: it applies the focus the reply was built around",
+          "most_severe" not in chat_src and "shadow_get_relationship_context" not in chat_src
+          and chat_src.count("shadow_apply_apology(") == 1 and 'memory_ctx' in chat_src)
 
     print()
     print("=" * 72)

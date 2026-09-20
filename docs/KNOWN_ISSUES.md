@@ -11,13 +11,6 @@ history, but the model often omits or invents the quote, so some genuine insults
 dropped. The guard is fail-safe (an event may be missed, never fabricated). Improving recall is open
 work and must not weaken the provenance check.
 
-## Reply / grievance target mismatch
-
-The reply is generated before apology matching and is shown the most salient (highest-severity)
-open grievance as historical memory. The apology matcher may select a different grievance as the
-target. The visible reply can therefore refer to one grievance while the state change applies to
-another.
-
 ## Healing clock semantics
 
 Minimum healing time is computed from the grievance's creation time, not from the apology or

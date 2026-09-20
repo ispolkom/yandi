@@ -225,6 +225,10 @@ def most_severe_active_grievance(conn, user_id: str) -> Optional[Dict[str, Any]]
 #        - else AMBIGUOUS -> no target, no state change.
 #   4. no active grievance -> no target (an apology never creates one).
 #
+# The same selection runs BEFORE generation (resolve_relationship_focus) so
+# the reply is built around the grievance that a later apology will
+# actually change.
+#
 # Severity is only a late tie-break. Affection / forgiveness capacity /
 # trust are deliberately NOT inputs: RELATIONAL STATE != EVENT IDENTITY.
 # ============================================================
@@ -305,8 +309,8 @@ def _overlap(apology_stems: set, grievance: Dict[str, Any]) -> float:
     return len(shared) / len(apology_stems)
 
 
-class ApologyMatch:
-    """Outcome of match_apology_grievance(): the chosen grievance (or None)
+class GrievanceMatch:
+    """Outcome of match_grievance_target(): the chosen grievance (or None)
     and WHY, so the decision is inspectable and testable."""
 
     __slots__ = ("grievance", "basis", "candidates")
@@ -321,16 +325,19 @@ class ApologyMatch:
         return self.grievance["id"] if self.grievance else None
 
 
-def match_apology_grievance(
+def match_grievance_target(
     apology_text: str,
     active: List[Dict[str, Any]],
     resolved: Optional[List[Dict[str, Any]]] = None,
     now: Optional[datetime] = None,
-) -> ApologyMatch:
-    """Pure: picks at most ONE active grievance for an apology. See the
-    section comment above for the policy."""
+) -> GrievanceMatch:
+    """Pure: picks at most ONE active grievance that the CURRENT message is
+    about (an apology names an event; so does any other reference to the
+    past). It never decides WHAT the message is (insult / apology / neutral);
+    that stays with the validated model state. See the section comment
+    above for the policy."""
     if not active:
-        return ApologyMatch(None, "no_active_grievance", 0)
+        return GrievanceMatch(None, "no_active_grievance", 0)
     now = now or _now()
 
     apology_stems = _stems(apology_text, drop_non_content=True)
@@ -339,37 +346,65 @@ def match_apology_grievance(
         best_active = max(score for score, _ in scored)
         best_resolved = max((_overlap(apology_stems, g) for g in (resolved or [])), default=0.0)
         if best_resolved > best_active:
-            return ApologyMatch(None, "names_resolved_grievance", len(active))
+            return GrievanceMatch(None, "names_resolved_grievance", len(active))
         if best_active > 0:
             top = [g for score, g in scored if score == best_active]
             if len(top) == 1:
-                return ApologyMatch(top[0], "explicit_reference", len(active))
+                return GrievanceMatch(top[0], "explicit_reference", len(active))
             chosen = min(top, key=lambda g: (
                 -(_offense_time(g) - _EPOCH).total_seconds(),
                 -float(g.get("severity") or 0.0),
                 str(g.get("id")),
             ))
-            return ApologyMatch(chosen, "explicit_reference_tie_recent", len(active))
+            return GrievanceMatch(chosen, "explicit_reference_tie_recent", len(active))
 
     if len(active) == 1:
-        return ApologyMatch(active[0], "sole_active_grievance", 1)
+        return GrievanceMatch(active[0], "sole_active_grievance", 1)
     local = [g for g in active if (now - _offense_time(g)).total_seconds() / 3600.0 <= APOLOGY_LOCALITY_HOURS]
     if len(local) == 1:
-        return ApologyMatch(local[0], "sole_recent_grievance", len(active))
-    return ApologyMatch(None, "ambiguous", len(active))
+        return GrievanceMatch(local[0], "sole_recent_grievance", len(active))
+    return GrievanceMatch(None, "ambiguous", len(active))
 
 
-def apply_apology(conn, user_id: str, apology_text: str, sincerity: float) -> Dict[str, Any]:
-    """Match the apology to one active grievance and, only then, run the
-    existing lifecycle (acknowledge -> progress healing) on THAT grievance.
-    With no target nothing is written."""
+MAX_FOCUS_CANDIDATES = 3
+
+
+def resolve_relationship_focus(
+    conn, user_id: str, current_text: str, now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Which open grievance (if any) the CURRENT user message is about,
+    resolved BEFORE the reply is generated so the reply's memory context and
+    a later apology write share one causal target.
+
+    This only selects a historical target from the current text and the
+    grievance ledger. It does not recognise an insult or an apology and
+    never writes.
+
+    Returns {"grievance": row | None, "basis": str, "open_count": int,
+    "candidates": [rows]}; `candidates` is filled only for basis
+    "ambiguous" (the most recent open grievances, newest first)."""
     active = get_active_grievances(conn, user_id)
     resolved = repo.list_recent_resolved_grievances(conn, user_id) if active else []
-    match = match_apology_grievance(apology_text, active, resolved)
-    result = {"target": match.grievance_id, "basis": match.basis, "candidates": match.candidates,
-              "acknowledged": False, "forgiven": False}
-    if match.grievance is None:
+    match = match_grievance_target(current_text, active, resolved, now)
+    candidates: List[Dict[str, Any]] = []
+    if match.basis == "ambiguous":
+        candidates = sorted(active, key=lambda g: _offense_time(g), reverse=True)[:MAX_FOCUS_CANDIDATES]
+    return {"grievance": match.grievance, "basis": match.basis, "open_count": len(active), "candidates": candidates}
+
+
+def apply_apology(conn, user_id: str, grievance_id: Optional[str], sincerity: float) -> Dict[str, Any]:
+    """Run the existing lifecycle (acknowledge -> progress healing) on the
+    grievance the reply was already built around. `grievance_id` comes from
+    resolve_relationship_focus(); with no target, or a target that is no
+    longer an open grievance of this user, nothing is written. One call
+    changes at most one grievance."""
+    result = {"target": None, "acknowledged": False, "forgiven": False}
+    if not grievance_id:
         return result
-    result["acknowledged"] = acknowledge_apology(conn, match.grievance["id"], sincerity)
-    result["forgiven"] = progress_healing(conn, match.grievance["id"])
+    grievance = repo.get_grievance(conn, grievance_id)
+    if not grievance or grievance["user_id"] != user_id or grievance["status"] in ("forgiven", "unforgiven"):
+        return result
+    result["target"] = grievance_id
+    result["acknowledged"] = acknowledge_apology(conn, grievance_id, sincerity)
+    result["forgiven"] = progress_healing(conn, grievance_id)
     return result

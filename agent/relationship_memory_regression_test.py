@@ -335,7 +335,7 @@ check(
 )
 _pos_raw_call = _src_respond.find("_call_model_semantic(")
 _pos_parse = _src_respond.find("intensity_from_state(")
-_pos_apply = _src_respond.find("_apply_self_report(")
+_pos_apply = _src_respond.find("_apply_current_turn_event(")
 check(
     "4: the model is called BEFORE her normalized state is converted, which happens BEFORE it's "
     "written to memory (correct data dependency order)",

@@ -190,24 +190,48 @@ def _relationship_memory_available(ctx: dict | None) -> bool:
     return "grievance_id" in ctx
 
 
+def _grievance_fact(description: str, severity: float, status: str) -> str:
+    return f"«{description}» (твоя оценка серьёзности тогда: {severity:.2f}; статус обиды: {status})"
+
+
 def _memory_context_message(ctx: dict | None) -> str | None:
     """Plain statement of RAW FACTS only — never an instruction on how
-    to feel about them (see module docstring above)."""
+    to feel about them (see module docstring above). The grievance shown is
+    the one the CURRENT user message is about (resolved before generation by
+    agent.relationship_memory.resolve_relationship_focus), never merely the
+    heaviest one; when the message does not single one out, that is stated
+    as a fact too."""
     if not _relationship_memory_available(ctx):
         return (
             "Память об отношениях: сейчас недоступна, поэтому неизвестно, есть ли "
             "открытые обиды на пользователя."
         )
     grievance = _relationship_grievance(ctx)
-    if not grievance:
-        return "Память об отношениях: сейчас открытых обид на пользователя нет."
-    return (
-        "Историческая память об отношениях (это ПРОШЛОЕ, а не текущее сообщение "
-        f"пользователя): раньше пользователь сказал тебе «{grievance['description']}» "
-        f"(твоя оценка серьёзности тогда: {grievance['severity']:.2f}); "
-        f"статус обиды: {grievance['status']}. Эта память может влиять на твой "
-        "ответ, но не является новым событием."
-    )
+    open_count = ctx.get("open_count") if isinstance(ctx.get("open_count"), int) else None
+    basis = ctx.get("focus_basis")
+    past = "Историческая память об отношениях (это ПРОШЛОЕ, а не текущее сообщение пользователя): "
+    tail = " Эта память может влиять на твой ответ, но не является новым событием."
+    if grievance:
+        others = f" Всего открытых обид на пользователя: {open_count}." if open_count and open_count > 1 else ""
+        return (
+            past + "раньше пользователь сказал тебе "
+            + _grievance_fact(grievance["description"], grievance["severity"], grievance["status"]) + "."
+            + others + tail
+        )
+    if basis == "ambiguous":
+        facts = "; ".join(
+            _grievance_fact(c["description"], c["severity"], c["status"]) for c in (ctx.get("candidates") or [])
+        )
+        return (
+            past + f"открытых обид на пользователя несколько ({open_count}), и текущее сообщение "
+            f"не указывает, к какой из них оно относится. Недавние: {facts}." + tail
+        )
+    if basis == "names_resolved_grievance":
+        return (
+            past + "то, о чём говорит пользователь, уже урегулировано; ни одна из открытых обид "
+            f"({open_count}) к текущему сообщению не относится." + tail
+        )
+    return "Память об отношениях: сейчас открытых обид на пользователя нет."
 
 
 def _self_knowledge_message() -> str | None:
@@ -358,28 +382,31 @@ def _call_model_semantic(model: str, messages: list[dict], temperature: float, m
     )
 
 
-def _apply_self_report(text: str, intensity) -> None:
+def _apply_current_turn_event(text: str, intensity, memory_ctx: dict | None) -> None:
     """Owner mandate ("характер, обидчива... простое извени - не
-    канает"): writes HER OWN self-report (parsed out of the same
-    generation that produced her reply, agent/message_intensity.py)
-    into the SQL-backed grievance/forgiveness_capacity state — this is
-    memory bookkeeping only, never a second opinion overriding what she
-    already decided.
+    канает"): writes the CURRENT-TURN EVENT (insult / apology) of the last
+    user message — recognised by the model in the same generation that
+    produced her reply and already provenance-checked by
+    _require_current_turn_provenance() — into the SQL-backed grievance /
+    forgiveness_capacity state. It is never derived from memory and never a
+    second opinion overriding what she already decided.
+
+    An apology changes ONLY the grievance the reply was built around
+    (`memory_ctx["grievance"]`, resolved before generation from the current
+    text), so the visible reply and the persistent transition share one
+    causal target. No focused grievance -> nothing is written.
 
     Fail-open: intensity.ok=False (no marker, malformed JSON, etc.)
     means nothing gets written — a broken self-report degrades to "no
-    memory update this turn," never a crash or a guessed value.
-
-    FUTURE CLEANUP (deliberately not renamed now): "self report" is no
-    longer accurate. What this applies is the CURRENT-TURN EVENT (insult /
-    apology) of the last user message, already provenance-checked by
-    _require_current_turn_provenance(); it is not a summary of the
-    relationship and never derived from memory. Something like
-    _apply_current_turn_event() would be the honest name."""
+    memory update this turn," never a crash or a guessed value."""
     if not intensity.ok:
         return
     if intensity.is_apology:
-        shadow_apply_apology(user_id=_RELATIONSHIP_USER_ID, apology_text=text, sincerity=intensity.sincerity)
+        grievance = _relationship_grievance(memory_ctx)
+        if grievance:
+            shadow_apply_apology(
+                user_id=_RELATIONSHIP_USER_ID, grievance_id=grievance["grievance_id"], sincerity=intensity.sincerity,
+            )
     elif intensity.is_insult and intensity.severity >= _INSULT_SEVERITY_THRESHOLD:
         shadow_add_grievance(
             user_id=_RELATIONSHIP_USER_ID, event_type="insult", description=text, severity=intensity.severity,
@@ -392,15 +419,15 @@ def _respond_with_character(model: str, messages: list[dict], temperature: float
     reading of the conversation come out of the SAME generation (see
     module docstring's "CHARACTER" note for why this replaced an
     earlier two-call design)."""
-    memory_ctx = shadow_get_relationship_context(user_id=_RELATIONSHIP_USER_ID)
     last_user_text = next(
         (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "",
     )
+    memory_ctx = shadow_get_relationship_context(user_id=_RELATIONSHIP_USER_ID, current_text=last_user_text)
     semantic = _call_model_semantic(model, messages, temperature, memory_ctx)
     visible = semantic.reply if semantic.reply_ok else _SEMANTIC_FAILURE_REPLY
     intensity = intensity_from_state(semantic.state) if semantic.state_ok and semantic.state is not None else intensity_from_state(None)
     intensity = _require_current_turn_provenance(intensity, semantic.state, last_user_text)
-    _apply_self_report(last_user_text, intensity)
+    _apply_current_turn_event(last_user_text, intensity, memory_ctx)
     return _clean_response(visible)
 
 

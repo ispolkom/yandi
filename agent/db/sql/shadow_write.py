@@ -659,41 +659,50 @@ def shadow_progress_healing(*, grievance_id: str, log=None, verbose: bool = Fals
 
 
 def shadow_apply_apology(
-    *, user_id: str, apology_text: str, sincerity: float, log=None, verbose: bool = False,
+    *, user_id: str, grievance_id: Optional[str], sincerity: float, log=None, verbose: bool = False,
 ) -> Optional[dict]:
-    """Matches the CURRENT apology text to at most one active grievance and
-    runs acknowledge -> progress-healing on that grievance only, in one
-    transaction. Returns {"target": id|None, "basis": str, "candidates": int,
-    "acknowledged": bool, "forgiven": bool}, or None if SQL was unreachable.
-    With no target nothing is written."""
+    """Runs acknowledge -> progress-healing on the ONE grievance the reply
+    was built around (the focus from shadow_get_relationship_context), in a
+    single transaction. Returns {"target": id|None, "acknowledged": bool,
+    "forgiven": bool}, or None if SQL was unreachable. With no target
+    nothing is written."""
     def _do(conn):
-        return relationship_memory.apply_apology(conn, user_id, apology_text, sincerity)
+        return relationship_memory.apply_apology(conn, user_id, grievance_id, sincerity)
 
     return _shadow(log, verbose, "apply_apology", _do)
 
 
-def shadow_get_relationship_context(*, user_id: str, log=None, verbose: bool = False) -> Optional[dict]:
-    """Read-only: the RAW FACTS of the most severe active grievance (if
-    any) — description/severity/status, nothing interpreted — for
-    pet/chat_local.py to state plainly in the system prompt.
+def shadow_get_relationship_context(
+    *, user_id: str, current_text: str, log=None, verbose: bool = False,
+) -> Optional[dict]:
+    """Read-only: the RAW FACTS about which open grievance the CURRENT user
+    message is about (resolved from the message text and the grievance
+    ledger, never by severity alone) — description/severity/status, nothing
+    interpreted — for pet/chat_local.py to state plainly in the system
+    prompt, and to reuse as the target of a later apology write.
 
     Returns:
-      {"available": True, "grievance": None} when memory is reachable
-      and empty;
-      {"available": True, "grievance": {...}} when an active grievance
-      exists;
+      {"available": True, "grievance": {...} | None, "focus_basis": str,
+       "open_count": int, "candidates": [...]} when memory is reachable.
+       `grievance` is the single focused target (with its id) or None;
+       `candidates` is filled only when the message does not single one
+       out (basis "ambiguous");
       None only when the SQL-backed memory could not be read.
 
     This deliberately preserves UNKNOWN != EMPTY across the shadow
     boundary. A SQL outage must not become the false statement
     "there are no open grievances" in YANDI's own prompt."""
     def _do(conn):
-        grievance = relationship_memory.most_severe_active_grievance(conn, user_id)
-        if not grievance:
-            return {"available": True, "grievance": None}
+        focus = relationship_memory.resolve_relationship_focus(conn, user_id, current_text)
+        grievance = focus["grievance"]
         return {
             "available": True,
-            "grievance": {"grievance_id": grievance["id"], **relationship_memory.memory_facts(grievance)},
+            "grievance": (
+                {"grievance_id": grievance["id"], **relationship_memory.memory_facts(grievance)} if grievance else None
+            ),
+            "focus_basis": focus["basis"],
+            "open_count": focus["open_count"],
+            "candidates": [relationship_memory.memory_facts(g) for g in focus["candidates"]],
         }
 
     return _shadow(log, verbose, "get_relationship_context", _do)

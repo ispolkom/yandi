@@ -24,6 +24,7 @@ SUITES=(
   llm_gateway.secure_store_regression_test
   pet.pet_chat_local_regression_test
   pet.pet_event_provenance_regression_test
+  pet.pet_relationship_focus_regression_test
   agent.message_intensity_regression_test
   agent.relationship_memory_regression_test
   agent.relationship_apology_matching_regression_test

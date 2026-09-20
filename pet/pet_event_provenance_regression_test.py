@@ -132,11 +132,11 @@ def main() -> int:
         [{"role": "user", "content": "Извини, я зря это сказал."}], MEM_INSULT, "Ладно.",
         {"is_insult": False, "severity": 0.0, "is_apology": True, "sincerity": 0.8, "evidence": "Извини"},
     )
-    check("5: real current apology -> exactly one apply_apology (matching happens in the memory layer), nothing else",
+    check("5: real current apology -> exactly one apply_apology (targeting the grievance from the reply's own memory context), nothing else",
           [c[0] for c in calls] == ["apply_apology"], repr(calls))
     if calls:
-        check("5: the CURRENT apology text and the model's sincerity are passed on (no pre-picked grievance id)",
-              calls[0][1] == {"user_id": "owner", "apology_text": "Извини, я зря это сказал.", "sincerity": 0.8}, repr(calls[0][1]))
+        check("5: the apology carries the grievance id the reply was built around, and the model's sincerity",
+              calls[0][1] == {"user_id": "owner", "grievance_id": "g_old", "sincerity": 0.8}, repr(calls[0][1]))
 
     # ── 6. a real event WITHOUT evidence is dropped (fail-safe: missed, never falsified) ──
     visible, calls = run_turn(

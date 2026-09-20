@@ -55,11 +55,22 @@ remembered insult or an apology earlier in the history may colour the reply, but
 re-recorded as something the user just did. Trade-off: recall of genuine events is lower than
 without the guard (see [KNOWN_ISSUES.md](KNOWN_ISSUES.md)).
 
+### Relationship focus: one causal target for reply and write
+
+Before the reply is generated, `resolve_relationship_focus` decides which open grievance (if any)
+the **current** user message is about, using the selection policy below. The prompt's memory
+context is built around that grievance (or states that the message does not single one out, or
+that the matter is already settled), and a later apology changes **only that grievance**. So the
+visible reply and the persistent transition share one causal target. The focus is only a *target*:
+it never decides that a message is an insult or an apology. That still comes from the model's
+validated state, so a missed event stays missed and memory still cannot create an event.
+
 ### Apology → grievance matching
 
 **A valid apology does not imply the heaviest grievance is its target.** An apology is about a
 specific event, so the target is chosen deterministically, without a second model call
-(`match_apology_grievance`, `apply_apology` in `agent/relationship_memory.py`):
+(`match_grievance_target`, `resolve_relationship_focus`, `apply_apology` in
+`agent/relationship_memory.py`):
 
 1. **Explicit reference.** Content words named by the apology (after removing apology/filler words)
    overlap an open grievance's description. Best overlap wins. Equal overlap: most recent offense,
