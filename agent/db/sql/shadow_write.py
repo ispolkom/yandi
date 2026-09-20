@@ -30,6 +30,7 @@ from typing import Any, Callable, Optional
 from agent.db.sql.connection import get_connection, SqlUnavailable
 import agent.db.sql.repositories as repo
 import agent.relationship_memory as relationship_memory
+import agent.relationship_state as relationship_state
 
 _PIPELINE_VERSION_CACHE: Optional[str] = None
 
@@ -683,10 +684,11 @@ def shadow_get_relationship_context(
 
     Returns:
       {"available": True, "grievance": {...} | None, "focus_basis": str,
-       "forgiveness_capacity": float, "open_count": int, "candidates": [...]}
-       when memory is reachable. `forgiveness_capacity` is the continuous
-       relationship state that lifecycle events (offenses, accepted
-       apologies, forgiveness) move; it is stated to the model as a fact.
+       "relationship_state": {trust, respect, affection, forgiveness_capacity},
+       "open_count": int, "candidates": [...]}
+       when memory is reachable. `relationship_state` is the continuous
+       stance (agent/relationship_state.py) that validated lifecycle events
+       move; it is stated to the model as a fact.
        `grievance` is the single focused target (with its id) or None;
        `candidates` is filled only when the message does not single one
        out (basis "ambiguous");
@@ -704,7 +706,7 @@ def shadow_get_relationship_context(
                 {"grievance_id": grievance["id"], **relationship_memory.memory_facts(grievance)} if grievance else None
             ),
             "focus_basis": focus["basis"],
-            "forgiveness_capacity": round(float(repo.get_forgiveness_capacity(conn, user_id)["capacity"]), 1),
+            "relationship_state": {k: round(v, 1) for k, v in relationship_state.get_state(conn, user_id).items()},
             "open_count": focus["open_count"],
             "candidates": [relationship_memory.memory_facts(g) for g in focus["candidates"]],
         }

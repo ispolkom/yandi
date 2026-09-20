@@ -30,6 +30,7 @@ SUITES=(
   agent.relationship_memory_regression_test
   agent.relationship_apology_matching_regression_test
   agent.relationship_healing_clock_regression_test
+  agent.relationship_state_regression_test
   agent.epistemic_canonical_trust_shadow_regression_test
   agent.writeback_episodic_sql_regression_test
   agent.db_sql_shadow_write_regression_test

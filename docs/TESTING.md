@@ -25,7 +25,7 @@ The interpreter is `YANDI_PYTHON`, else `./.venv`, else `~/venv`, else `python3`
 |---|---|
 | Gateway | `llm_gateway.client_regression_test`, `remote_backend_`, `llamacpp_backend_`, `intelligence_bridge_`, `secure_store_` |
 | Personal chat | `pet.pet_chat_local_regression_test`, `pet.pet_event_provenance_regression_test`, `pet.pet_relationship_focus_regression_test`, `pet.pet_relationship_state_causality_regression_test` |
-| Relationship memory | `agent.message_intensity_regression_test`, `agent.relationship_memory_regression_test`, `agent.relationship_apology_matching_regression_test`, `agent.relationship_healing_clock_regression_test` |
+| Relationship memory | `agent.message_intensity_regression_test`, `agent.relationship_memory_regression_test`, `agent.relationship_apology_matching_regression_test`, `agent.relationship_healing_clock_regression_test`, `agent.relationship_state_regression_test` |
 | Epistemic / write-back | `agent.epistemic_canonical_trust_shadow_regression_test`, `agent.writeback_episodic_sql_regression_test` |
 | SQL layer | `agent.db_sql_shadow_write_regression_test`, `agent.db_sql_security_injection_regression_test` |
 

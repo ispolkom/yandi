@@ -195,26 +195,40 @@ def _grievance_fact(description: str, severity: float, status: str) -> str:
     return f"«{description}» (твоя оценка серьёзности тогда: {severity:.2f}; статус обиды: {status})"
 
 
-def _capacity_band(capacity: float) -> str:
-    """Qualitative reading of forgiveness_capacity. A bare number invites the
-    model to recite it ("92/100"); the band states the same fact without
-    turning the reply into a report on her own state. `низкая` is exactly the
-    range below rm.FORGIVENESS_MIN_CAPACITY, where forgiveness is impossible."""
-    if capacity < relationship_memory.FORGIVENESS_MIN_CAPACITY:
-        return "низкая"
-    if capacity <= 70:
-        return "средняя"
-    return "высокая"
+def _band(value: float, low_below: float = 30.0, feminine: bool = False) -> str:
+    """Qualitative reading of a 0..100 coordinate. A bare number invites the
+    model to recite it ("92/100"); a band states the same fact without
+    turning the reply into a report on her own state."""
+    low, mid, high = ("низкая", "средняя", "высокая") if feminine else ("низкое", "среднее", "высокое")
+    if value < low_below:
+        return low
+    return mid if value <= 70 else high
 
 
-def _capacity_fact(ctx: dict) -> str:
+_STATE_LABELS = (("trust", "доверие"), ("respect", "уважение"), ("affection", "привязанность"))
+
+
+def _state_fact(ctx: dict) -> str:
     """The continuous relationship state, as a plain fact (never how to feel
-    about it). It is moved only by lifecycle events: new offenses and
-    recurrences lower it, accepted apologies and forgiveness raise it."""
-    capacity = ctx.get("forgiveness_capacity")
-    if not isinstance(capacity, (int, float)) or isinstance(capacity, bool):
+    about it): trust / respect / affection and forgiveness capacity. Only
+    validated lifecycle events move it (agent/relationship_state.py,
+    agent/relationship_memory.py). `низкая` способность прощать is exactly the
+    range below rm.FORGIVENESS_MIN_CAPACITY, where forgiveness is impossible."""
+    state = ctx.get("relationship_state")
+    if not isinstance(state, dict):
         return ""
-    return f" Твоя нынешняя способность прощать этого человека: {_capacity_band(float(capacity))}."
+    parts = []
+    for key, label in _STATE_LABELS:
+        value = state.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            parts.append(f"{label} — {_band(float(value))}")
+    capacity = state.get("forgiveness_capacity")
+    if isinstance(capacity, (int, float)) and not isinstance(capacity, bool):
+        band = _band(float(capacity), relationship_memory.FORGIVENESS_MIN_CAPACITY, feminine=True)
+        parts.append(f"способность прощать — {band}")
+    if not parts:
+        return ""
+    return " Твоё нынешнее отношение к этому человеку: " + "; ".join(parts) + "."
 
 
 def _memory_context_message(ctx: dict | None) -> str | None:
@@ -234,7 +248,7 @@ def _memory_context_message(ctx: dict | None) -> str | None:
     open_count = ctx.get("open_count") if isinstance(ctx.get("open_count"), int) else None
     basis = ctx.get("focus_basis")
     past = "Историческая память об отношениях (это ПРОШЛОЕ, а не текущее сообщение пользователя): "
-    tail = " Эта память может влиять на твой ответ, но не является новым событием." + _capacity_fact(ctx)
+    tail = " Эта память может влиять на твой ответ, но не является новым событием." + _state_fact(ctx)
     if grievance:
         others = f" Всего открытых обид на пользователя: {open_count}." if open_count and open_count > 1 else ""
         return (
@@ -255,7 +269,7 @@ def _memory_context_message(ctx: dict | None) -> str | None:
             past + "то, о чём говорит пользователь, уже урегулировано; ни одна из открытых обид "
             f"({open_count}) к текущему сообщению не относится." + tail
         )
-    return "Память об отношениях: сейчас открытых обид на пользователя нет." + _capacity_fact(ctx)
+    return "Память об отношениях: сейчас открытых обид на пользователя нет." + _state_fact(ctx)
 
 
 def _self_knowledge_message() -> str | None:

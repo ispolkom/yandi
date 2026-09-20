@@ -34,7 +34,9 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 
 class FakeCursor:
-    """Only the SQL shapes agent/relationship_memory.py's apology path issues."""
+    """Only the SQL shapes the relationship lifecycle issues."""
+
+    lastrowid = 0
 
     def __init__(self, conn):
         self.conn = conn
@@ -85,6 +87,23 @@ class FakeCursor:
                     g[key] = value
         elif upper.startswith("SELECT COUNT(*) AS C FROM GRIEVANCE"):
             self._one = {"c": sum(1 for g in G.values() if g["user_id"] == params[0] and g["status"] == params[1])}
+        elif upper.startswith("SELECT * FROM INNER_STATE WHERE"):
+            self._one = dict(self.conn.inner_state[params[0]]) if params[0] in self.conn.inner_state else None
+        elif upper.startswith("INSERT IGNORE INTO INNER_STATE"):
+            user_id, updated_at = params
+            self.conn.inner_state.setdefault(user_id, {
+                "user_id": user_id, "mood": "calm", "energy": 70.0, "curiosity": 60.0, "patience": 50.0,
+                "openness": 60.0, "trust": 50.0, "respect": 50.0, "forgiveness": 50.0, "affection": 30.0,
+                "updated_at": updated_at})
+        elif upper.startswith("UPDATE INNER_STATE SET"):
+            columns = [c.split("=")[0].strip() for c in sql.split("SET", 1)[1].split("WHERE")[0].split(",")]
+            *values, user_id = params
+            self.conn.inner_state[user_id].update(dict(zip(columns, values)))
+        elif upper.startswith("INSERT INTO INNER_STATE_EVENT"):
+            user_id, event_type, description, sincerity, weight, resolved, created_at = params
+            self.conn.inner_state_events.append({
+                "user_id": user_id, "event_type": event_type, "description": description,
+                "sincerity": sincerity, "weight": weight, "created_at": created_at})
         elif upper.startswith("SELECT * FROM FORGIVENESS_CAPACITY"):
             self._one = dict(self.conn.capacities[params[0]]) if params[0] in self.conn.capacities else None
         elif upper.startswith("INSERT INTO FORGIVENESS_CAPACITY"):
@@ -105,6 +124,8 @@ class FakeConnection:
     def __init__(self):
         self.grievances: dict[str, dict] = {}
         self.capacities: dict[str, dict] = {}
+        self.inner_state: dict[str, dict] = {}
+        self.inner_state_events: list[dict] = []
 
     def cursor(self):
         return FakeCursor(self)

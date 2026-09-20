@@ -68,6 +68,8 @@ check("1: forgiveness_capacity classified 'C'", TABLE_CLASSIFICATION.get("forgiv
 # ============================================================
 
 class FakeCursor:
+    lastrowid = 0
+
     def __init__(self, conn):
         self.conn = conn
         self._result = None

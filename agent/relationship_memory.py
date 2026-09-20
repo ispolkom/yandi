@@ -36,6 +36,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+from agent import relationship_state
 from agent.db.sql import repositories as repo
 
 MIN_HEALING_HOURS = 2.0
@@ -87,11 +88,13 @@ def add_grievance(
         new_severity = min(1.0, existing["severity"] + severity * 0.3)
         repo.bump_grievance(conn, existing["id"], new_severity)
         _adjust_capacity(conn, user_id, delta=-(new_severity - existing["severity"]) * 10)
+        relationship_state.record_insult(conn, user_id, severity)
         return existing["id"]
 
     grievance_id = f"g_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     repo.record_grievance(conn, grievance_id, user_id, event_type, description, severity, context)
     _adjust_capacity(conn, user_id, delta=-severity * 10)
+    relationship_state.record_insult(conn, user_id, severity)
     return grievance_id
 
 
@@ -121,6 +124,7 @@ def acknowledge_apology(conn, grievance_id: str, sincerity: float) -> bool:
             # One accepted apology restores capacity once per offense cycle;
             # repeating it must not farm the continuous state.
             _adjust_capacity(conn, grievance["user_id"], delta=sincerity * 5)
+            relationship_state.record_accepted_apology(conn, grievance["user_id"], grievance["severity"], sincerity)
     else:
         repo.update_grievance_status(
             conn, grievance_id, "acknowledged",

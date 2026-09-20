@@ -47,21 +47,37 @@ registered → acknowledged → understood → healing → forgiven | unforgiven
   cycle so an earlier apology cannot forgive the new offense.
 - An open grievance is any not yet `forgiven`/`unforgiven`.
 
-### Continuous relationship state
+### Relationship state (how she currently stands towards this person)
 
-On the personal-chat path the continuous relationship state is `forgiveness_capacity` (0–100,
-default 50), owned by `relationship_memory`. Causation runs one way, **event → state**: a new
-offense lowers it by 10 × severity, a recurrence by 10 × the severity it added, an accepted apology
-raises it once per offense cycle, and forgiveness raises it further. Reading it never writes an
-event. It affects later behaviour in two ways: it is stated to the model as a plain fact in the
-memory context, and it gates forgiveness (too low a capacity blocks it however much time has
-passed). The regression tests check both counterfactually: the same message with a damaged versus a
-neutral relationship yields a different context, and the same apology at the same time forgives in
-one case and not in the other.
+```text
+EVENTS WRITE STATE.
+STATE DOES NOT INVENT EVENTS.
+THE LLM DOES NOT WRITE RELATIONSHIP STATE.
+```
 
-`agent/inner_state.py` / `agent/character_engine.py` keep a separate, richer scalar model (trust,
-respect, patience, affection, forgiveness) that is used only by the orchestrator, keyed by session
-id and driven by keyword detectors; it is not connected to the personal chat. See
+`relationship_memory` is the **biography** (what happened, when, healing). `agent/relationship_state.py`
+holds the **current stance**, four coordinates with different meanings:
+
+| Coordinate | Meaning | Moved by |
+|---|---|---|
+| `trust` | expectation that this person will not harm or deceive her | insults (down). Not restored by an apology: trust needs later behaviour, and no such event is validated yet. |
+| `respect` | how much their conduct keeps their worth to her as a conversation partner | insults (down, hardest); an accepted apology gives back a bounded share of what that offense cost |
+| `affection` | how dear the interaction with this person is; slow to grow | insults (down slightly) |
+| `forgiveness_capacity` | how much recovery from harm is currently possible | offenses and recurrences (down), an accepted apology (up once per offense cycle), forgiveness (up); it also gates forgiveness |
+
+Only lifecycle events that were already validated upstream (a provenance-checked insult, an accepted
+apology) call the deterministic event → delta rules; those constants are the persona's dynamics.
+The model never supplies a coordinate (its output schema has none), and reading the state never
+writes an event. The state is stated to the model as qualitative bands, not numbers (a raw figure
+was recited in live replies). An `inner_state_event` row records why each change happened.
+
+Storage is the person's row (`"owner"`, never a session id) in the existing `inner_state` table,
+because a dedicated table needs DDL rights the runtime database user does not have; it is confined
+to two functions in `relationship_state.py`. The counterfactual tests check that changing or removing
+this state changes the next prompt, and that the same apology forgives or not depending on it.
+
+`agent/inner_state.py` / `agent/character_engine.py` remain a separate, orchestrator-only model keyed
+by session id and driven by keyword detectors; it is not connected to the personal chat. See
 [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 ### Current-event provenance

@@ -39,13 +39,19 @@ configuration shape is not defined yet.
 The user-visible trust label and the stricter epistemic "trust gate" are separate computations; the
 canonical trust is shadow-only. See [EPISTEMIC_CORE.md](EPISTEMIC_CORE.md).
 
-## Two relationship models
+## Split subject: two relationship models
 
-The personal chat's continuous relationship state is `forgiveness_capacity` (owned by
-`relationship_memory`, moved by discrete events). The orchestrator has a separate scalar model in
-`agent/inner_state.py` / `agent/character_engine.py` (trust, respect, patience, affection,
-forgiveness) keyed by session id and driven by keyword detectors. The two are not connected and
-overlap in meaning; canonical ownership of the overlapping fields is undecided.
+The personal chat's relationship state is `agent/relationship_state.py` (trust, respect, affection,
+plus `forgiveness_capacity`), moved only by validated events. The orchestrator has a separate scalar
+model in `agent/inner_state.py` / `agent/character_engine.py` keyed by **session id** and driven by
+**keyword detectors**. The same YANDI can therefore hold two different stances depending on which
+door a message came through. The orchestrator side has not been migrated: a session is not a person,
+and a keyword hit is not a validated event.
+
+Related limits of the personal-chat state: it starts at the defaults for the existing owner (past
+grievances are not replayed into it, so test residue cannot skew it); there is no validated event
+yet that could raise trust or affection; and it lives in the existing `inner_state` table until
+someone with DDL rights adds a dedicated table.
 
 ## Partially wired subsystems
 
