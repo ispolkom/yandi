@@ -39,8 +39,11 @@ def main() -> int:
     if not (socket and admin and admin_pw):
         print("SKIP: set YANDI_TEST_SQL_SOCKET / _ADMIN / _ADMIN_PW (see scripts/test-sql-temp.sh)")
         return 0
-    if "/run/yandi" in socket:
-        print("REFUSED: this test must never run against the live YANDI database socket")
+    from agent.db.sql.connection import LiveDatabaseRefused, assert_connection_allowed
+    try:
+        assert_connection_allowed(socket)   # the ONE isolation check (realpath, temp dir, declared marker)
+    except LiveDatabaseRefused as e:
+        print(f"REFUSED: {e}")
         return 2
 
     import pymysql
@@ -51,6 +54,7 @@ def main() -> int:
     import agent.personal_memory as pm
 
     def connect(user, password, autocommit=False):
+        assert_connection_allowed(socket)
         return pymysql.connect(unix_socket=socket, user=user, password=password, database="yandi_epistemic",
                                cursorclass=pymysql.cursors.DictCursor, autocommit=autocommit, charset="utf8mb4")
 

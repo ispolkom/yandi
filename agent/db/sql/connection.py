@@ -77,6 +77,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tempfile
 import types
 from contextlib import contextmanager
 from typing import Optional
@@ -167,14 +168,31 @@ def _same_path(a: str, b: str) -> bool:
         return a == b
 
 
+def _under_temp_dir(path: str) -> bool:
+    try:
+        tmp = os.path.realpath(tempfile.gettempdir())
+        real = os.path.realpath(path)
+    except Exception:
+        return False
+    return real == tmp or real.startswith(tmp + os.sep)
+
+
 def assert_connection_allowed(socket_path: str) -> None:
     """Raise LiveDatabaseRefused if this is a test process and `socket_path`
     is not the declared throw-away test database. Called immediately before a
-    real connection is opened."""
+    real connection is opened: by get_connection(), and by every test that opens
+    its own connection to the throw-away instance (tests must not carry their own,
+    weaker, copy of this check).
+
+    The declared socket must be the one asked for, must not resolve (through
+    symlinks or otherwise) to the canonical live socket, and must live inside the
+    system temporary directory, where scripts/test-sql-temp.sh puts its private
+    instance."""
     if not is_test_process():
         return
     isolated = os.environ.get(_ISOLATED_SOCKET_ENV, "")
-    if isolated and socket_path and not _same_path(isolated, _DEFAULT_SOCKET) and _same_path(isolated, socket_path):
+    if (isolated and socket_path and not _same_path(isolated, _DEFAULT_SOCKET)
+            and _same_path(isolated, socket_path) and _under_temp_dir(isolated)):
         return
     # Visible even when a fail-open caller swallows the exception: a test that
     # keeps "passing" while being refused would otherwise hide that it was about

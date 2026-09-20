@@ -115,6 +115,22 @@ def main() -> int:
     check("2: declaring the LIVE socket as 'isolated' does not open it (mutant: test DB fallback points to production)",
           refused and calls == 0)
 
+    link = os.path.join(tmp, "alias.sock")
+    os.symlink(live, link)      # another path to the live socket
+    refused, calls, _ = probe({"YANDI_SQL_SOCKET": link, conn_mod._ISOLATED_SOCKET_ENV: link})
+    check("2: an alias (symlink) of the live socket declared as 'isolated' is refused: the check is on the real path, not on a string",
+          refused and calls == 0)
+    refused, calls, _ = probe({"YANDI_SQL_SOCKET": link, conn_mod._ISOLATED_SOCKET_ENV: isolated_sock})
+    check("2: an alias of the live socket that is not the declared one is refused too", refused and calls == 0)
+    outside = ROOT / ".isolation-probe.sock"
+    outside.touch()
+    try:
+        refused, calls, _ = probe({"YANDI_SQL_SOCKET": str(outside), conn_mod._ISOLATED_SOCKET_ENV: str(outside)})
+    finally:
+        outside.unlink()
+    check("2: a declared 'isolated' socket outside the system temp directory (where the private instance lives) is refused",
+          refused and calls == 0)
+
     refused, calls, _ = probe({"YANDI_SQL_SOCKET": isolated_sock, conn_mod._ISOLATED_SOCKET_ENV: isolated_sock,
                                "YANDI_TEST_MODE": "0"})
     check("2: no environment value switches the guard off (YANDI_TEST_MODE=0 changes nothing)",
@@ -176,6 +192,18 @@ def main() -> int:
             opens.append(str(path.relative_to(ROOT)))
     check("6: pymysql.connect( appears only in connection.py (guarded) and the root-only live bootstrap",
           sorted(opens) == ["agent/db/sql/connection.py", "agent/db/sql/live_bootstrap.py"], str(opens))
+    # tests that open their OWN connection to the throw-away instance must use the same guard, not a private copy of it
+    import ast
+
+    def opens_own_connection(path: Path) -> bool:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+        return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "connect"
+                   and isinstance(n.func.value, ast.Name) and n.func.value.id == "pymysql" for n in ast.walk(tree))
+    unguarded = [str(p.relative_to(ROOT)) for d in ("agent", "pet", "llm_gateway", "scripts") for p in (ROOT / d).rglob("*.py")
+                 if p.name != Path(__file__).name and (p.name.endswith("_test.py") or p.name.endswith("_proof.py"))
+                 and opens_own_connection(p) and "assert_connection_allowed(" not in p.read_text(encoding="utf-8", errors="ignore")]
+    check("6: every test that calls pymysql.connect( itself goes through assert_connection_allowed( first (no direct bypass)",
+          not unguarded, str(unguarded))
     src = (ROOT / "agent/db/sql/connection.py").read_text()
     check("6: get_connection asks the guard immediately before connecting",
           src.index("assert_connection_allowed(cfg[\"socket\"])") < src.index("conn = pymysql.connect(**connect_kwargs)"))

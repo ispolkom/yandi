@@ -47,6 +47,10 @@ to isolate itself would write real rows. The rule is therefore enforced in one p
   socket is not the live one. There is no switch that turns the guard off and no fallback to the
   live database. A refusal that could have reached a real database is announced on stderr
   (`[live-db-guard] REFUSED ...`).
+- The one check (`assert_connection_allowed`) is also what the integration tests call before opening
+  their own connection to the throw-away instance: the declared socket must be the one requested,
+  must not resolve (through symlinks) to the live socket, and must be inside the system temporary
+  directory. A test that calls `pymysql.connect` without it fails the isolation suite.
 - The only exceptions are the two operator tools `db_sql_live_persistence_proof` and
   `db_sql_live_immutability_proof`, which are documented as live tools (not tests), are not part of any
   suite, and are named (and pinned by a test) in `connection.py`.
