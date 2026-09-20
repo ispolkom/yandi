@@ -40,6 +40,9 @@ configuration shape is not defined yet.
 - The built-in default model registry in `llm_gateway/llamacpp_backend.py` points at a GGUF file
   path on the reference machine. On other machines, configure a model with
   `python -m llm_gateway.setup`.
+- Some Rust node code (`node/src/web/server.rs`, `node/src/communication/*file_transfer.rs`) and a few
+  scripts/tests still contain absolute reference-machine paths (uploads, downloads, cache and
+  interpreter locations). They should become configurable.
 - `deploy/` (installer and systemd units) and several node READMEs contain paths and host
   assumptions from the reference deployment; treat them as a worked example, not a portable
   installer.

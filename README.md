@@ -207,6 +207,19 @@ Direction, not a promise: wire the existing cognitive subsystems into one causal
 route embeddings through the adapter layer, add more adapter types, and mature the P2P layer. The
 long-form self-learning plan is in [ROADMAP_v7.md](ROADMAP_v7.md).
 
+## Development tools
+
+Development of YANDI uses AI-assisted tools for architecture analysis, implementation, testing and
+independent review, including:
+
+- OpenAI GPT
+- Anthropic Claude
+- DeepSeek
+
+These systems are used as development tools. They are not listed as authors, co-authors or rights
+holders of the YANDI project. Project decisions, code inclusion and publication are controlled by
+the project owner.
+
 ## License
 
 Licensing of the project as a whole has **not been decided**, and no top-level `LICENSE` file
