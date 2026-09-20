@@ -59,8 +59,13 @@ def main() -> int:
         cid = made["commitment_id"]
         check("1: a promise is recorded with its own words and evidence", made["created"] and c.commitments[cid]["evidence"] == "Я пришлю тебе отчёт")
         check("1: a new promise starts OPEN", rc.commitment_statuses(c, P)[0]["status"] == "open")
-        again = rc.create_commitment(c, P, "я пришлю тебе отчёт по проекту до пятницы!", "Я пришлю тебе отчёт")
-        check("1: saying the very same promise again is not a second promise", not again["created"] and again["commitment_id"] == cid and len(c.commitments) == 1)
+        idem = FakeConnection()
+        same_turn_a = rc.create_commitment(idem, P, "Я обещаю прислать план", "Я обещаю", source_turn_id="turn-plan-0001")
+        same_turn_b = rc.create_commitment(idem, P, "Я обещаю прислать план", "Я обещаю", source_turn_id="turn-plan-0001")
+        other_turn = rc.create_commitment(idem, P, "Я обещаю прислать план", "Я обещаю", source_turn_id="turn-plan-0002")
+        check("1: SAME TURN retried -> one commitment; the SAME WORDS in another turn -> a second, legitimate promise",
+              same_turn_a["created"] and not same_turn_b["created"] and same_turn_b.get("duplicate")
+              and other_turn["created"] and len(idem.commitments) == 2, repr((same_turn_a, same_turn_b, other_turn)))
 
         base = rs.get_state(c, P)
         claim = rc.record_fulfillment_claim(c, P, cid, "Я отправил отчёт")
@@ -183,7 +188,8 @@ def main() -> int:
               "re.search" not in src and "re.match" not in src and "re.findall" not in src)
         check("12: the write API takes events and verifiers, never coordinate values",
               list(inspect.signature(rc.record_verification).parameters) == ["conn", "user_id", "commitment_id", "kept", "source", "evidence"]
-              and list(inspect.signature(rc.record_fulfillment_claim).parameters) == ["conn", "user_id", "commitment_id", "evidence"])
+              and list(inspect.signature(rc.record_fulfillment_claim).parameters)
+              == ["conn", "user_id", "commitment_id", "evidence", "source_turn_id", "span"])
 
     print()
     print("=" * 72)

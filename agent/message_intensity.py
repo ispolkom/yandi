@@ -85,6 +85,9 @@ class IntensityResult:
     is_promise: bool = False
     claims_fulfilled: bool = False
     evidence: str = ""
+    # (event type, start, end) of the code-owned evidence span of every event
+    # that was accepted this turn; audit data for the causal-event ledger.
+    spans: tuple = ()
 
 
 def _neutral(error: str) -> IntensityResult:

@@ -381,13 +381,25 @@ def _call_model_semantic(model: str, messages: list[dict], temperature: float, m
     )
 
 
-def _apply_current_turn_event(text: str, intensity, memory_ctx: dict | None) -> None:
+def _apply_current_turn_event(
+    text: str, intensity, memory_ctx: dict | None, source_turn_id: str | None = None,
+) -> None:
     """Owner mandate ("характер, обидчива... простое извени - не
     канает"): writes the CURRENT-TURN EVENTS (insult / apology / promise /
     claim of fulfilment) of the last user message into the SQL-backed
     grievance / forgiveness_capacity / promise-ledger state. The events come
     from pet/event_extraction.py (evidence located by the model, reconstructed
     and confirmed by code); they are never derived from memory.
+
+    An apology and an insult in the same turn are two independent events (each
+    has its own evidence span): the apology is applied to the focused grievance
+    first, the insult then registers its own offense.
+
+    Each event is a CAUSAL event (source turn, event type): with a stable
+    `source_turn_id` a retry, replay or double delivery of the same turn applies
+    nothing a second time, while the same words in another turn are another
+    event (agent/causal_events.py). Without a turn id the events are applied as
+    before, without that guarantee.
 
     An apology changes ONLY the grievance the reply was built around
     (`memory_ctx["grievance"]`, resolved before generation from the current
@@ -403,27 +415,36 @@ def _apply_current_turn_event(text: str, intensity, memory_ctx: dict | None) -> 
     turn," never a crash or a guessed value."""
     if not intensity.ok:
         return
+    spans = {kind: (start, end) for kind, start, end in (intensity.spans or ())}
     if intensity.is_apology:
         grievance = _relationship_grievance(memory_ctx)
         if grievance:
             shadow_apply_apology(
                 user_id=_RELATIONSHIP_USER_ID, grievance_id=grievance["grievance_id"], sincerity=intensity.sincerity,
+                source_turn_id=source_turn_id, span=spans.get("apology"),
             )
-    elif intensity.is_insult and intensity.severity >= _INSULT_SEVERITY_THRESHOLD:
+    if intensity.is_insult and intensity.severity >= _INSULT_SEVERITY_THRESHOLD:
         shadow_add_grievance(
             user_id=_RELATIONSHIP_USER_ID, event_type="insult", description=text, severity=intensity.severity,
+            source_turn_id=source_turn_id, span=spans.get("insult"),
         )
     if intensity.is_promise:
-        shadow_create_commitment(user_id=_RELATIONSHIP_USER_ID, text=text, evidence=intensity.evidence)
+        shadow_create_commitment(
+            user_id=_RELATIONSHIP_USER_ID, text=text, evidence=intensity.evidence,
+            source_turn_id=source_turn_id, span=spans.get("promise"),
+        )
     elif intensity.claims_fulfilled:
         target = ((memory_ctx or {}).get("commitments") or {}).get("focus")
         if target:
             shadow_record_fulfillment_claim(
                 user_id=_RELATIONSHIP_USER_ID, commitment_id=target["commitment_id"], evidence=intensity.evidence,
+                source_turn_id=source_turn_id, span=spans.get("fulfilment_claim"),
             )
 
 
-def _respond_with_character(model: str, messages: list[dict], temperature: float) -> str:
+def _respond_with_character(
+    model: str, messages: list[dict], temperature: float, source_turn_id: str | None = None,
+) -> str:
     """Synchronous — run via run_in_executor. Two separate jobs, two
     separate model calls, each its own generation attempt:
 
@@ -434,7 +455,11 @@ def _respond_with_character(model: str, messages: list[dict], temperature: float
          visible reply comes out.
 
     Neither call sees the other's output, so remembered events cannot become
-    current ones and a reply can never write relationship state itself."""
+    current ones and a reply can never write relationship state itself.
+
+    `source_turn_id` is the identity of THIS delivery of the user's message
+    (minted by the client). Repeating the call with the same id may re-run
+    both model calls, but the relationship writes are applied once."""
     last_user_text = next(
         (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "",
     )
@@ -442,8 +467,19 @@ def _respond_with_character(model: str, messages: list[dict], temperature: float
     extraction = extract_relational_events(last_user_text, _extraction_llm(model))
     semantic = _call_model_semantic(model, messages, temperature, memory_ctx)
     visible = semantic.reply if semantic.reply_ok else _SEMANTIC_FAILURE_REPLY
-    _apply_current_turn_event(last_user_text, to_intensity(extraction), memory_ctx)
+    _apply_current_turn_event(last_user_text, to_intensity(extraction), memory_ctx, source_turn_id)
     return _clean_response(visible)
+
+
+_TURN_ID_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")
+
+
+def _valid_turn_id(value: object) -> str | None:
+    """The client-minted identity of this delivery of the user's message, or
+    None. An id that is not a plain token of 8-64 safe characters is treated as
+    absent (UNKNOWN IDEMPOTENCY != IDEMPOTENT): the turn is then processed
+    without a retry guarantee rather than under a made-up identity."""
+    return value if isinstance(value, str) and _TURN_ID_RE.fullmatch(value) else None
 
 
 @router.post("/api/local/chat")
@@ -457,10 +493,11 @@ async def local_chat(payload: dict):
     messages    = payload.get("messages", [])
     if not messages:
         return {"ok": False, "error": "empty messages"}
+    turn_id = _valid_turn_id(payload.get("turn_id"))
     loop = asyncio.get_event_loop()
     try:
         content = await loop.run_in_executor(
-            None, lambda: _respond_with_character(model, messages, temperature)
+            None, lambda: _respond_with_character(model, messages, temperature, turn_id)
         )
         return {"ok": True, "content": content}
     except Exception as e:

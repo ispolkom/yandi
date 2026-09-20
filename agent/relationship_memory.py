@@ -36,7 +36,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from agent import relationship_state
+from agent import causal_events, relationship_state
 from agent.db.sql import repositories as repo
 
 MIN_HEALING_HOURS = 2.0
@@ -71,11 +71,20 @@ def _healing_age_hours(row: Dict[str, Any]) -> Optional[float]:
 def add_grievance(
     conn, user_id: str, event_type: str, description: str, severity: float,
     context: Optional[Dict[str, Any]] = None,
-) -> str:
+    source_turn_id: Optional[str] = None, span: Optional[tuple] = None,
+) -> Optional[str]:
     """Registers a new grievance, or bumps an existing open one with the
     same description prefix — identical semantics to ForgivenessModel.
-    add_grievance(). Returns the grievance id (new or bumped)."""
+    add_grievance(). Returns the grievance id (new or bumped).
+
+    With a `source_turn_id` the offense is a CAUSAL event (turn, event_type):
+    a retry of the same delivery finds it already applied and returns None
+    without touching the grievance, capacity or relationship state. A second,
+    separately sent message with identical words has its own turn id and is
+    applied (a recurrence, by the logic below). See agent/causal_events.py."""
     severity = min(1.0, severity)
+    if not causal_events.may_apply(causal_events.claim(conn, user_id, source_turn_id, event_type, span)):
+        return None
     existing = repo.find_similar_open_grievance(conn, user_id, description)
     if existing:
         # A RECURRENCE of an already-open grievance raises its own severity
@@ -422,17 +431,24 @@ def resolve_relationship_focus(
     return {"grievance": match.grievance, "basis": match.basis, "open_count": len(active), "candidates": candidates}
 
 
-def apply_apology(conn, user_id: str, grievance_id: Optional[str], sincerity: float) -> Dict[str, Any]:
+def apply_apology(
+    conn, user_id: str, grievance_id: Optional[str], sincerity: float,
+    source_turn_id: Optional[str] = None, span: Optional[tuple] = None,
+) -> Dict[str, Any]:
     """Run the existing lifecycle (acknowledge -> progress healing) on the
     grievance the reply was already built around. `grievance_id` comes from
     resolve_relationship_focus(); with no target, or a target that is no
     longer an open grievance of this user, nothing is written. One call
-    changes at most one grievance."""
+    changes at most one grievance. With a `source_turn_id` the apology is a
+    causal event (turn, "apology"): applying the same delivery again is a
+    no-op (no second healing step, no second capacity or respect restoration)."""
     result = {"target": None, "acknowledged": False, "forgiven": False}
     if not grievance_id:
         return result
     grievance = repo.get_grievance(conn, grievance_id)
     if not grievance or grievance["user_id"] != user_id or grievance["status"] in ("forgiven", "unforgiven"):
+        return result
+    if not causal_events.may_apply(causal_events.claim(conn, user_id, source_turn_id, "apology", span)):
         return result
     result["target"] = grievance_id
     result["acknowledged"] = acknowledge_apology(conn, grievance_id, sincerity)

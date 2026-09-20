@@ -299,4 +299,5 @@ def to_intensity(result: ExtractionResult) -> IntensityResult:
         is_promise=bool(lone_commitment and lone_commitment.type == PROMISE),
         claims_fulfilled=bool(lone_commitment and lone_commitment.type == CLAIM),
         evidence=(lone_commitment.evidence if lone_commitment else (events[0].evidence if events else "")),
+        spans=tuple((e.type, e.start, e.end) for e in events),
     )

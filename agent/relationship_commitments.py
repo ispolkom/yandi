@@ -39,6 +39,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from agent import causal_events
 from agent import relationship_memory as rm
 from agent import relationship_state
 from agent.db.sql import repositories as repo
@@ -93,14 +94,18 @@ def commitment_statuses(conn, user_id: str, now: Optional[datetime] = None) -> L
 
 def create_commitment(
     conn, user_id: str, text: str, evidence: str, due_at=None, kind: str = "general",
+    source_turn_id: Optional[str] = None, span: Optional[tuple] = None,
 ) -> Dict[str, Any]:
     """Record a promise the person made in the CURRENT message. The caller has
-    already validated it (model state + verbatim evidence). Saying the very
-    same promise again is not a second promise: it returns the existing one."""
-    words = rm._stems(text, drop_non_content=False)
-    for existing in commitment_statuses(conn, user_id):
-        if existing["status"] in ("open", "reported_fulfilled") and rm._stems(existing["text"], drop_non_content=False) == words:
-            return {"commitment_id": existing["commitment_id"], "created": False}
+    already validated it (extraction step + verbatim evidence).
+
+    Identity is CAUSAL, not textual: with a `source_turn_id` the promise is the
+    causal event (turn, "promise"), so a retry of the same delivery creates
+    nothing new, while the same words in another turn are a second promise
+    (SAME TEXT != SAME EVENT). Returns {"commitment_id", "created"} and
+    "duplicate": True when the delivery was already applied."""
+    if not causal_events.may_apply(causal_events.claim(conn, user_id, source_turn_id, "promise", span)):
+        return {"commitment_id": None, "created": False, "duplicate": True}
     commitment_id = f"c_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     repo.record_commitment(conn, commitment_id, user_id, kind, text, evidence, due_at=due_at, created_at=_now())
     return {"commitment_id": commitment_id, "created": True}
@@ -148,14 +153,20 @@ def _owned(conn, user_id: str, commitment_id: Optional[str]) -> Optional[Dict[st
     return row if row and row["user_id"] == user_id else None
 
 
-def record_fulfillment_claim(conn, user_id: str, commitment_id: Optional[str], evidence: str) -> Dict[str, Any]:
+def record_fulfillment_claim(
+    conn, user_id: str, commitment_id: Optional[str], evidence: str,
+    source_turn_id: Optional[str] = None, span: Optional[tuple] = None,
+) -> Dict[str, Any]:
     """The person REPORTS having kept a promise (validated current message,
     verbatim evidence). Recorded once; changes no relationship coordinate,
-    because a report is words, not verification."""
+    because a report is words, not verification. With a `source_turn_id` the
+    report is the causal event (turn, "fulfilment_claim"): a retry adds nothing."""
     result = {"target": None, "recorded": False, "state_changed": False}
     if not _owned(conn, user_id, commitment_id):
         return result
     result["target"] = commitment_id
+    if not causal_events.may_apply(causal_events.claim(conn, user_id, source_turn_id, "fulfilment_claim", span)):
+        return result
     result["recorded"] = repo.record_commitment_event(conn, commitment_id, user_id, CLAIMED, USER_REPORT, evidence, created_at=_now())
     return result
 

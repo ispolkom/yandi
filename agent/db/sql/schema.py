@@ -46,7 +46,7 @@ DESIGN NOTES (read before changing a table):
    no HTTP retry chatter. RUN_ERROR is 5 columns, not a log warehouse.
 """
 
-SCHEMA_VERSION = 15  # v15: commitment + commitment_event (immutable promise ledger for the relationship state). v14: knowledge_query_archive ("точка ноль" — agent/db/manager.py's sqlite KnowledgeDB query-log + moderation-queue system retired from registry/index.db + registry/knowledge/*.db)
+SCHEMA_VERSION = 15  # v15: commitment + commitment_event + causal_event (immutable promise ledger and the causal-event idempotency ledger for the relationship state). v14: knowledge_query_archive ("точка ноль" — agent/db/manager.py's sqlite KnowledgeDB query-log + moderation-queue system retired from registry/index.db + registry/knowledge/*.db)
 
 SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1380,6 +1380,29 @@ CREATE TABLE IF NOT EXISTS commitment_event (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
+# ── CAUSAL EVENT (idempotency ledger) ──────────────────────────────
+# One row per CAUSAL EVENT that was applied to the relationship history:
+# (person, source turn, event type). A retry / replay / double delivery of the
+# same source turn tries to insert the same row again; INSERT IGNORE reports
+# that it was not new, and the caller applies NO second state transition.
+# The identity is causal (which turn, which act), never a hash of the text:
+# the same words in another turn are another event. Append-only (class B):
+# a duplicate is recognised, never overwritten. The span is the code-owned
+# evidence range inside the source message (audit only, not part of the key).
+# agent/causal_events.py is the only intended caller.
+CAUSAL_EVENT = """
+CREATE TABLE IF NOT EXISTS causal_event (
+    event_id       BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id        VARCHAR(64) NOT NULL,
+    source_turn_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,  -- exact, case-sensitive identity
+    event_type     VARCHAR(30) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,  -- insult | apology | promise | fulfilment_claim
+    span_start     INT NULL,
+    span_end       INT NULL,
+    created_at     DATETIME NOT NULL,
+    UNIQUE KEY uq_causal_event (user_id, source_turn_id, event_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
 # ── DISAGREEMENT ─────────────────────────────────────────────────────────
 # SQL-backed replacement for agent/disagreement_engine.py's registry/
 # disagreements.json ("точка ноль"). APPEND-ONLY (class B) — an argument
@@ -1635,6 +1658,7 @@ ALL_TABLES_IN_ORDER = [
     ("inner_state_event", INNER_STATE_EVENT),
     ("commitment", COMMITMENT),
     ("commitment_event", COMMITMENT_EVENT),
+    ("causal_event", CAUSAL_EVENT),
     ("disagreement", DISAGREEMENT),
     ("trait_graph", TRAIT_GRAPH),
     ("trait_change", TRAIT_CHANGE),
@@ -1725,6 +1749,7 @@ TABLE_CLASSIFICATION = {
     "inner_state_event": "B",
     "commitment": "B",
     "commitment_event": "B",
+    "causal_event": "B",
     "disagreement": "B",
     "trait_graph": "C",
     "trait_change": "B",

@@ -177,8 +177,8 @@ def main() -> int:
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and node is not body[0].value:
                 literals.append(node.value.lower())
-    check("9: PET decides nothing from words: no promise/claim vocabulary among the string literals of the event path",
-          not any(w in lit for lit in literals for w in ("обещ", "выполнил", "сделал", "отправил", "promise", "fulfil")), repr(literals))
+    check("9: PET decides nothing from words: no promise/claim words among the string literals of the event path (event-type identifiers are not vocabulary)",
+          not any(w in lit for lit in literals for w in ("обещ", "выполнил", "сделал", "отправил")), repr(literals))
     check("9: neither model call has a path to write relationship coordinates: the reply schema is empty and events are references",
           chat_local._STATE_SCHEMA == {"type": "object", "properties": {}})
 

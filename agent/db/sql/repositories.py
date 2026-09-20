@@ -2377,6 +2377,31 @@ def list_commitment_events(conn, user_id: str) -> List[Dict[str, Any]]:
 
 
 # ============================================================
+# CAUSAL_EVENT — idempotency ledger (class B; agent/causal_events.py is
+# the only intended caller)
+# ============================================================
+
+def claim_causal_event(
+    conn, user_id: str, source_turn_id: str, event_type: str,
+    span_start: Optional[int] = None, span_end: Optional[int] = None, created_at=None,
+) -> bool:
+    """Atomically record that this causal event is being applied.
+    UNIQUE (user_id, source_turn_id, event_type) + a single INSERT IGNORE:
+    returns True only for the call that created the row. There is
+    deliberately no SELECT-then-INSERT: two concurrent deliveries of the same
+    turn would both pass a SELECT, but the unique key serialises the INSERTs
+    (the second waits for the first transaction and is then ignored)."""
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT IGNORE INTO causal_event (user_id, source_turn_id, event_type, span_start, span_end, created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            (user_id, source_turn_id, event_type, span_start, span_end, created_at),
+        )
+        return cur.rowcount == 1
+
+
+# ============================================================
 # DISAGREEMENT
 # ============================================================
 

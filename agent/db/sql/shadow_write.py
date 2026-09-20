@@ -637,10 +637,12 @@ def shadow_record_ai_observation(
 
 def shadow_add_grievance(
     *, user_id: str, event_type: str, description: str, severity: float,
-    context: Optional[dict] = None, log=None, verbose: bool = False,
+    context: Optional[dict] = None, source_turn_id: Optional[str] = None, span: Optional[tuple] = None,
+    log=None, verbose: bool = False,
 ) -> Optional[str]:
     def _do(conn):
-        return relationship_memory.add_grievance(conn, user_id, event_type, description, severity, context)
+        return relationship_memory.add_grievance(
+            conn, user_id, event_type, description, severity, context, source_turn_id=source_turn_id, span=span)
 
     return _shadow(log, verbose, "add_grievance", _do)
 
@@ -662,7 +664,8 @@ def shadow_progress_healing(*, grievance_id: str, log=None, verbose: bool = Fals
 
 
 def shadow_apply_apology(
-    *, user_id: str, grievance_id: Optional[str], sincerity: float, log=None, verbose: bool = False,
+    *, user_id: str, grievance_id: Optional[str], sincerity: float,
+    source_turn_id: Optional[str] = None, span: Optional[tuple] = None, log=None, verbose: bool = False,
 ) -> Optional[dict]:
     """Runs acknowledge -> progress-healing on the ONE grievance the reply
     was built around (the focus from shadow_get_relationship_context), in a
@@ -670,7 +673,8 @@ def shadow_apply_apology(
     "forgiven": bool}, or None if SQL was unreachable. With no target
     nothing is written."""
     def _do(conn):
-        return relationship_memory.apply_apology(conn, user_id, grievance_id, sincerity)
+        return relationship_memory.apply_apology(
+            conn, user_id, grievance_id, sincerity, source_turn_id=source_turn_id, span=span)
 
     return _shadow(log, verbose, "apply_apology", _do)
 
@@ -750,21 +754,25 @@ def _commitment_context(conn, user_id: str, current_text: str) -> Optional[dict]
 
 
 def shadow_create_commitment(
-    *, user_id: str, text: str, evidence: str, log=None, verbose: bool = False,
+    *, user_id: str, text: str, evidence: str,
+    source_turn_id: Optional[str] = None, span: Optional[tuple] = None, log=None, verbose: bool = False,
 ) -> Optional[dict]:
     """A promise the person made in the CURRENT message (validated upstream)."""
     def _do(conn):
-        return relationship_commitments.create_commitment(conn, user_id, text, evidence)
+        return relationship_commitments.create_commitment(
+            conn, user_id, text, evidence, source_turn_id=source_turn_id, span=span)
 
     return _shadow(log, verbose, "create_commitment", _do)
 
 
 def shadow_record_fulfillment_claim(
-    *, user_id: str, commitment_id: Optional[str], evidence: str, log=None, verbose: bool = False,
+    *, user_id: str, commitment_id: Optional[str], evidence: str,
+    source_turn_id: Optional[str] = None, span: Optional[tuple] = None, log=None, verbose: bool = False,
 ) -> Optional[dict]:
     """The person REPORTS having kept the promise the reply was built around.
     Recorded as a report only; it changes no relationship coordinate."""
     def _do(conn):
-        return relationship_commitments.record_fulfillment_claim(conn, user_id, commitment_id, evidence)
+        return relationship_commitments.record_fulfillment_claim(
+            conn, user_id, commitment_id, evidence, source_turn_id=source_turn_id, span=span)
 
     return _shadow(log, verbose, "record_fulfillment_claim", _do)

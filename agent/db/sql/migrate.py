@@ -24,7 +24,7 @@ from agent.db.sql.schema import (
     SCHEMA_VERSION,
 )
 
-SCHEMA_VERSION_DESCRIPTION = "v15: commitment + commitment_event (immutable promise ledger). v14: knowledge_query_archive (\"точка ноль\" — agent/db/manager.py's sqlite KnowledgeDB query-log/moderation-queue retired)"
+SCHEMA_VERSION_DESCRIPTION = "v15: commitment + commitment_event + causal_event (immutable promise ledger + causal-event idempotency ledger). v14: knowledge_query_archive (\"точка ноль\" — agent/db/manager.py's sqlite KnowledgeDB query-log/moderation-queue retired)"
 
 
 def record_schema_version(

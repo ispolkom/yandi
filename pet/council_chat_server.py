@@ -1411,7 +1411,10 @@ async function sendToLocal(text){
   const model=document.getElementById("local-model").value;
   const temp=parseFloat(document.getElementById("local-temp").value);
   const ts=now();
-  const userMsg={role:"user",content:text,ts};
+  // turn identity: minted once when the message is created, saved with it and sent with the request,
+  // so a retry of THIS message is recognised while a new message with the same words is a new turn
+  const turnId=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():("t"+Date.now().toString(36)+Math.random().toString(36).slice(2,12));
+  const userMsg={role:"user",content:text,ts,id:turnId};
   _localHistory.push(userMsg);
   renderLocalChat();
   await _saveLocalMsg(userMsg);
@@ -1428,7 +1431,7 @@ async function sendToLocal(text){
   try{
     const r=await fetch("/api/local/chat",{
       method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({model,temperature:temp,messages:_localHistory.map(m=>({role:m.role,content:m.content}))}),
+      body:JSON.stringify({model,temperature:temp,turn_id:turnId,messages:_localHistory.map(m=>({role:m.role,content:m.content}))}),
     });
     const d=await r.json();
     const reply=d.content||"[нет ответа]";

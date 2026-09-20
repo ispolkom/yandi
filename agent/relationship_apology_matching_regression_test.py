@@ -18,6 +18,7 @@ from __future__ import annotations
 import inspect
 import itertools
 import sys
+import threading
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
@@ -129,6 +130,16 @@ class FakeCursor:
                     "user_id": user_id, "event_type": event_type, "source": source, "evidence": evidence,
                     "created_at": created_at})
                 self.rowcount = 1
+        elif upper.startswith("INSERT IGNORE INTO CAUSAL_EVENT"):
+            user_id, source_turn_id, event_type, span_start, span_end, created_at = params
+            with self.conn.lock:  # one atomic step, like a unique-key INSERT IGNORE
+                self.rowcount = 0
+                if not any(e["user_id"] == user_id and e["source_turn_id"] == source_turn_id and e["event_type"] == event_type
+                           for e in self.conn.causal_events):
+                    self.conn.causal_events.append({
+                        "event_id": len(self.conn.causal_events) + 1, "user_id": user_id, "source_turn_id": source_turn_id,
+                        "event_type": event_type, "span_start": span_start, "span_end": span_end, "created_at": created_at})
+                    self.rowcount = 1
         elif upper.startswith("SELECT * FROM COMMITMENT_EVENT WHERE USER_ID"):
             self._all = [dict(e) for e in self.conn.commitment_events if e["user_id"] == params[0]]
         elif upper.startswith("SELECT * FROM FORGIVENESS_CAPACITY"):
@@ -155,6 +166,8 @@ class FakeConnection:
         self.inner_state_events: list[dict] = []
         self.commitments: dict[str, dict] = {}
         self.commitment_events: list[dict] = []
+        self.causal_events: list[dict] = []
+        self.lock = threading.Lock()  # stands in for the database's unique-key serialisation
 
     def cursor(self):
         return FakeCursor(self)
