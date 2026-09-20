@@ -127,7 +127,7 @@ def main() -> int:
                  patch.object(gw_client._session, "post") as mock_post:
                 mock_post.return_value = make_ok_response(semantic_json(
                     "Ну ты и дура.",
-                    {"is_insult": True, "severity": 0.6, "is_apology": False, "sincerity": 0.0},
+                    {"is_insult": True, "severity": 0.6, "is_apology": False, "sincerity": 0.0, "evidence": "ты дура"},
                 ))
                 result = chat_local._respond_with_character("heretic:q8", [{"role": "user", "content": "ты дура"}], 0.7)
                 check("TEST4: grievance IS recorded for a real insult above threshold", len(grievance_calls) == 1 and grievance_calls[0][0] == "insult")
@@ -148,7 +148,7 @@ def main() -> int:
                  patch.object(gw_client._session, "post") as mock_post:
                 mock_post.return_value = make_ok_response(semantic_json(
                     "Ну ты и дура.",
-                    {"is_insult": True, "severity": 0.6, "is_apology": False, "sincerity": 0.0},
+                    {"is_insult": True, "severity": 0.6, "is_apology": False, "sincerity": 0.0, "evidence": "ты дура"},
                 ))
                 result = chat_local._respond_with_character("heretic:q8", [{"role": "user", "content": "ты дура"}], 0.7)
                 check("TEST4b: structured contract -> visible reply extracted correctly", result == "Ну ты и дура.", repr(result))
@@ -353,7 +353,7 @@ def main() -> int:
                  patch.object(gw_client._session, "post") as mock_post:
                 mock_post.return_value = make_ok_response(semantic_json(
                     "Ничего страшного, я тебя прощаю.",
-                    {"is_insult": False, "severity": 0.0, "is_apology": True, "sincerity": 0.9},
+                    {"is_insult": False, "severity": 0.0, "is_apology": True, "sincerity": 0.9, "evidence": "извини"},
                 ))
                 result = chat_local._respond_with_character("heretic:q8", [{"role": "user", "content": "извини, был не прав"}], 0.7)
                 check("§7: sincere apology -> acknowledge_apology + progress_healing both fired, from the SAME generation", len(apology_calls) == 2)
