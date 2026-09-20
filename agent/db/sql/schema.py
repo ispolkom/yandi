@@ -1413,9 +1413,12 @@ CREATE TABLE IF NOT EXISTS causal_event (
 #   HISTORY MAY BE EXTENDED, NEVER SILENTLY REWRITTEN.
 #
 # Owner is the PERSON (user_id), never a browser session. Identity is
-# (person, source turn id): the id the client mints when the message is created;
-# a request that carries none gets a server-minted id (turn_id_origin='server'),
-# which records the turn but gives no retry guarantee. Append-only (class B): the
+# (person, source turn id): the id the person's own chat client mints when the
+# message is created; a request that carries none is not recorded (no identity is
+# ever made up). turn_id_origin is always 'client' today; it was written into the
+# v16 DDL before that rule was settled and is kept (a column cannot be dropped
+# without a new migration) so a future, honestly-labelled origin needs none.
+# Append-only (class B): the
 # first delivery of a turn is the record; a retry is ignored, never merged, and
 # nothing here is ever UPDATEd. Interpretations ("what was important") are NOT
 # stored here: they are derived at read time from this record and the causal_event

@@ -10,6 +10,11 @@ lost Redis and a change of language model.
     SAME TEXT != SAME TURN. SESSION != PERSON.
     HISTORY MAY BE EXTENDED, NEVER SILENTLY REWRITTEN.
 
+Only turns that carry the id minted by the person's own chat client are part of
+this memory, in both directions (recorded, and recalled into the reply): a request
+without one (an orchestrator tool, a script) is not known to be the person
+speaking, so it neither writes to nor reads from the person's memory.
+
 Two layers, deliberately not mixed:
 
   * SOURCE: `interaction_turn`, one immutable row per (person, source turn):
@@ -41,7 +46,6 @@ convention). The caller owns the transaction and the fail-open policy.
 from __future__ import annotations
 
 import math
-import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -56,37 +60,33 @@ MIN_RELEVANCE = 0.18      # cosine of content stems (person's words vs. the curr
 EVENT_BONUS = 0.35        # a relationship event was confirmed in that turn
 MAX_SIDE_CHARS = 240      # per side of a recalled exchange
 
-SERVER = "server"   # turn id minted by the server: recorded, but no retry guarantee
-CLIENT = "client"
+CLIENT = "client"   # the turn id was minted by the person's own chat client
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def mint_server_turn_id() -> str:
-    """A turn id for a request that carried none. It identifies the record, not a
-    retry: two deliveries of an id-less request are two turns (UNKNOWN IDEMPOTENCY
-    != IDEMPOTENT)."""
-    return "srv-" + uuid.uuid4().hex
-
-
 def record_turn(
-    conn, user_id: str, source_turn_id: Optional[str], user_text: str, assistant_text: Optional[str],
+    conn, user_id: str, source_turn_id: str, user_text: str, assistant_text: Optional[str],
     *, model: Optional[str] = None, adapter: Optional[str] = None,
     recalled_turn_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Append the source record of this turn. Returns
-    {"recorded": bool, "source_turn_id": str, "origin": "client"|"server"}.
-    `recorded` is False when this exact turn was already recorded (a retry):
-    nothing is written or changed then."""
-    origin = CLIENT if source_turn_id else SERVER
-    turn_id = source_turn_id or mint_server_turn_id()
+    """Append the source record of this turn. Returns {"recorded": bool,
+    "source_turn_id": str}. `recorded` is False when this exact turn was already
+    recorded (a retry): nothing is written or changed then.
+
+    A turn without an identity is not recorded at all (ValueError): a request
+    that does not carry the id minted by the person's own chat client is not
+    known to be the person speaking (an orchestrator tool posts prompts, possibly
+    carrying web text, to the same endpoint), and no identity is ever made up."""
+    if not source_turn_id:
+        raise ValueError("a personal-memory turn needs the client-minted source turn id")
     recorded = repo.record_interaction_turn(
-        conn, user_id, turn_id, origin, user_text, assistant_text, model=model, adapter=adapter,
+        conn, user_id, source_turn_id, CLIENT, user_text, assistant_text, model=model, adapter=adapter,
         recalled_turn_ids=recalled_turn_ids, created_at=_now(),
     )
-    return {"recorded": recorded, "source_turn_id": turn_id, "origin": origin}
+    return {"recorded": recorded, "source_turn_id": source_turn_id}
 
 
 def _clip(text: Optional[str]) -> str:

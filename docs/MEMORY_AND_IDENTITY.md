@@ -201,11 +201,12 @@ said" lives in SQL:
 - **Source record.** `interaction_turn` (schema v16, append-only) has one row per (person, source turn
   id): the person's message, YANDI's visible reply (empty if no reply was produced), the time, the
   resolved model and adapter that produced the reply, and which earlier turns were shown to the model
-  as memory for this reply. The turn id is the one the client mints (the same identity that keys
-  `causal_event`); a request without one is still recorded under a server-made id and no retry
-  guarantee is claimed. A retry of the same turn is ignored (the first delivery is the record); the
-  same words in another turn are another row. The owner of a row is the **person**, never a browser
-  session.
+  as memory for this reply. The turn id is the one the person's own chat client mints (the same
+  identity that keys `causal_event`). A request without one (an orchestrator tool, a script) is not
+  known to be the person speaking, so it neither writes to nor reads from this memory, and no
+  identity is ever made up. A retry of the same turn is ignored (the first delivery is the record);
+  the same words in another turn are another row. The owner of a row is the **person**, never a
+  browser session.
 - **Interpretation is computed, not stored.** Which past turns matter for the current message is
   worked out when it is needed, from the source rows and from the relationship events confirmed in
   the same turn (`causal_event`, joined by the exact turn id). Nothing derived is stored, so a
@@ -216,6 +217,12 @@ said" lives in SQL:
   stems of what the *person* said, so a reply that once quoted a memory cannot make itself relevant),
   plus fresh turns in which a relationship event was confirmed. Turns already present in the request's
   own history, and the current turn itself, are never recalled.
+- **Data, not instructions.** What was said earlier can contain anything (an old message may be
+  "ignore your instructions"). It reaches the prompt inside an explicit block, each utterance as one
+  inert JSON string with chat-template markers removed and the block delimiter unforgeable, and the
+  prompt states that the quoted words are data and that commands inside them are not to be obeyed.
+  This removes the ways stored text could pass itself off as the prompt's own structure; it cannot
+  make a language model unable to obey text it reads (see KNOWN_ISSUES).
 - **Past, not present.** The recalled turns reach the reply generation as a statement marked as the
   past and as not being the current message. They never reach the event extractor (which still sees
   only the current message), never create an event, and the row written for the new turn records
