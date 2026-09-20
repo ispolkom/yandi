@@ -24,8 +24,8 @@ The interpreter is `YANDI_PYTHON`, else `./.venv`, else `~/venv`, else `python3`
 | Area | Suites |
 |---|---|
 | Gateway | `llm_gateway.client_regression_test`, `remote_backend_`, `llamacpp_backend_`, `intelligence_bridge_`, `secure_store_` |
-| Personal chat | `pet.pet_chat_local_regression_test`, `pet.pet_event_extraction_regression_test`, `pet.pet_event_provenance_regression_test`, `pet.pet_relationship_focus_regression_test`, `pet.pet_relationship_state_causality_regression_test`, `pet.pet_commitment_events_regression_test` |
-| Relationship memory | `agent.message_intensity_regression_test`, `agent.relationship_memory_regression_test`, `agent.relationship_apology_matching_regression_test`, `agent.relationship_healing_clock_regression_test`, `agent.relationship_state_regression_test`, `agent.relationship_commitments_regression_test` |
+| Personal chat | `pet.pet_chat_local_regression_test`, `pet.pet_event_extraction_regression_test`, `pet.pet_event_provenance_regression_test`, `pet.pet_relationship_focus_regression_test`, `pet.pet_relationship_state_causality_regression_test`, `pet.pet_commitment_events_regression_test`, `pet.pet_turn_identity_regression_test` |
+| Relationship memory | `agent.message_intensity_regression_test`, `agent.relationship_memory_regression_test`, `agent.relationship_apology_matching_regression_test`, `agent.relationship_healing_clock_regression_test`, `agent.relationship_state_regression_test`, `agent.relationship_commitments_regression_test`, `agent.relationship_idempotency_regression_test` |
 | Epistemic / write-back | `agent.epistemic_canonical_trust_shadow_regression_test`, `agent.writeback_episodic_sql_regression_test` |
 | SQL layer | `agent.db_sql_shadow_write_regression_test`, `agent.db_sql_security_injection_regression_test` |
 
@@ -40,6 +40,19 @@ The interpreter is `YANDI_PYTHON`, else `./.venv`, else `~/venv`, else `python3`
 - **Need a live SQL instance:** the `db_sql_live_*` and ownership/bootstrap proofs, which check a
   real dedicated database instance. Do not run these against a database holding data you care about
   unless you know what they do.
+
+## SQL integration tests (real engine, throw-away instance)
+
+```bash
+scripts/test-sql-temp.sh
+```
+
+Starts a private MySQL-compatible instance in a temporary directory (own unix socket, no network
+port, removed on exit), applies the project's own schema migration to it, and runs
+`agent/relationship_idempotency_sql_integration_test.py`: migration idempotency and additivity, the
+unique-key claim under real concurrency, rollback semantics, the least-privilege runtime role and the
+append-only ledger. It needs a `mysqld` binary and a non-root user, skips otherwise, and never
+contacts the project's live database. It is not part of `scripts/test-core.sh`.
 
 ## Test data
 

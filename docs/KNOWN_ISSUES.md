@@ -41,8 +41,8 @@ Remaining failure modes:
 - **Coverage.** Messages longer than 120 words, or in languages the model handles poorly, produce no
   events. A one-word message needed the word count in the prompt to avoid an off-by-one reference.
 - **Cost.** One extra model call per turn (and one per candidate event).
-- **Retries.** Nothing deduplicates a repeated request: the same insult processed twice is a
-  recurrence of the grievance. Promise and claim writes are already idempotent.
+- **Retries.** With a client-minted `turn_id` a repeated delivery of the same turn is applied once
+  (see *Causal identity and idempotency*); a request without one has no such guarantee.
 
 ## Embedding routing
 
@@ -72,9 +72,17 @@ configuration shape is not defined yet.
 The user-visible trust label and the stricter epistemic "trust gate" are separate computations; the
 canonical trust is shadow-only. See [EPISTEMIC_CORE.md](EPISTEMIC_CORE.md).
 
+## Callers without a turn id
+
+The chat endpoint is also called by an orchestrator tool (`agent/tools/tool_ai.py`) that sends a
+prompt with no `turn_id`. Such a call is processed like any owner message (its text can be run
+through event extraction) and has no retry guarantee. Restricting relationship writes to identified
+owner turns would be the safer rule; it is not done yet.
+
 ## Commitments need a schema migration and a verifier
 
-The promise ledger adds two tables (`commitment`, `commitment_event`, schema v15). The runtime
+The promise ledger and the causal-event idempotency ledger add three tables (`commitment`,
+`commitment_event`, `causal_event`, schema v15). The runtime
 database user cannot create tables, so an administrator has to apply the migration once
 (`python -m agent.db.sql.migrate` with DDL rights); until then the ledger is inert and the personal
 chat behaves as before. Even after that, trust only moves for **verified** outcomes and no verifier

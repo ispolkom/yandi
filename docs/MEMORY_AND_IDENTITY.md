@@ -146,6 +146,38 @@ model): the model classified events correctly but almost never copied the quote 
 every real event was rejected. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for measured rates and the
 remaining failure modes.
 
+### Causal identity and idempotency
+
+```text
+SAME TEXT != SAME EVENT.  SAME SOURCE EVENT RETRIED != NEW EVENT.
+ONE CAUSAL EVENT -> ONE LEDGER ENTRY -> ONE STATE TRANSITION.
+```
+
+A relationship event is identified by **(person, source turn, event type)**. The source turn is one
+delivery of one user message; the browser client mints a `turn_id` when the message is created,
+stores it with the message and sends it with the request. The causal event is claimed with a single
+atomic `INSERT IGNORE` on a unique key in `causal_event` (schema v15), in the same transaction as
+the state writes it guards:
+
+- a retry, replay or double delivery of the same turn re-runs the model calls if it must, but the
+  relationship writes are applied **once**: no second grievance recurrence, no second change of
+  trust / respect / affection, no second healing step or restoration, no second commitment or
+  fulfilment report;
+- the same words in another turn carry another turn id and are another event (a real recurrence);
+  nothing anywhere hashes or compares message text;
+- an insult and an apology in one turn are two events (two ledger rows); the whole turn retried
+  applies neither again; the code-owned evidence span is stored for audit but is not part of the
+  key, so a re-run extraction that picks a slightly different span cannot create a second event;
+- the guarantee is persistent (it lives in the database, not in process memory), safe under
+  concurrent deliveries (the unique key serialises them) and safe under rollback (a transaction that
+  failed leaves no claim, so the event can still be applied);
+- history is append-only: a duplicate is recognised and skipped, never overwritten.
+
+Honest limits: a request without a usable `turn_id` (for example a tool calling the chat endpoint) is
+processed exactly as before, with no retry guarantee, and is never deduplicated by text; and until
+schema v15 is applied the ledger table does not exist, so events are applied without the guarantee
+(one warning is logged).
+
 ### Relationship focus: one causal target for reply and write
 
 Before the reply is generated, `resolve_relationship_focus` decides which open grievance (if any)
