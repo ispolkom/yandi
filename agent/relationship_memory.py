@@ -77,13 +77,16 @@ def add_grievance(
     severity = min(1.0, severity)
     existing = repo.find_similar_open_grievance(conn, user_id, description)
     if existing:
-        # Faithful to the original ForgivenessModel.add_grievance(): a
-        # RECURRENCE of an already-open grievance raises its own
-        # severity, but does NOT independently re-charge
-        # forgiveness_capacity — only a genuinely NEW grievance does
-        # (below).
+        # A RECURRENCE of an already-open grievance raises its own severity
+        # and starts a new offense cycle. It costs forgiveness_capacity in
+        # proportion to the severity it actually ADDED (a genuinely new
+        # grievance costs its whole severity, below): otherwise repeating an
+        # offense would be free while each cycle's apology and forgiveness
+        # still restore capacity, so the continuous state would drift up
+        # under repeated offenses.
         new_severity = min(1.0, existing["severity"] + severity * 0.3)
         repo.bump_grievance(conn, existing["id"], new_severity)
+        _adjust_capacity(conn, user_id, delta=-(new_severity - existing["severity"]) * 10)
         return existing["id"]
 
     grievance_id = f"g_{int(time.time())}_{uuid.uuid4().hex[:8]}"
@@ -108,12 +111,16 @@ def acknowledge_apology(conn, grievance_id: str, sincerity: float) -> bool:
     # nor is ignored, and a plain "sorry" never starts it. A recurrence
     # resets the cycle (repo.bump_grievance).
     if sincerity > SINCERITY_AUTO_UNDERSTAND_THRESHOLD:
+        first_acceptance = grievance.get("understood_at") is None
         repo.update_grievance_status(
             conn, grievance_id, "understood",
             apology_sincerity=sincerity, apology_at=now,
             understood_at=grievance.get("understood_at") or now,
         )
-        _adjust_capacity(conn, grievance["user_id"], delta=sincerity * 5)
+        if first_acceptance:
+            # One accepted apology restores capacity once per offense cycle;
+            # repeating it must not farm the continuous state.
+            _adjust_capacity(conn, grievance["user_id"], delta=sincerity * 5)
     else:
         repo.update_grievance_status(
             conn, grievance_id, "acknowledged",

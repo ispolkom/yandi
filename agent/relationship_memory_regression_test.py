@@ -236,9 +236,9 @@ check(
     abs(repo.get_grievance(conn2, gid)["severity"] - 0.85) < 0.01,
 )
 check(
-    "3: bumping a RECURRING grievance does NOT independently re-charge capacity "
-    "(faithful to the original ForgivenessModel — only a genuinely new grievance does)",
-    abs(repo.get_forgiveness_capacity(conn2, "owner")["capacity"] - 43.0) < 0.01,
+    "3: a RECURRENCE lowers capacity in proportion to the severity it added "
+    "(0.15 added * 10 = 1.5; 43 -> 41.5), so repeating an offense is not free",
+    abs(repo.get_forgiveness_capacity(conn2, "owner")["capacity"] - 41.5) < 0.01,
     f"{repo.get_forgiveness_capacity(conn2, 'owner')}",
 )
 

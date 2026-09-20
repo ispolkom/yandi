@@ -683,7 +683,10 @@ def shadow_get_relationship_context(
 
     Returns:
       {"available": True, "grievance": {...} | None, "focus_basis": str,
-       "open_count": int, "candidates": [...]} when memory is reachable.
+       "forgiveness_capacity": float, "open_count": int, "candidates": [...]}
+       when memory is reachable. `forgiveness_capacity` is the continuous
+       relationship state that lifecycle events (offenses, accepted
+       apologies, forgiveness) move; it is stated to the model as a fact.
        `grievance` is the single focused target (with its id) or None;
        `candidates` is filled only when the message does not single one
        out (basis "ambiguous");
@@ -701,6 +704,7 @@ def shadow_get_relationship_context(
                 {"grievance_id": grievance["id"], **relationship_memory.memory_facts(grievance)} if grievance else None
             ),
             "focus_basis": focus["basis"],
+            "forgiveness_capacity": round(float(repo.get_forgiveness_capacity(conn, user_id)["capacity"]), 1),
             "open_count": focus["open_count"],
             "candidates": [relationship_memory.memory_facts(g) for g in focus["candidates"]],
         }

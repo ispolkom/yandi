@@ -47,6 +47,23 @@ registered → acknowledged → understood → healing → forgiven | unforgiven
   cycle so an earlier apology cannot forgive the new offense.
 - An open grievance is any not yet `forgiven`/`unforgiven`.
 
+### Continuous relationship state
+
+On the personal-chat path the continuous relationship state is `forgiveness_capacity` (0–100,
+default 50), owned by `relationship_memory`. Causation runs one way, **event → state**: a new
+offense lowers it by 10 × severity, a recurrence by 10 × the severity it added, an accepted apology
+raises it once per offense cycle, and forgiveness raises it further. Reading it never writes an
+event. It affects later behaviour in two ways: it is stated to the model as a plain fact in the
+memory context, and it gates forgiveness (too low a capacity blocks it however much time has
+passed). The regression tests check both counterfactually: the same message with a damaged versus a
+neutral relationship yields a different context, and the same apology at the same time forgives in
+one case and not in the other.
+
+`agent/inner_state.py` / `agent/character_engine.py` keep a separate, richer scalar model (trust,
+respect, patience, affection, forgiveness) that is used only by the orchestrator, keyed by session
+id and driven by keyword detectors; it is not connected to the personal chat. See
+[KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+
 ### Current-event provenance
 
 The model produces its reply and a small state object in one generation. The state may claim "the

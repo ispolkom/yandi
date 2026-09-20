@@ -39,6 +39,14 @@ configuration shape is not defined yet.
 The user-visible trust label and the stricter epistemic "trust gate" are separate computations; the
 canonical trust is shadow-only. See [EPISTEMIC_CORE.md](EPISTEMIC_CORE.md).
 
+## Two relationship models
+
+The personal chat's continuous relationship state is `forgiveness_capacity` (owned by
+`relationship_memory`, moved by discrete events). The orchestrator has a separate scalar model in
+`agent/inner_state.py` / `agent/character_engine.py` (trust, respect, patience, affection,
+forgiveness) keyed by session id and driven by keyword detectors. The two are not connected and
+overlap in meaning; canonical ownership of the overlapping fields is undecided.
+
 ## Partially wired subsystems
 
 Beliefs, reflection, the scalar "inner state" and character engine, and the legacy JSON forgiveness

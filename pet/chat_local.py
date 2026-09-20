@@ -194,13 +194,27 @@ def _grievance_fact(description: str, severity: float, status: str) -> str:
     return f"«{description}» (твоя оценка серьёзности тогда: {severity:.2f}; статус обиды: {status})"
 
 
+def _capacity_fact(ctx: dict) -> str:
+    """The continuous relationship state, as a plain fact (never how to feel
+    about it). It is moved only by lifecycle events: new offenses and
+    recurrences lower it, accepted apologies and forgiveness raise it."""
+    capacity = ctx.get("forgiveness_capacity")
+    if not isinstance(capacity, (int, float)) or isinstance(capacity, bool):
+        return ""
+    return (
+        f" Твоя нынешняя способность прощать этого человека: {capacity:.0f} из 100 "
+        "(она падает от обид и их повторов и растёт от принятых извинений и прощения)."
+    )
+
+
 def _memory_context_message(ctx: dict | None) -> str | None:
     """Plain statement of RAW FACTS only — never an instruction on how
     to feel about them (see module docstring above). The grievance shown is
     the one the CURRENT user message is about (resolved before generation by
     agent.relationship_memory.resolve_relationship_focus), never merely the
     heaviest one; when the message does not single one out, that is stated
-    as a fact too."""
+    as a fact too. The continuous state (forgiveness capacity) is stated the
+    same way, so persistent state can causally change the reply."""
     if not _relationship_memory_available(ctx):
         return (
             "Память об отношениях: сейчас недоступна, поэтому неизвестно, есть ли "
@@ -210,7 +224,7 @@ def _memory_context_message(ctx: dict | None) -> str | None:
     open_count = ctx.get("open_count") if isinstance(ctx.get("open_count"), int) else None
     basis = ctx.get("focus_basis")
     past = "Историческая память об отношениях (это ПРОШЛОЕ, а не текущее сообщение пользователя): "
-    tail = " Эта память может влиять на твой ответ, но не является новым событием."
+    tail = " Эта память может влиять на твой ответ, но не является новым событием." + _capacity_fact(ctx)
     if grievance:
         others = f" Всего открытых обид на пользователя: {open_count}." if open_count and open_count > 1 else ""
         return (
@@ -231,7 +245,7 @@ def _memory_context_message(ctx: dict | None) -> str | None:
             past + "то, о чём говорит пользователь, уже урегулировано; ни одна из открытых обид "
             f"({open_count}) к текущему сообщению не относится." + tail
         )
-    return "Память об отношениях: сейчас открытых обид на пользователя нет."
+    return "Память об отношениях: сейчас открытых обид на пользователя нет." + _capacity_fact(ctx)
 
 
 def _self_knowledge_message() -> str | None:
