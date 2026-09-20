@@ -140,6 +140,25 @@ class FakeCursor:
                         "event_id": len(self.conn.causal_events) + 1, "user_id": user_id, "source_turn_id": source_turn_id,
                         "event_type": event_type, "span_start": span_start, "span_end": span_end, "created_at": created_at})
                     self.rowcount = 1
+        elif upper.startswith("INSERT IGNORE INTO INTERACTION_TURN"):
+            user_id, source_turn_id, origin, user_text, assistant_text, model, adapter, recalled, created_at = params
+            with self.conn.lock:  # one atomic step, like a unique-key INSERT IGNORE
+                self.rowcount = 0
+                if not any(t["user_id"] == user_id and t["source_turn_id"] == source_turn_id
+                           for t in self.conn.interaction_turns):
+                    self.conn.interaction_turns.append({
+                        "interaction_id": len(self.conn.interaction_turns) + 1, "user_id": user_id,
+                        "source_turn_id": source_turn_id, "turn_id_origin": origin, "user_text": user_text,
+                        "assistant_text": assistant_text, "model": model, "adapter": adapter,
+                        "recalled_turn_ids": recalled, "created_at": created_at})
+                    self.rowcount = 1
+        elif upper.startswith("SELECT T.INTERACTION_ID"):
+            user_id, limit = params
+            rows = sorted((t for t in self.conn.interaction_turns if t["user_id"] == user_id),
+                          key=lambda t: (t["created_at"], t["interaction_id"]), reverse=True)[:limit]
+            self._all = [{**t, "event_types": ",".join(e["event_type"] for e in self.conn.causal_events
+                                                        if e["user_id"] == t["user_id"] and e["source_turn_id"] == t["source_turn_id"]) or None}
+                         for t in rows]
         elif upper.startswith("SELECT * FROM COMMITMENT_EVENT WHERE USER_ID"):
             self._all = [dict(e) for e in self.conn.commitment_events if e["user_id"] == params[0]]
         elif upper.startswith("SELECT * FROM FORGIVENESS_CAPACITY"):
@@ -167,6 +186,7 @@ class FakeConnection:
         self.commitments: dict[str, dict] = {}
         self.commitment_events: list[dict] = []
         self.causal_events: list[dict] = []
+        self.interaction_turns: list[dict] = []
         self.lock = threading.Lock()  # stands in for the database's unique-key serialisation
 
     def cursor(self):

@@ -24,7 +24,7 @@ The interpreter is `YANDI_PYTHON`, else `./.venv`, else `~/venv`, else `python3`
 | Area | Suites |
 |---|---|
 | Gateway | `llm_gateway.client_regression_test`, `remote_backend_`, `llamacpp_backend_`, `intelligence_bridge_`, `secure_store_` |
-| Personal chat | `pet.pet_chat_local_regression_test`, `pet.pet_event_extraction_regression_test`, `pet.pet_event_provenance_regression_test`, `pet.pet_relationship_focus_regression_test`, `pet.pet_relationship_state_causality_regression_test`, `pet.pet_commitment_events_regression_test`, `pet.pet_turn_identity_regression_test` |
+| Personal chat | `pet.pet_chat_local_regression_test`, `pet.pet_event_extraction_regression_test`, `pet.pet_event_provenance_regression_test`, `pet.pet_relationship_focus_regression_test`, `pet.pet_relationship_state_causality_regression_test`, `pet.pet_commitment_events_regression_test`, `pet.pet_turn_identity_regression_test`, `pet.pet_personal_memory_regression_test` |
 | Relationship memory | `agent.message_intensity_regression_test`, `agent.relationship_memory_regression_test`, `agent.relationship_apology_matching_regression_test`, `agent.relationship_healing_clock_regression_test`, `agent.relationship_state_regression_test`, `agent.relationship_commitments_regression_test`, `agent.relationship_idempotency_regression_test` |
 | Epistemic / write-back | `agent.epistemic_canonical_trust_shadow_regression_test`, `agent.writeback_episodic_sql_regression_test` |
 | SQL layer | `agent.db_sql_shadow_write_regression_test`, `agent.db_sql_security_injection_regression_test`, `agent.db_sql_test_isolation_regression_test` |
@@ -80,9 +80,10 @@ scripts/test-sql-temp.sh
 
 Starts a private MySQL-compatible instance in a temporary directory (own unix socket, no network
 port, removed on exit), applies the project's own schema migration to it, and runs
-`agent/relationship_idempotency_sql_integration_test.py`: migration idempotency and additivity, the
-unique-key claim under real concurrency, rollback semantics, the least-privilege runtime role and the
-append-only ledger. It needs a `mysqld` binary and a non-root user, skips otherwise, and never
+`agent/relationship_idempotency_sql_integration_test.py` and
+`agent/personal_memory_sql_integration_test.py`: migration idempotency and additivity (v14 -> current,
+v15 -> v16), the unique-key claims under real concurrency, rollback semantics, the least-privilege
+runtime role and the append-only ledgers, and personal-memory recall on a fresh connection. It needs a `mysqld` binary and a non-root user, skips otherwise, and never
 contacts the project's live database. It is not part of `scripts/test-core.sh`.
 
 ## Test data

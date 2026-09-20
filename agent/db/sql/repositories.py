@@ -2402,6 +2402,50 @@ def claim_causal_event(
 
 
 # ============================================================
+# INTERACTION TURN (personal source history; append-only)
+# ============================================================
+
+INTERACTION_TEXT_CAP = 20000  # characters per side; TEXT holds 64 KB and Cyrillic is 2 bytes a character
+
+
+def record_interaction_turn(
+    conn, user_id: str, source_turn_id: str, turn_id_origin: str, user_text: str,
+    assistant_text: Optional[str], model: Optional[str] = None, adapter: Optional[str] = None,
+    recalled_turn_ids: Optional[List[str]] = None, created_at=None,
+) -> bool:
+    """Append the source record of one chat turn. UNIQUE (user_id, source_turn_id)
+    + a single INSERT IGNORE: returns True only for the call that created the
+    row. A retry / double delivery of the same turn is ignored (never merged or
+    updated); the same words in another turn are another row."""
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT IGNORE INTO interaction_turn (user_id, source_turn_id, turn_id_origin, user_text, "
+            "assistant_text, model, adapter, recalled_turn_ids, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                user_id, source_turn_id, turn_id_origin, user_text[:INTERACTION_TEXT_CAP],
+                None if assistant_text is None else assistant_text[:INTERACTION_TEXT_CAP],
+                model, adapter, json.dumps(recalled_turn_ids) if recalled_turn_ids else None, created_at,
+            ),
+        )
+        return cur.rowcount == 1
+
+
+def list_recent_interaction_turns(conn, user_id: str, limit: int = 300) -> List[Dict[str, Any]]:
+    """The person's most recent turns, newest first, each with the relationship
+    events (causal_event types) that were confirmed in that same source turn."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT t.interaction_id, t.source_turn_id, t.user_text, t.assistant_text, t.model, t.adapter, "
+            "t.created_at, (SELECT GROUP_CONCAT(c.event_type) FROM causal_event c "
+            "WHERE c.user_id = t.user_id AND c.source_turn_id = t.source_turn_id) AS event_types "
+            "FROM interaction_turn t WHERE t.user_id=%s ORDER BY t.created_at DESC, t.interaction_id DESC LIMIT %s",
+            (user_id, int(limit)),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+# ============================================================
 # DISAGREEMENT
 # ============================================================
 

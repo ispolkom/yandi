@@ -88,6 +88,34 @@ database user cannot create tables, so an administrator has to apply the migrati
 chat behaves as before. Even after that, trust only moves for **verified** outcomes and no verifier
 exists in the personal chat yet, so reported fulfilment is remembered but does not change trust.
 
+## Personal conversation memory: migration, retrieval and privacy limits
+
+- **Needs schema v16.** `interaction_turn` is a new table; the runtime database user cannot create
+  tables, so an administrator applies the migration once (`python -m agent.db.sql.migrate` with DDL
+  rights). Until then personal memory is inert and the chat behaves as before (one warning is logged).
+- **Retrieval is lexical.** Relevance is shared content stems between the current message and what the
+  person said earlier; there is no embedding or vector search. A paraphrase with no shared stems is
+  not recalled by relevance (the latest two exchanges and recent event turns still are).
+- **The reply is stored once.** The first delivery of a turn is the record; if that delivery produced
+  no reply and a retry did, the retry's reply is not added (history is never updated).
+- **Old episodes are not adopted.** The earlier `episode` rows have no person or turn identity and are
+  left as they are; they are not read by the personal chat.
+- **Stored in plain text.** Message texts are stored like the other personal tables (grievance
+  descriptions, promise text): in the local dedicated database reached over a unix socket with a
+  least-privilege role, unencrypted at rest. Anyone with access to that database can read them.
+- **Whether a model uses the memory depends on the model.** Measured on the real models with a real
+  SQL engine, synthetic facts, 5 samples per cell, fresh process, empty client history, the memory
+  written by another model: the model that answers in the persona's voice (`heretic:q8`) brought the
+  remembered facts up in 2 of 5 replies to a question that invites them (0 of 5 without the stored
+  memory), and in 2 of 5 to "what do you remember about me?" (1 of 5 without; it often answers
+  "I have no memory between sessions" from its own prior); a second model (Rocinante 12B, the model
+  swap) did so in 4 of 5 and 5 of 5 (1 of 5 and 0 of 5 without). Neither mentioned the memory in reply
+  to an unrelated question (0 of 5 each), and no memory-carrying turn produced a relationship event
+  (0 new events over 4 neutral turns with a remembered insult). The delivery is guaranteed and tested;
+  the uptake is the model's.
+- **No interpretation layer yet.** Importance is derived when recalling (relationship events in the
+  turn, relevance, recency); no model-written summary or importance is stored.
+
 ## Split subject: two relationship models
 
 The personal chat's relationship state is `agent/relationship_state.py` (trust, respect, affection,

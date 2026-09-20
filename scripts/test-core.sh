@@ -39,6 +39,7 @@ SUITES=(
   pet.pet_relationship_state_causality_regression_test
   pet.pet_commitment_events_regression_test
   pet.pet_turn_identity_regression_test
+  pet.pet_personal_memory_regression_test
   agent.message_intensity_regression_test
   agent.relationship_memory_regression_test
   agent.relationship_apology_matching_regression_test

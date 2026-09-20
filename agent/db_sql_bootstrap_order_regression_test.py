@@ -263,7 +263,7 @@ check(
 # definition introduced by this fix).
 # ============================================================
 check(
-    "3a. schema.ALL_TABLES_IN_ORDER currently defines exactly 57 tables "
+    "3a. schema.ALL_TABLES_IN_ORDER currently defines exactly 58 tables "
     "(21 domain/history/projection tables + instance_identity — v2 added "
     "decision_event, the \"живая память\" decision/reasoning ledger; v3 added "
     "integrity_journal, the \"10-year bastion\" Layer 4 tamper-evidence hash-chain; "
@@ -279,8 +279,9 @@ check(
     "verification_memory.py's JSONL trace store — the deepest, most active piece; "
     "v14 added knowledge_query_archive, \"точка ноль\" retiring agent/db/manager.py's sqlite "
     "KnowledgeDB query-log/moderation-queue; "
-    "v15 added commitment + commitment_event + causal_event, the immutable promise ledger and the causal-event idempotency ledger)",
-    len(ALL_TABLES_IN_ORDER) == 57,
+    "v15 added commitment + commitment_event + causal_event, the immutable promise ledger and the causal-event idempotency ledger; "
+    "v16 added interaction_turn, the immutable per-person source history of chat turns)",
+    len(ALL_TABLES_IN_ORDER) == 58,
     f"actual={len(ALL_TABLES_IN_ORDER)}",
 )
 check(

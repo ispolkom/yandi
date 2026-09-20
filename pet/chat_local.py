@@ -23,6 +23,7 @@ import agent.relationship_memory as relationship_memory
 from agent.db.sql.shadow_write import (
     shadow_add_grievance, shadow_apply_apology, shadow_get_relationship_context,
     shadow_create_commitment, shadow_record_fulfillment_claim,
+    shadow_get_personal_memory, shadow_record_interaction_turn,
 )
 
 router = APIRouter()
@@ -233,6 +234,41 @@ def _memory_context_message(ctx: dict | None) -> str | None:
     return "Память об отношениях: сейчас открытых обид на пользователя нет." + _state_fact(ctx) + _commitment_facts(ctx)
 
 
+def _past_conversation_message(memories: list | None) -> str | None:
+    """PAST turns of this person, stated as HER OWN MEMORY of earlier
+    conversations: what was said and answered on an earlier day. Two things at
+    once, on purpose:
+
+      * usable — a real memory she may bring up when it fits, and answer from
+        when asked what she remembers. (Measured on the real models: the first
+        wording, a bare "internal context" note, was treated like the technical
+        markers the base prompt forbids mentioning and both models answered
+        "I have no memory between sessions"; stating it as her own memory fixed
+        that without making her recite it when it is beside the point.)
+      * past — marked as the PAST and as not the current message, so it can
+        shape the reply without being taken for something the person is doing now
+        (READING MEMORY != EXPERIENCING A NEW EVENT).
+
+    None/[] -> nothing is said (an unreadable memory is never presented as an
+    empty one)."""
+    if not memories:
+        return None
+    lines = []
+    for m in memories:
+        line = f"{m['when']} — он: «{m['user_text']}»"
+        if m.get("assistant_text"):
+            line += f"; ты ответила: «{m['assistant_text']}»"
+        lines.append(line)
+    return (
+        "Твоя память о прошлых разговорах с этим человеком — это настоящие воспоминания, а не служебная пометка, "
+        "их можно упоминать. Это ПРОШЛОЕ: ничего из этого не сказано сейчас, и это не его текущее сообщение. "
+        "Что было: " + " | ".join(lines) + ". "
+        "Опирайся на это, как человек, который помнит собеседника: если это к месту — вернись к этому естественно и "
+        "коротко; если не к месту — не вспоминай. Если тебя спросят, что ты о нём помнишь, ответь по этим "
+        "воспоминаниям. Эта память может влиять на твой ответ, но не является новым событием."
+    )
+
+
 def _self_knowledge_message() -> str | None:
     """SELF fact only — "кто Я", never "кто ТЫ для меня" (see
     _interlocutor_relation_message() for that; kept as two separate
@@ -335,7 +371,10 @@ def _clean_response(raw: str) -> str:
     return _dedup_paragraphs(raw).strip()
 
 
-def _call_model_semantic(model: str, messages: list[dict], temperature: float, memory_ctx: dict | None):
+def _call_model_semantic(
+    model: str, messages: list[dict], temperature: float, memory_ctx: dict | None,
+    past_memories: list | None = None,
+):
     """Returns gateway-normalized semantic reply/state.
 
     Mandate "chat_local gateway migration": was a direct POST to local
@@ -364,6 +403,7 @@ def _call_model_semantic(model: str, messages: list[dict], temperature: float, m
         _self_knowledge_message(),
         _interlocutor_relation_message(),
         _memory_context_message(memory_ctx),
+        _past_conversation_message(past_memories),
     ]
     return _llm_complete_semantic(
         model=model,
@@ -446,7 +486,8 @@ def _respond_with_character(
     model: str, messages: list[dict], temperature: float, source_turn_id: str | None = None,
 ) -> str:
     """Synchronous — run via run_in_executor. Two separate jobs, two
-    separate model calls, each its own generation attempt:
+    separate model calls, each its own generation attempt (plus the reads and
+    the one source-history write around them):
 
       1. event extraction (pet/event_extraction.py): sees ONLY the current
          user message; the events it confirms are the only source of
@@ -464,11 +505,35 @@ def _respond_with_character(
         (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "",
     )
     memory_ctx = shadow_get_relationship_context(user_id=_RELATIONSHIP_USER_ID, current_text=last_user_text)
+    in_context = [m.get("content", "") for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str)]
+    past = shadow_get_personal_memory(
+        user_id=_RELATIONSHIP_USER_ID, current_text=last_user_text, current_turn_id=source_turn_id,
+        in_context_texts=in_context,
+    )
+    # The extractor gets the current message and nothing else: past memory reaches the reply only.
     extraction = extract_relational_events(last_user_text, _extraction_llm(model))
-    semantic = _call_model_semantic(model, messages, temperature, memory_ctx)
+    semantic = _call_model_semantic(model, messages, temperature, memory_ctx, past)
     visible = semantic.reply if semantic.reply_ok else _SEMANTIC_FAILURE_REPLY
+    reply = _clean_response(visible)
     _apply_current_turn_event(last_user_text, to_intensity(extraction), memory_ctx, source_turn_id)
-    return _clean_response(visible)
+    resolved_model, adapter = _generation_target(semantic, model)
+    shadow_record_interaction_turn(
+        user_id=_RELATIONSHIP_USER_ID, source_turn_id=source_turn_id, user_text=last_user_text,
+        assistant_text=reply if semantic.reply_ok else None, model=resolved_model, adapter=adapter,
+        recalled_turn_ids=[m["source_turn_id"] for m in past or []],
+    )
+    return reply
+
+
+def _generation_target(semantic, requested_model: str) -> tuple[str, str | None]:
+    """(resolved model, adapter kind) of the attempt that produced the reply, from
+    the gateway's own trace; the requested logical name when there is none."""
+    trace = (getattr(semantic, "metadata", None) or {}).get("_llm_gateway_trace") or []
+    for attempt in reversed(trace):
+        if isinstance(attempt, dict) and attempt.get("result") == "success":
+            return str(attempt.get("resolved_model") or requested_model)[:120], (
+                str(attempt.get("adapter_id") or attempt.get("runtime") or "")[:40] or None)
+    return requested_model[:120], None
 
 
 _TURN_ID_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")

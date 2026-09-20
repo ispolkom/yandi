@@ -10,6 +10,9 @@ MEMORY MUST NOT BECOME A NEW USER EVENT.
 RELATIONAL STATE != EVENT IDENTITY.
 
 UNKNOWN != EMPTY
+
+MODEL MAY CHANGE. MEMORY MUST SURVIVE.
+PERSISTED != FUNCTIONAL MEMORY: stored -> read later -> changes behaviour.
 ```
 
 ## Layers
@@ -18,11 +21,13 @@ UNKNOWN != EMPTY
 |---|---|---|
 | Self model | `agent/self_model.py` | Durable facts about the agent (character metadata, public repo/website). Fail-loud: no silent fallback if it cannot be read. |
 | Episodic memory | `agent/memory_episodic.py`, `agent/orchestrator/response/writeback.py` | Answered questions with outcome and canonical trust, written back to SQL. |
+| Personal conversation memory | `agent/personal_memory.py`, table `interaction_turn` | The immutable source record of each chat turn (what was said and answered, when, by which model) and a bounded recall of relevant past turns into the reply context. |
 | Relationship memory | `agent/relationship_memory.py` | Grievances and forgiveness for one interlocutor. |
 | Beliefs | `agent/belief_manager.py` | Confidence with evidence for/against, history, decay. |
 | Reflection | `agent/reflection_loop.py` | Policies derived from the agent's own mistakes. |
 
-The single-owner personal chat (`pet/chat_local.py`) reads the self model and relationship memory.
+The single-owner personal chat (`pet/chat_local.py`) reads the self model, relationship memory and
+personal conversation memory.
 Other layers are stored and used by the orchestrator, and are only partly wired into that chat path;
 see [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
@@ -177,6 +182,50 @@ Honest limits: a request without a usable `turn_id` (for example a tool calling 
 processed exactly as before, with no retry guarantee, and is never deduplicated by text; and until
 schema v15 is applied the ledger table does not exist, so events are applied without the guarantee
 (one warning is logged).
+
+## Personal conversation memory (continuity across restarts and models)
+
+```text
+MODEL MAY CHANGE. MEMORY MUST SURVIVE.
+ONE USER TURN -> ONE SOURCE RECORD.  SAME TURN RETRIED != NEW HISTORY.  SAME TEXT != SAME TURN.
+SESSION != PERSON.
+HISTORY MAY BE EXTENDED, NEVER SILENTLY REWRITTEN.
+READING MEMORY != EXPERIENCING A NEW EVENT.
+```
+
+Redis holds the chat transcript the browser shows, and the browser sends its own history with every
+request; neither is a long-term biography (Redis may be empty, is persisted only by periodic
+snapshots, and is not read by the agent as memory). So the durable, local record of "what was actually
+said" lives in SQL:
+
+- **Source record.** `interaction_turn` (schema v16, append-only) has one row per (person, source turn
+  id): the person's message, YANDI's visible reply (empty if no reply was produced), the time, the
+  resolved model and adapter that produced the reply, and which earlier turns were shown to the model
+  as memory for this reply. The turn id is the one the client mints (the same identity that keys
+  `causal_event`); a request without one is still recorded under a server-made id and no retry
+  guarantee is claimed. A retry of the same turn is ignored (the first delivery is the record); the
+  same words in another turn are another row. The owner of a row is the **person**, never a browser
+  session.
+- **Interpretation is computed, not stored.** Which past turns matter for the current message is
+  worked out when it is needed, from the source rows and from the relationship events confirmed in
+  the same turn (`causal_event`, joined by the exact turn id). Nothing derived is stored, so a
+  better interpretation later rewrites nothing and a stale summary cannot replace what was said.
+  A stored, append-only summary layer pointing at turn ids is a possible later addition.
+- **Recall is bounded.** At most four past exchanges per reply, each cut short: the latest two (for
+  continuity after a restart or a change of model), plus turns chosen by relevance (shared content
+  stems of what the *person* said, so a reply that once quoted a memory cannot make itself relevant),
+  plus fresh turns in which a relationship event was confirmed. Turns already present in the request's
+  own history, and the current turn itself, are never recalled.
+- **Past, not present.** The recalled turns reach the reply generation as a statement marked as the
+  past and as not being the current message. They never reach the event extractor (which still sees
+  only the current message), never create an event, and the row written for the new turn records
+  which earlier turns it was shown. If the table is unreachable or schema v16 is not applied,
+  nothing is claimed about memory at all (UNKNOWN != EMPTY) and the reply is produced as before.
+
+Why not the existing tables: `episode` is the system's own life log (no person, no turn id);
+`experience` is mutable and keyed by how a reply landed; neither can hold a per-person, per-turn,
+immutable source record without becoming something else. Legacy `episode` rows are neither read nor
+changed by this path.
 
 ### Relationship focus: one causal target for reply and write
 

@@ -63,8 +63,8 @@ def main() -> int:
 
     root = connect(admin, admin_pw, autocommit=True)
 
-    # ── schema v15 ──
-    check("S: schema v15 is recorded", scalar(root, "SELECT MAX(version) FROM schema_migrations") == schema.SCHEMA_VERSION == 15)
+    # ── schema (v15 added these tables; v16 added interaction_turn on top) ──
+    check("S: the current schema version is recorded", scalar(root, "SELECT MAX(version) FROM schema_migrations") == schema.SCHEMA_VERSION == 16)
     for table in ("causal_event", "commitment", "commitment_event"):
         check(f"S: table {table} exists", scalar(root, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='yandi_epistemic' AND table_name=%s", (table,)) == 1)
     with root.cursor() as cur:
@@ -76,8 +76,9 @@ def main() -> int:
     with root.cursor() as cur:
         cur.execute("INSERT INTO grievance (id, user_id, event_type, description, severity, status, created_at, updated_at) "
                     "VALUES ('g_v14_row', 'v14_owner', 'insult', 'row that existed at schema v14', 0.5, 'registered', NOW(), NOW())")
+        cur.execute("DROP TABLE interaction_turn")
         cur.execute("DROP TABLE causal_event"); cur.execute("DROP TABLE commitment_event"); cur.execute("DROP TABLE commitment")
-        cur.execute("DELETE FROM schema_migrations WHERE version=15")
+        cur.execute("DELETE FROM schema_migrations WHERE version IN (15, 16)")
         cur.execute("INSERT IGNORE INTO schema_migrations (version, description) VALUES (14, 'simulated v14')")
     check("U: the simulated v14 database has schema version 14 and no v15 tables",
           scalar(root, "SELECT MAX(version) FROM schema_migrations") == 14
@@ -86,8 +87,8 @@ def main() -> int:
     import io, contextlib
     with contextlib.redirect_stdout(io.StringIO()):
         upgraded = migrate.apply()
-    check("U: the migration upgrades v14 -> v15: three tables added, version 15 recorded, the v14 row untouched",
-          upgraded and scalar(root, "SELECT MAX(version) FROM schema_migrations") == 15
+    check("U: the migration upgrades v14 -> current: the v15 tables and interaction_turn added, version recorded, the v14 row untouched",
+          upgraded and scalar(root, "SELECT MAX(version) FROM schema_migrations") == schema.SCHEMA_VERSION
           and scalar(root, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='yandi_epistemic' AND table_name IN ('causal_event','commitment','commitment_event')") == 3
           and scalar(root, "SELECT description FROM grievance WHERE id='g_v14_row'") == "row that existed at schema v14")
 

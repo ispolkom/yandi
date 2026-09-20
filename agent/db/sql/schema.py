@@ -46,7 +46,7 @@ DESIGN NOTES (read before changing a table):
    no HTTP retry chatter. RUN_ERROR is 5 columns, not a log warehouse.
 """
 
-SCHEMA_VERSION = 15  # v15: commitment + commitment_event + causal_event (immutable promise ledger and the causal-event idempotency ledger for the relationship state). v14: knowledge_query_archive ("точка ноль" — agent/db/manager.py's sqlite KnowledgeDB query-log + moderation-queue system retired from registry/index.db + registry/knowledge/*.db)
+SCHEMA_VERSION = 16  # v16: interaction_turn (immutable per-person source record of each chat turn, keyed by the client-minted turn id). v15: commitment + commitment_event + causal_event (immutable promise ledger and the causal-event idempotency ledger for the relationship state). v14: knowledge_query_archive ("точка ноль" — agent/db/manager.py's sqlite KnowledgeDB query-log + moderation-queue system retired from registry/index.db + registry/knowledge/*.db)
 
 SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1403,6 +1403,45 @@ CREATE TABLE IF NOT EXISTS causal_event (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
+# ── INTERACTION TURN (personal source history) ─────────────────────
+# The immutable SOURCE record of one turn of a personal conversation: what the
+# person said, what YANDI answered, when, and with which model. It is what a new
+# process, a new model or an empty Redis needs to know "what was actually said".
+#
+#   ONE USER TURN -> ONE SOURCE RECORD.  SAME TURN RETRIED != NEW HISTORY.
+#   SAME TEXT != SAME TURN.  SESSION != PERSON.
+#   HISTORY MAY BE EXTENDED, NEVER SILENTLY REWRITTEN.
+#
+# Owner is the PERSON (user_id), never a browser session. Identity is
+# (person, source turn id): the id the client mints when the message is created;
+# a request that carries none gets a server-minted id (turn_id_origin='server'),
+# which records the turn but gives no retry guarantee. Append-only (class B): the
+# first delivery of a turn is the record; a retry is ignored, never merged, and
+# nothing here is ever UPDATEd. Interpretations ("what was important") are NOT
+# stored here: they are derived at read time from this record and the causal_event
+# ledger (same source turn id), so a better interpretation later rewrites nothing.
+# Neither `episode` (system-wide life events, no person, no turn) nor `experience`
+# (mutable, keyed by reply outcome) can carry this without changing what they are.
+# `recalled_turn_ids` records which earlier turns were shown to the model as memory
+# for THIS reply: READING MEMORY != EXPERIENCING A NEW EVENT, and it keeps that
+# provenance auditable. agent/personal_memory.py is the only intended caller.
+INTERACTION_TURN = """
+CREATE TABLE IF NOT EXISTS interaction_turn (
+    interaction_id    BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id           VARCHAR(64) NOT NULL,
+    source_turn_id    VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,  -- exact, case-sensitive identity
+    turn_id_origin    VARCHAR(10) NOT NULL,                  -- client | server
+    user_text         TEXT NOT NULL,
+    assistant_text    TEXT NULL,                             -- NULL: no reply was produced for this turn
+    model             VARCHAR(120) NULL,                     -- resolved model that produced the reply
+    adapter           VARCHAR(40) NULL,                      -- adapter/runtime kind that served it
+    recalled_turn_ids JSON NULL,                             -- earlier turns shown to the model as memory for this reply
+    created_at        DATETIME NOT NULL,
+    UNIQUE KEY uq_interaction_turn (user_id, source_turn_id),
+    KEY idx_interaction_user_time (user_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
 # ── DISAGREEMENT ─────────────────────────────────────────────────────────
 # SQL-backed replacement for agent/disagreement_engine.py's registry/
 # disagreements.json ("точка ноль"). APPEND-ONLY (class B) — an argument
@@ -1659,6 +1698,7 @@ ALL_TABLES_IN_ORDER = [
     ("commitment", COMMITMENT),
     ("commitment_event", COMMITMENT_EVENT),
     ("causal_event", CAUSAL_EVENT),
+    ("interaction_turn", INTERACTION_TURN),
     ("disagreement", DISAGREEMENT),
     ("trait_graph", TRAIT_GRAPH),
     ("trait_change", TRAIT_CHANGE),
@@ -1750,6 +1790,7 @@ TABLE_CLASSIFICATION = {
     "commitment": "B",
     "commitment_event": "B",
     "causal_event": "B",
+    "interaction_turn": "B",
     "disagreement": "B",
     "trait_graph": "C",
     "trait_change": "B",

@@ -51,6 +51,9 @@ def main() -> int:
     chat_local._extraction_llm = lambda model: current_extractor[0]
     # The self-model reader would open (and, if absent, create) the owner's real self record.
     chat_local._self_knowledge_message = lambda: None
+    # These tests are about the reply path: no database for personal memory (its own suite covers it).
+    chat_local.shadow_get_personal_memory = lambda **kw: []
+    chat_local.shadow_record_interaction_turn = lambda **kw: None
 
     remote_entry = lambda model: {
         "backend": "remote", "protocol": "openai",

@@ -320,6 +320,12 @@ def _stems(text: Any, *, drop_non_content: bool) -> set:
     return {s for s in stems if len(s) >= 3}
 
 
+def content_stems(text: Any) -> set:
+    """Content-word stems of a text (non-content words dropped), the same
+    normalisation the grievance and promise matching use."""
+    return _stems(text, drop_non_content=True)
+
+
 def _as_datetime(value: Any) -> Optional[datetime]:
     if isinstance(value, str):
         try:

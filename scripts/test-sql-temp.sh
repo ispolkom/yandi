@@ -7,7 +7,8 @@
 #   YANDI_PYTHON=/path/to/python YANDI_TEST_MYSQLD=/usr/sbin/mysqld scripts/test-sql-temp.sh
 #
 # It applies the project's own schema migration to the temporary instance and
-# then runs agent/relationship_idempotency_sql_integration_test.py. Skips (exit 0)
+# then runs agent/relationship_idempotency_sql_integration_test.py and
+# agent/personal_memory_sql_integration_test.py. Skips (exit 0)
 # when no mysqld binary is available or the script runs as root.
 set -euo pipefail
 
@@ -51,3 +52,4 @@ export YANDI_TEST_SQL_SOCKET="$SOCK" YANDI_TEST_SQL_ADMIN=tmp_admin YANDI_TEST_S
 # (agent/db/sql/connection.py refuses everything else, the live database first).
 export YANDI_TEST_MODE=1 YANDI_TEST_ISOLATED_SOCKET="$SOCK"
 "$PYTHON" -m agent.relationship_idempotency_sql_integration_test
+"$PYTHON" -m agent.personal_memory_sql_integration_test

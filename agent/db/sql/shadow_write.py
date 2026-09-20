@@ -30,6 +30,7 @@ from typing import Any, Callable, Optional
 
 from agent.db.sql.connection import get_connection, SqlUnavailable
 import agent.db.sql.repositories as repo
+import agent.personal_memory as personal_memory
 import agent.relationship_commitments as relationship_commitments
 import agent.relationship_memory as relationship_memory
 import agent.relationship_state as relationship_state
@@ -776,3 +777,62 @@ def shadow_record_fulfillment_claim(
             conn, user_id, commitment_id, evidence, source_turn_id=source_turn_id, span=span)
 
     return _shadow(log, verbose, "record_fulfillment_claim", _do)
+
+
+_interaction_unavailable_warned = False
+
+
+def _interaction_unavailable(exc: BaseException, what: str) -> bool:
+    """True (and one warning per process) when the interaction_turn table does
+    not exist yet (schema v16 not applied): personal memory is then simply
+    unavailable, never a broken reply."""
+    global _interaction_unavailable_warned
+    args = getattr(exc, "args", ())
+    text = str(exc).lower()
+    if (args and args[0] == 1146) or "doesn't exist" in text or "does not exist" in text:
+        if not _interaction_unavailable_warned:
+            _interaction_unavailable_warned = True
+            logging.getLogger("yandi.memory").warning(
+                "interaction_turn unavailable (schema v16 not applied?): personal memory is not %s", what)
+        return True
+    return False
+
+
+def shadow_get_personal_memory(
+    *, user_id: str, current_text: str, current_turn_id: Optional[str] = None,
+    in_context_texts: Optional[list] = None, log=None, verbose: bool = False,
+) -> Optional[list]:
+    """Read-only: the bounded list of PAST turns of this person that matter for
+    the current message (agent/personal_memory.recall). [] = nothing to recall;
+    None = UNKNOWN (SQL unreachable or schema v16 not applied) — never
+    reported to the model as "no memories"."""
+    def _do(conn):
+        try:
+            return personal_memory.recall(
+                conn, user_id, current_text, current_turn_id=current_turn_id, in_context_texts=in_context_texts)
+        except Exception as exc:  # noqa: BLE001
+            if _interaction_unavailable(exc, "read"):
+                return None
+            raise
+
+    return _shadow(log, verbose, "get_personal_memory", _do)
+
+
+def shadow_record_interaction_turn(
+    *, user_id: str, source_turn_id: Optional[str], user_text: str, assistant_text: Optional[str],
+    model: Optional[str] = None, adapter: Optional[str] = None, recalled_turn_ids: Optional[list] = None,
+    log=None, verbose: bool = False,
+) -> Optional[dict]:
+    """Append the immutable source record of this chat turn (person, source
+    turn id, both sides, model). A retry of the same turn is a no-op."""
+    def _do(conn):
+        try:
+            return personal_memory.record_turn(
+                conn, user_id, source_turn_id, user_text, assistant_text,
+                model=model, adapter=adapter, recalled_turn_ids=recalled_turn_ids)
+        except Exception as exc:  # noqa: BLE001
+            if _interaction_unavailable(exc, "recorded"):
+                return None
+            raise
+
+    return _shadow(log, verbose, "record_interaction_turn", _do)

@@ -57,18 +57,21 @@ changing the model, restarting the process, or clearing a context window does no
 
 ## One turn of the personal chat
 
-1. **Focus.** The current message and the grievance/promise ledgers are read to decide which
-   remembered grievance or promise the message is about (deterministic, before any generation).
+1. **Focus and memory.** The current message and the grievance/promise ledgers are read to decide
+   which remembered grievance or promise the message is about (deterministic, before any
+   generation), and a few relevant past turns of this person are recalled from SQL.
 2. **Event extraction** (`pet/event_extraction.py`). A separate model call sees **only** the current
    message, cut into numbered words, and points at the words that make up an insult, apology,
    promise or claim of fulfilment. Code reconstructs the evidence text from those references and an
    independent, blind check on that exact span must agree. Anything malformed, uncertain or in
    disagreement is "no event".
 3. **Reply.** `llm_gateway.complete_semantic()` produces the visible reply from the history, the
-   agent's self facts and the remembered context (as history only). It is not asked for events.
+   agent's self facts and the remembered context (as history only, marked as the past). It is not
+   asked for events.
 4. **Write.** Confirmed events go to the ledgers: an insult creates a grievance, an apology advances
    the one focused grievance, a promise or claim goes to the promise ledger. Relationship state moves
-   only through those lifecycle rules.
+   only through those lifecycle rules. The turn itself (both sides, model, time) is appended to the
+   immutable per-person `interaction_turn` history.
 
 Each model call is its own generation attempt with its own resolved target and adapter.
 
