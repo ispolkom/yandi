@@ -39,6 +39,14 @@ configuration shape is not defined yet.
 The user-visible trust label and the stricter epistemic "trust gate" are separate computations; the
 canonical trust is shadow-only. See [EPISTEMIC_CORE.md](EPISTEMIC_CORE.md).
 
+## Commitments need a schema migration and a verifier
+
+The promise ledger adds two tables (`commitment`, `commitment_event`, schema v15). The runtime
+database user cannot create tables, so an administrator has to apply the migration once
+(`python -m agent.db.sql.migrate` with DDL rights); until then the ledger is inert and the personal
+chat behaves as before. Even after that, trust only moves for **verified** outcomes and no verifier
+exists in the personal chat yet, so reported fulfilment is remembered but does not change trust.
+
 ## Split subject: two relationship models
 
 The personal chat's relationship state is `agent/relationship_state.py` (trust, respect, affection,

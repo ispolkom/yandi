@@ -46,7 +46,7 @@ DESIGN NOTES (read before changing a table):
    no HTTP retry chatter. RUN_ERROR is 5 columns, not a log warehouse.
 """
 
-SCHEMA_VERSION = 14  # v14: knowledge_query_archive ("точка ноль" — agent/db/manager.py's sqlite KnowledgeDB query-log + moderation-queue system retired from registry/index.db + registry/knowledge/*.db)
+SCHEMA_VERSION = 15  # v15: commitment + commitment_event (immutable promise ledger for the relationship state). v14: knowledge_query_archive ("точка ноль" — agent/db/manager.py's sqlite KnowledgeDB query-log + moderation-queue system retired from registry/index.db + registry/knowledge/*.db)
 
 SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1346,6 +1346,40 @@ CREATE TABLE IF NOT EXISTS inner_state_event (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
+# ── COMMITMENT LEDGER ──────────────────────────────────────────────
+# What a person promised the agent, and what became of it. Two IMMUTABLE
+# (class B) tables: the commitment as stated, and an append-only trail of
+# outcomes. The current status is FOLDED from the trail, never stored, so
+# history is never rewritten. UNIQUE (commitment_id, event_type) makes one
+# outcome = one row = one state transition (INSERT IGNORE reports whether the
+# row was new). agent/relationship_commitments.py is the only intended caller.
+COMMITMENT = """
+CREATE TABLE IF NOT EXISTS commitment (
+    commitment_id VARCHAR(40) PRIMARY KEY,
+    user_id       VARCHAR(64) NOT NULL,
+    kind          VARCHAR(30) NOT NULL DEFAULT 'general',
+    text          VARCHAR(500) NOT NULL,      -- what was promised (the person's own words, current message)
+    evidence      VARCHAR(500) NOT NULL,      -- verbatim quote showing a promise was made
+    due_at        DATETIME NULL,
+    created_at    DATETIME NOT NULL,
+    KEY idx_commitment_user (user_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+COMMITMENT_EVENT = """
+CREATE TABLE IF NOT EXISTS commitment_event (
+    event_id      BIGINT AUTO_INCREMENT PRIMARY KEY,
+    commitment_id VARCHAR(40) NOT NULL,
+    user_id       VARCHAR(64) NOT NULL,
+    event_type    VARCHAR(30) NOT NULL,       -- fulfillment_claimed | verified_fulfilled | verified_broken
+    source        VARCHAR(40) NOT NULL,       -- user_report | <name of the verifier>
+    evidence      VARCHAR(500) NULL,
+    created_at    DATETIME NOT NULL,
+    UNIQUE KEY uq_commitment_event (commitment_id, event_type),
+    KEY idx_ce_user (user_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
 # ── DISAGREEMENT ─────────────────────────────────────────────────────────
 # SQL-backed replacement for agent/disagreement_engine.py's registry/
 # disagreements.json ("точка ноль"). APPEND-ONLY (class B) — an argument
@@ -1599,6 +1633,8 @@ ALL_TABLES_IN_ORDER = [
     ("secret_archive_question", SECRET_ARCHIVE_QUESTION),
     ("inner_state", INNER_STATE),
     ("inner_state_event", INNER_STATE_EVENT),
+    ("commitment", COMMITMENT),
+    ("commitment_event", COMMITMENT_EVENT),
     ("disagreement", DISAGREEMENT),
     ("trait_graph", TRAIT_GRAPH),
     ("trait_change", TRAIT_CHANGE),
@@ -1687,6 +1723,8 @@ TABLE_CLASSIFICATION = {
     "secret_archive_question": "C",
     "inner_state": "C",
     "inner_state_event": "B",
+    "commitment": "B",
+    "commitment_event": "B",
     "disagreement": "B",
     "trait_graph": "C",
     "trait_change": "B",

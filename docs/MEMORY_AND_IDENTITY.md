@@ -80,6 +80,33 @@ this state changes the next prompt, and that the same apology forgives or not de
 by session id and driven by keyword detectors; it is not connected to the personal chat. See
 [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
+### Commitments: trust built on verifiable behaviour
+
+`agent/relationship_commitments.py` is an immutable promise ledger (`commitment`,
+`commitment_event`; status is folded from the events, history is never rewritten):
+
+```text
+promise made -> open -> fulfillment_claimed (the person's report) -> verified_fulfilled | verified_broken
+```
+
+```text
+USER SAID "I did it"  !=  YANDI KNOWS it was done.
+ONE CAUSAL EVENT -> ONE STATE TRANSITION.
+```
+
+- A **report** is recorded but moves nothing. Only an outcome established by a **verifier**, that is
+  by something independent of the person's own words, changes `trust` (up a lot), `respect` (up)
+  and leaves `affection` alone; a verified broken promise hits trust hardest. No verifier is wired
+  into the personal chat yet, so today the live path records promises and reports but does not
+  move trust.
+- A missed deadline is only a derived `overdue` flag. It never breaks a promise by itself.
+- A claim is linked to a **specific** promise (content overlap, or the only open one). With several
+  candidates and no clear winner it is ambiguous and nothing is written.
+- `UNIQUE (commitment_id, event_type)` plus "apply the transition only if the row was new" means
+  the same fulfilment cannot raise trust twice.
+- The audit trail carries each event's machine-readable magnitude, so `relationship_state.replay()`
+  rebuilds trust, respect and affection from the trail alone.
+
 ### Current-event provenance
 
 The model produces its reply and a small state object in one generation. The state may claim "the

@@ -2310,6 +2310,72 @@ def list_inner_state_events(conn, user_id: str, limit: int = 200) -> List[Dict[s
     return rows
 
 
+def list_inner_state_events_in_order(conn, user_id: str) -> List[Dict[str, Any]]:
+    """EVERY event of one person, in the order they were recorded (event_id).
+    The event trail is the replayable history of the relationship state, so
+    unlike list_inner_state_events() it is neither windowed nor ordered by a
+    second-resolution timestamp (ties would reorder events)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM inner_state_event WHERE user_id=%s ORDER BY event_id ASC",
+            (user_id,),
+        )
+        return cur.fetchall()
+
+
+# ============================================================
+# COMMITMENT / COMMITMENT_EVENT — immutable promise ledger
+# (class B; agent/relationship_commitments.py is the only intended caller)
+# ============================================================
+
+def record_commitment(
+    conn, commitment_id: str, user_id: str, kind: str, text: str, evidence: str,
+    due_at=None, created_at=None,
+) -> None:
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO commitment (commitment_id, user_id, kind, text, evidence, due_at, created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (commitment_id, user_id, kind, text[:500], evidence[:500], _coerce_datetime(due_at), created_at),
+        )
+
+
+def get_commitment(conn, commitment_id: str) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM commitment WHERE commitment_id=%s", (commitment_id,))
+        return cur.fetchone()
+
+
+def list_commitments(conn, user_id: str) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM commitment WHERE user_id=%s ORDER BY created_at ASC, commitment_id ASC", (user_id,))
+        return cur.fetchall()
+
+
+def record_commitment_event(
+    conn, commitment_id: str, user_id: str, event_type: str, source: str,
+    evidence: Optional[str] = None, created_at=None,
+) -> bool:
+    """Append one outcome. UNIQUE (commitment_id, event_type) + INSERT IGNORE:
+    returns True only if this call created the row, so a caller can apply the
+    state transition exactly once per causal event."""
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT IGNORE INTO commitment_event (commitment_id, user_id, event_type, source, evidence, created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            (commitment_id, user_id, event_type, source, (evidence or "")[:500] or None, created_at),
+        )
+        return cur.rowcount == 1
+
+
+def list_commitment_events(conn, user_id: str) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM commitment_event WHERE user_id=%s ORDER BY event_id ASC", (user_id,))
+        return cur.fetchall()
+
+
 # ============================================================
 # DISAGREEMENT
 # ============================================================

@@ -26,16 +26,22 @@ the model never supplies a coordinate.
 
 APOLOGY != TRUST RESTORED: an accepted apology opens healing and gives back a
 bounded part of the RESPECT that the offense cost; it never restores trust or
-affection. Trust needs later behaviour, and no such event is validated yet,
-so it is deliberately not inferred.
+affection. Trust is restored by BEHAVIOUR: a promise whose fulfilment was
+VERIFIED (agent/relationship_commitments.py). A person's own report of having
+kept a promise is recorded but moves nothing (TRUST != TRUTH).
+
+ONE CAUSAL EVENT -> ONE STATE TRANSITION: every write below is called exactly
+once per event; the audit trail (`inner_state_event`) carries each event's
+machine-readable magnitude, so replay() rebuilds the current state from the
+trail alone, with the same pure delta functions the live path uses.
 
 STORAGE. The person's row in the existing `inner_state` table (columns trust /
 respect / affection) and an audit trail in `inner_state_event`, keyed by the
 PERSON id ("owner"), never by a session id. The orchestrator's keyword-driven
 InnerStateManager keeps using that table for session ids only and is not
 connected to this module. A dedicated table needs DDL rights the runtime DB
-user does not have; the storage is confined to _read_row()/_write_row() so it
-can move without touching the rules.
+user does not have; the storage is confined to get_state()/_apply() and the
+replay reader so it can move without touching the rules.
 """
 from __future__ import annotations
 
@@ -55,6 +61,8 @@ INSULT_RESPECT_PER_SEVERITY = 20.0
 INSULT_TRUST_PER_SEVERITY = 8.0
 INSULT_AFFECTION_PER_SEVERITY = 3.0
 APOLOGY_RESPECT_RECOVERY_SHARE = 0.3  # of the respect the offense cost, scaled by sincerity
+KEPT_TRUST, KEPT_RESPECT, KEPT_AFFECTION = 8.0, 3.0, 0.0        # a verified kept promise proves reliability
+BROKEN_TRUST, BROKEN_RESPECT, BROKEN_AFFECTION = -15.0, -5.0, -1.0  # a verified broken one hurts trust most
 
 
 def _clamp(value: float) -> float:
@@ -74,6 +82,27 @@ def get_state(conn, user_id: str) -> Dict[str, Any]:
     return state
 
 
+def _insult_deltas(severity: float) -> Dict[str, float]:
+    severity = max(0.0, min(1.0, severity))
+    return {
+        "respect": -INSULT_RESPECT_PER_SEVERITY * severity,
+        "trust": -INSULT_TRUST_PER_SEVERITY * severity,
+        "affection": -INSULT_AFFECTION_PER_SEVERITY * severity,
+    }
+
+
+def _apology_deltas(offense_severity: float, sincerity: float) -> Dict[str, float]:
+    offense_severity = max(0.0, min(1.0, offense_severity))
+    sincerity = max(0.0, min(1.0, sincerity))
+    return {"respect": APOLOGY_RESPECT_RECOVERY_SHARE * INSULT_RESPECT_PER_SEVERITY * offense_severity * sincerity}
+
+
+def _commitment_deltas(kept: bool) -> Dict[str, float]:
+    if kept:
+        return {"trust": KEPT_TRUST, "respect": KEPT_RESPECT, "affection": KEPT_AFFECTION}
+    return {"trust": BROKEN_TRUST, "respect": BROKEN_RESPECT, "affection": BROKEN_AFFECTION}
+
+
 def _apply(conn, user_id: str, event_type: str, deltas: Dict[str, float], sincerity: float, weight: float) -> None:
     """Move the coordinates by `deltas` and append the audit event. A failure
     here must not break the grievance lifecycle it is attached to, but it is
@@ -90,25 +119,53 @@ def _apply(conn, user_id: str, event_type: str, deltas: Dict[str, float], sincer
 
 
 def record_insult(conn, user_id: str, severity: float) -> None:
-    """A validated insult event of the given severity (0..1)."""
+    """A validated insult event of the given severity (0..1). The audit row's
+    weight is the event's magnitude: -severity."""
     severity = max(0.0, min(1.0, severity))
-    _apply(
-        conn, user_id, "insult",
-        {
-            "respect": -INSULT_RESPECT_PER_SEVERITY * severity,
-            "trust": -INSULT_TRUST_PER_SEVERITY * severity,
-            "affection": -INSULT_AFFECTION_PER_SEVERITY * severity,
-        },
-        sincerity=0.0, weight=-severity,
-    )
+    _apply(conn, user_id, "insult", _insult_deltas(severity), sincerity=0.0, weight=-severity)
 
 
 def record_accepted_apology(conn, user_id: str, offense_severity: float, sincerity: float) -> None:
     """A validated apology that was ACCEPTED (understood) for an offense of the
     given severity. Gives back only a bounded share of the respect that
     offense cost; trust and affection are untouched. Called once per offense
-    cycle by relationship_memory.acknowledge_apology()."""
+    cycle by relationship_memory.acknowledge_apology(). The audit row keeps
+    the offense severity (weight) and the sincerity, which is all replay needs."""
     offense_severity = max(0.0, min(1.0, offense_severity))
     sincerity = max(0.0, min(1.0, sincerity))
-    recovery = APOLOGY_RESPECT_RECOVERY_SHARE * INSULT_RESPECT_PER_SEVERITY * offense_severity * sincerity
-    _apply(conn, user_id, "apology_accepted", {"respect": recovery}, sincerity=sincerity, weight=recovery / 10.0)
+    _apply(
+        conn, user_id, "apology_accepted", _apology_deltas(offense_severity, sincerity),
+        sincerity=sincerity, weight=offense_severity,
+    )
+
+
+def record_verified_commitment(conn, user_id: str, kept: bool) -> None:
+    """A commitment whose outcome was VERIFIED (not merely reported). Called
+    exactly once per commitment by relationship_commitments.record_verification()."""
+    _apply(
+        conn, user_id, "commitment_kept" if kept else "commitment_broken", _commitment_deltas(kept),
+        sincerity=1.0, weight=1.0 if kept else -1.0,
+    )
+
+
+def replay_from_events(events) -> Dict[str, float]:
+    """Rebuild trust/respect/affection from the audit trail alone (oldest
+    first), from the defaults, with the same pure delta rules and clamping as
+    the live path. The materialised row is a cache of this fold."""
+    state = dict(DEFAULTS)
+    for event in events:
+        kind, weight, sincerity = event["event_type"], float(event["weight"]), float(event["sincerity"])
+        if kind == "insult":
+            deltas = _insult_deltas(-weight)
+        elif kind == "apology_accepted":
+            deltas = _apology_deltas(weight, sincerity)
+        elif kind in ("commitment_kept", "commitment_broken"):
+            deltas = _commitment_deltas(kind == "commitment_kept")
+        else:
+            continue
+        state = {c: _clamp(state[c] + deltas.get(c, 0.0)) for c in COORDINATES}
+    return state
+
+
+def replay(conn, user_id: str) -> Dict[str, float]:
+    return replay_from_events(repo.list_inner_state_events_in_order(conn, user_id))
