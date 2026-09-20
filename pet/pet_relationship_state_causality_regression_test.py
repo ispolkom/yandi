@@ -98,8 +98,15 @@ def main() -> int:
         msg_low = chat_local._memory_context_message(ctx_low)
         msg_neutral = chat_local._memory_context_message(ctx_neutral)
         check("2: COUNTERFACTUAL — same message, damaged vs neutral relationship: the model's context differs",
-              msg_low != msg_neutral and f"{ctx_low['forgiveness_capacity']:.0f} из 100" in msg_low and "50 из 100" in msg_neutral,
+              msg_low != msg_neutral and "способность прощать этого человека: низкая" in msg_low
+              and "способность прощать этого человека: средняя" in msg_neutral,
               f"{msg_low!r} | {msg_neutral!r}")
+        high = FakeConnection()
+        high.capacities[OWNER] = {"user_id": OWNER, "capacity": 92.0, "last_forgiveness": None, "updated_at": None}
+        check("2: the third band follows the state as well (92 -> высокая)",
+              "способность прощать этого человека: высокая" in chat_local._memory_context_message(context(high)))
+        check("2: the state is a qualitative fact; no raw number is offered for the model to recite",
+              not any(ch.isdigit() for ch in chat_local._capacity_fact(ctx_low)), chat_local._capacity_fact(ctx_low))
         # remove / change the persistent state -> the context returns to the neutral one
         damaged.capacities.clear()
         for g in damaged.grievances.values():

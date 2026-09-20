@@ -19,6 +19,7 @@ from pet.shared import REDIS_URL, LOCAL_MSGS_KEY, MAX_MESSAGES
 import re
 
 from agent.message_intensity import IntensityResult, intensity_from_state
+import agent.relationship_memory as relationship_memory
 from agent.db.sql.shadow_write import (
     shadow_add_grievance, shadow_apply_apology, shadow_get_relationship_context,
 )
@@ -194,6 +195,18 @@ def _grievance_fact(description: str, severity: float, status: str) -> str:
     return f"«{description}» (твоя оценка серьёзности тогда: {severity:.2f}; статус обиды: {status})"
 
 
+def _capacity_band(capacity: float) -> str:
+    """Qualitative reading of forgiveness_capacity. A bare number invites the
+    model to recite it ("92/100"); the band states the same fact without
+    turning the reply into a report on her own state. `низкая` is exactly the
+    range below rm.FORGIVENESS_MIN_CAPACITY, where forgiveness is impossible."""
+    if capacity < relationship_memory.FORGIVENESS_MIN_CAPACITY:
+        return "низкая"
+    if capacity <= 70:
+        return "средняя"
+    return "высокая"
+
+
 def _capacity_fact(ctx: dict) -> str:
     """The continuous relationship state, as a plain fact (never how to feel
     about it). It is moved only by lifecycle events: new offenses and
@@ -201,10 +214,7 @@ def _capacity_fact(ctx: dict) -> str:
     capacity = ctx.get("forgiveness_capacity")
     if not isinstance(capacity, (int, float)) or isinstance(capacity, bool):
         return ""
-    return (
-        f" Твоя нынешняя способность прощать этого человека: {capacity:.0f} из 100 "
-        "(она падает от обид и их повторов и растёт от принятых извинений и прощения)."
-    )
+    return f" Твоя нынешняя способность прощать этого человека: {_capacity_band(float(capacity))}."
 
 
 def _memory_context_message(ctx: dict | None) -> str | None:
