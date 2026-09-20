@@ -79,7 +79,7 @@ def main() -> int:
             grievance_calls = []
             with patch.object(chat_local, "shadow_get_relationship_context", fake_shadow_ctx), \
                  patch.object(chat_local, "shadow_add_grievance", lambda **kw: grievance_calls.append(("insult", kw))), \
-                 patch.object(chat_local, "shadow_acknowledge_apology", lambda **kw: grievance_calls.append(("apology", kw))), \
+                 patch.object(chat_local, "shadow_apply_apology", lambda **kw: grievance_calls.append(("apology", kw))), \
                  patch.object(node_config, "get_model_entry", return_value=None), \
                  patch.object(gw_client._session, "post") as mock_post:
                 mock_post.return_value = make_ok_response(semantic_json("Привет! Хорошо, спасибо."))
@@ -347,8 +347,7 @@ def main() -> int:
             with patch.object(chat_local, "shadow_get_relationship_context", return_value={
                      "grievance_id": "g1", "description": "прошлая обида", "severity": 0.6, "status": "registered",
                  }), \
-                 patch.object(chat_local, "shadow_acknowledge_apology", lambda **kw: apology_calls.append(kw)), \
-                 patch.object(chat_local, "shadow_progress_healing", lambda **kw: apology_calls.append(("healing", kw))), \
+                 patch.object(chat_local, "shadow_apply_apology", lambda **kw: apology_calls.append(kw)), \
                  patch.object(node_config, "get_model_entry", return_value=None), \
                  patch.object(gw_client._session, "post") as mock_post:
                 mock_post.return_value = make_ok_response(semantic_json(
@@ -356,7 +355,7 @@ def main() -> int:
                     {"is_insult": False, "severity": 0.0, "is_apology": True, "sincerity": 0.9, "evidence": "извини"},
                 ))
                 result = chat_local._respond_with_character("heretic:q8", [{"role": "user", "content": "извини, был не прав"}], 0.7)
-                check("§7: sincere apology -> acknowledge_apology + progress_healing both fired, from the SAME generation", len(apology_calls) == 2)
+                check("§7: sincere apology -> one apply_apology (match + acknowledge + healing in the memory layer), from the SAME generation", len(apology_calls) == 1)
                 check("§7: apology path still shows the model's real visible reply", result == "Ничего страшного, я тебя прощаю.")
 
             grievance_calls.clear()

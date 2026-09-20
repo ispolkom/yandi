@@ -1271,6 +1271,19 @@ def list_active_grievances(conn, user_id: str) -> List[Dict[str, Any]]:
     return rows
 
 
+def list_recent_resolved_grievances(conn, user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+    """Read-only: the most recently touched grievances that are already
+    resolved ('forgiven'/'unforgiven'). Used only to recognise that an
+    apology names something already settled, never to reopen it."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM grievance WHERE user_id=%s AND status IN ('forgiven', 'unforgiven') "
+            "ORDER BY updated_at DESC LIMIT %s",
+            (user_id, int(limit)),
+        )
+        return cur.fetchall()
+
+
 def count_grievances_by_status(conn, user_id: str, status: str) -> int:
     with conn.cursor() as cur:
         cur.execute(

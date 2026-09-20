@@ -62,8 +62,7 @@ def main() -> int:
              patch.object(chat_local, "_self_knowledge_message", lambda: None), \
              patch.object(chat_local, "_call_model_semantic", lambda *a, **k: sem(reply, state)), \
              patch.object(chat_local, "shadow_add_grievance", lambda **kw: calls.append(("add_grievance", kw))), \
-             patch.object(chat_local, "shadow_acknowledge_apology", lambda **kw: calls.append(("acknowledge_apology", kw))), \
-             patch.object(chat_local, "shadow_progress_healing", lambda **kw: calls.append(("progress_healing", kw))):
+             patch.object(chat_local, "shadow_apply_apology", lambda **kw: calls.append(("apply_apology", kw))):
             visible = chat_local._respond_with_character("heretic:q8", messages, 0.7)
         return visible, calls
 
@@ -133,11 +132,11 @@ def main() -> int:
         [{"role": "user", "content": "Извини, я зря это сказал."}], MEM_INSULT, "Ладно.",
         {"is_insult": False, "severity": 0.0, "is_apology": True, "sincerity": 0.8, "evidence": "Извини"},
     )
-    check("5: real current apology -> acknowledge_apology then progress_healing, nothing else",
-          [c[0] for c in calls] == ["acknowledge_apology", "progress_healing"], repr(calls))
+    check("5: real current apology -> exactly one apply_apology (matching happens in the memory layer), nothing else",
+          [c[0] for c in calls] == ["apply_apology"], repr(calls))
     if calls:
-        check("5: the apology targets the grievance from memory with the model's sincerity",
-              calls[0][1] == {"grievance_id": "g_old", "sincerity": 0.8}, repr(calls[0][1]))
+        check("5: the CURRENT apology text and the model's sincerity are passed on (no pre-picked grievance id)",
+              calls[0][1] == {"user_id": "owner", "apology_text": "Извини, я зря это сказал.", "sincerity": 0.8}, repr(calls[0][1]))
 
     # ── 6. a real event WITHOUT evidence is dropped (fail-safe: missed, never falsified) ──
     visible, calls = run_turn(
@@ -165,7 +164,7 @@ def main() -> int:
         [{"role": "user", "content": "Извини, я зря это сказал."}], MEM_INSULT, "ok",
         {"is_insult": False, "severity": 0.0, "is_apology": True, "sincerity": 1, "evidence": "Извини"},
     )
-    check("6b: boundary values are valid (sincerity == 1 int) -> apology still applied", [c[0] for c in calls] == ["acknowledge_apology", "progress_healing"], repr(calls))
+    check("6b: boundary values are valid (sincerity == 1 int) -> apology still applied", [c[0] for c in calls] == ["apply_apology"], repr(calls))
     visible, calls = run_turn(
         [{"role": "user", "content": real_insult}], MEM_INSULT, "ok",
         {"is_insult": True, "severity": 0, "is_apology": False, "sincerity": 0.0, "evidence": "ржавая консерва"},

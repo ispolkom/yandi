@@ -658,6 +658,20 @@ def shadow_progress_healing(*, grievance_id: str, log=None, verbose: bool = Fals
     return _shadow(log, verbose, "progress_healing", _do)
 
 
+def shadow_apply_apology(
+    *, user_id: str, apology_text: str, sincerity: float, log=None, verbose: bool = False,
+) -> Optional[dict]:
+    """Matches the CURRENT apology text to at most one active grievance and
+    runs acknowledge -> progress-healing on that grievance only, in one
+    transaction. Returns {"target": id|None, "basis": str, "candidates": int,
+    "acknowledged": bool, "forgiven": bool}, or None if SQL was unreachable.
+    With no target nothing is written."""
+    def _do(conn):
+        return relationship_memory.apply_apology(conn, user_id, apology_text, sincerity)
+
+    return _shadow(log, verbose, "apply_apology", _do)
+
+
 def shadow_get_relationship_context(*, user_id: str, log=None, verbose: bool = False) -> Optional[dict]:
     """Read-only: the RAW FACTS of the most severe active grievance (if
     any) — description/severity/status, nothing interpreted — for

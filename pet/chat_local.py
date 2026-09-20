@@ -20,8 +20,7 @@ import re
 
 from agent.message_intensity import IntensityResult, intensity_from_state
 from agent.db.sql.shadow_write import (
-    shadow_add_grievance, shadow_acknowledge_apology, shadow_progress_healing,
-    shadow_get_relationship_context,
+    shadow_add_grievance, shadow_apply_apology, shadow_get_relationship_context,
 )
 
 router = APIRouter()
@@ -380,11 +379,7 @@ def _apply_self_report(text: str, intensity) -> None:
     if not intensity.ok:
         return
     if intensity.is_apology:
-        ctx = shadow_get_relationship_context(user_id=_RELATIONSHIP_USER_ID)
-        grievance = _relationship_grievance(ctx)
-        if grievance:
-            shadow_acknowledge_apology(grievance_id=grievance["grievance_id"], sincerity=intensity.sincerity)
-            shadow_progress_healing(grievance_id=grievance["grievance_id"])
+        shadow_apply_apology(user_id=_RELATIONSHIP_USER_ID, apology_text=text, sincerity=intensity.sincerity)
     elif intensity.is_insult and intensity.severity >= _INSULT_SEVERITY_THRESHOLD:
         shadow_add_grievance(
             user_id=_RELATIONSHIP_USER_ID, event_type="insult", description=text, severity=intensity.severity,

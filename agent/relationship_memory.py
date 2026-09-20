@@ -30,6 +30,7 @@ owns the transaction.
 """
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -198,3 +199,177 @@ def most_severe_active_grievance(conn, user_id: str) -> Optional[Dict[str, Any]]
     if not active:
         return None
     return max(active, key=lambda g: g["severity"])
+
+
+# ============================================================
+# APOLOGY -> GRIEVANCE MATCHING.
+#
+# A valid apology does NOT imply that the heaviest grievance is its
+# target (that was the old rule: most_severe_active_grievance()). An
+# apology is about a specific event, so the target is chosen from the
+# apology's own text and the events' own record, deterministically and
+# without a second model call:
+#
+#   1. explicit reference: the content words the apology names
+#      ("...что назвал тебя бесполезной") overlap an ACTIVE grievance's
+#      description. Best overlap wins. Equal overlap -> most recent
+#      offense, then higher severity, then id (never random).
+#   2. the apology names something that is ALREADY RESOLVED (overlaps a
+#      forgiven/unforgiven grievance strictly better than any active
+#      one) -> no target. It is never redirected to an unrelated open
+#      grievance and never reopens the settled one.
+#   3. generic / unmatched apology ("извини"): no invented link.
+#        - exactly one active grievance -> that one;
+#        - else exactly one active grievance whose offense is recent
+#          (within APOLOGY_LOCALITY_HOURS of now) -> that one;
+#        - else AMBIGUOUS -> no target, no state change.
+#   4. no active grievance -> no target (an apology never creates one).
+#
+# Severity is only a late tie-break. Affection / forgiveness capacity /
+# trust are deliberately NOT inputs: RELATIONAL STATE != EVENT IDENTITY.
+# ============================================================
+
+APOLOGY_LOCALITY_HOURS = 1.0
+_EPOCH = datetime(1970, 1, 1)
+
+_STEM_SUFFIXES = sorted(
+    (
+        "ыми", "ими", "ого", "его", "ому", "ему", "ами", "ями", "ала", "ила",
+        "ой", "ый", "ий", "ая", "яя", "ое", "ее", "ую", "юю", "ые", "ие", "ых", "их", "ым", "им",
+        "ом", "ем", "ов", "ев", "ей", "ою", "ею", "ам", "ям", "ах", "ях", "ал", "ил", "ли", "ть",
+        "а", "я", "о", "е", "у", "ю", "ы", "и", "ь", "й", "л",
+    ),
+    key=len, reverse=True,
+)
+
+# Words that make an utterance an apology / describe the act of
+# offending / locate it in time. They carry no identity of WHICH event.
+_NON_CONTENT_WORDS = (
+    "извини извините прости простите прошу прощения прощенье сожалею виноват виновата неправ неправа зря "
+    "ошибся ошибалась ошибался ошибка обидел обидела обидные обиду обиделась обидеть оскорбил оскорбила "
+    "оскорбление оскорблял назвал назвала обозвал обозвала сказал сказала слова слово сказанное "
+    "что только тебя тебе тобой был была было это этого очень вообще просто сейчас потом тогда тоже если когда "
+    "чтобы как так там вот еще все мне меня мной мои свои себя нее ней ты вы вас вам тут для про над без при "
+    "или они она оно его них ним того тому том такой такое такая зачем почему недавно минуту назад раньше "
+    "вчера сегодня надо нужно можно могу хочу хотел хотела был быть буду будет"
+).split()
+
+
+def _normalize(text: Any) -> str:
+    return (str(text or "")).casefold().replace("ё", "е")
+
+
+def _stem(token: str) -> str:
+    for suffix in _STEM_SUFFIXES:
+        if token.endswith(suffix) and len(token) - len(suffix) >= 3:
+            return token[: -len(suffix)]
+    return token
+
+
+_NON_CONTENT_STEMS = {_stem(w) for w in _NON_CONTENT_WORDS}
+
+
+def _stems(text: Any, *, drop_non_content: bool) -> set:
+    tokens = re.findall(r"[a-zа-я0-9]+", _normalize(text))
+    stems = {_stem(t) for t in tokens}
+    if drop_non_content:
+        stems -= _NON_CONTENT_STEMS
+    return {s for s in stems if len(s) >= 3}
+
+
+def _as_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return value if isinstance(value, datetime) else None
+
+
+def _offense_time(grievance: Dict[str, Any]) -> datetime:
+    """When the offense last happened. A 'registered' grievance has had no
+    apology transition, so its updated_at is its creation or its last
+    recurrence (bump_grievance resets status to 'registered'). Any other
+    status has updated_at moved by apology/healing, which is not an offense,
+    so created_at is used."""
+    created = _as_datetime(grievance.get("created_at")) or _EPOCH
+    if grievance.get("status") == "registered":
+        return _as_datetime(grievance.get("updated_at")) or created
+    return created
+
+
+def _overlap(apology_stems: set, grievance: Dict[str, Any]) -> float:
+    if not apology_stems:
+        return 0.0
+    shared = apology_stems & _stems(grievance.get("description"), drop_non_content=False)
+    return len(shared) / len(apology_stems)
+
+
+class ApologyMatch:
+    """Outcome of match_apology_grievance(): the chosen grievance (or None)
+    and WHY, so the decision is inspectable and testable."""
+
+    __slots__ = ("grievance", "basis", "candidates")
+
+    def __init__(self, grievance: Optional[Dict[str, Any]], basis: str, candidates: int):
+        self.grievance = grievance
+        self.basis = basis
+        self.candidates = candidates
+
+    @property
+    def grievance_id(self) -> Optional[str]:
+        return self.grievance["id"] if self.grievance else None
+
+
+def match_apology_grievance(
+    apology_text: str,
+    active: List[Dict[str, Any]],
+    resolved: Optional[List[Dict[str, Any]]] = None,
+    now: Optional[datetime] = None,
+) -> ApologyMatch:
+    """Pure: picks at most ONE active grievance for an apology. See the
+    section comment above for the policy."""
+    if not active:
+        return ApologyMatch(None, "no_active_grievance", 0)
+    now = now or _now()
+
+    apology_stems = _stems(apology_text, drop_non_content=True)
+    if apology_stems:
+        scored = [(_overlap(apology_stems, g), g) for g in active]
+        best_active = max(score for score, _ in scored)
+        best_resolved = max((_overlap(apology_stems, g) for g in (resolved or [])), default=0.0)
+        if best_resolved > best_active:
+            return ApologyMatch(None, "names_resolved_grievance", len(active))
+        if best_active > 0:
+            top = [g for score, g in scored if score == best_active]
+            if len(top) == 1:
+                return ApologyMatch(top[0], "explicit_reference", len(active))
+            chosen = min(top, key=lambda g: (
+                -(_offense_time(g) - _EPOCH).total_seconds(),
+                -float(g.get("severity") or 0.0),
+                str(g.get("id")),
+            ))
+            return ApologyMatch(chosen, "explicit_reference_tie_recent", len(active))
+
+    if len(active) == 1:
+        return ApologyMatch(active[0], "sole_active_grievance", 1)
+    local = [g for g in active if (now - _offense_time(g)).total_seconds() / 3600.0 <= APOLOGY_LOCALITY_HOURS]
+    if len(local) == 1:
+        return ApologyMatch(local[0], "sole_recent_grievance", len(active))
+    return ApologyMatch(None, "ambiguous", len(active))
+
+
+def apply_apology(conn, user_id: str, apology_text: str, sincerity: float) -> Dict[str, Any]:
+    """Match the apology to one active grievance and, only then, run the
+    existing lifecycle (acknowledge -> progress healing) on THAT grievance.
+    With no target nothing is written."""
+    active = get_active_grievances(conn, user_id)
+    resolved = repo.list_recent_resolved_grievances(conn, user_id) if active else []
+    match = match_apology_grievance(apology_text, active, resolved)
+    result = {"target": match.grievance_id, "basis": match.basis, "candidates": match.candidates,
+              "acknowledged": False, "forgiven": False}
+    if match.grievance is None:
+        return result
+    result["acknowledged"] = acknowledge_apology(conn, match.grievance["id"], sincerity)
+    result["forgiven"] = progress_healing(conn, match.grievance["id"])
+    return result
