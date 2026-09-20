@@ -27,7 +27,38 @@ The interpreter is `YANDI_PYTHON`, else `./.venv`, else `~/venv`, else `python3`
 | Personal chat | `pet.pet_chat_local_regression_test`, `pet.pet_event_extraction_regression_test`, `pet.pet_event_provenance_regression_test`, `pet.pet_relationship_focus_regression_test`, `pet.pet_relationship_state_causality_regression_test`, `pet.pet_commitment_events_regression_test`, `pet.pet_turn_identity_regression_test` |
 | Relationship memory | `agent.message_intensity_regression_test`, `agent.relationship_memory_regression_test`, `agent.relationship_apology_matching_regression_test`, `agent.relationship_healing_clock_regression_test`, `agent.relationship_state_regression_test`, `agent.relationship_commitments_regression_test`, `agent.relationship_idempotency_regression_test` |
 | Epistemic / write-back | `agent.epistemic_canonical_trust_shadow_regression_test`, `agent.writeback_episodic_sql_regression_test` |
-| SQL layer | `agent.db_sql_shadow_write_regression_test`, `agent.db_sql_security_injection_regression_test` |
+| SQL layer | `agent.db_sql_shadow_write_regression_test`, `agent.db_sql_security_injection_regression_test`, `agent.db_sql_test_isolation_regression_test` |
+
+## Tests never touch the live database
+
+```text
+TEST SUITE MUST NEVER WRITE THE LIVE OWNER DATABASE
+```
+
+The connection layer's defaults point at the operator's own database, so a test that merely forgets
+to isolate itself would write real rows. The rule is therefore enforced in one place,
+`agent/db/sql/connection.py`, and does not depend on any test being careful:
+
+- A **test process** is recognised by its entry point (`*_test.py`, `*_proof.py`, `*regression*`,
+  pytest/unittest) or by `YANDI_TEST_MODE=1` (set by the scripts).
+- In a test process every real database connection is **refused** (`LiveDatabaseRefused`, a
+  `SqlUnavailable`, so fail-open callers keep working) unless it targets the socket declared in
+  `YANDI_TEST_ISOLATED_SOCKET` (set by `scripts/test-sql-temp.sh` for its throw-away instance) and that
+  socket is not the live one. There is no switch that turns the guard off and no fallback to the
+  live database. A refusal that could have reached a real database is announced on stderr
+  (`[live-db-guard] REFUSED ...`).
+- The only exceptions are the two operator tools `db_sql_live_persistence_proof` and
+  `db_sql_live_immutability_proof`, which are documented as live tools (not tests), are not part of any
+  suite, and are named (and pinned by a test) in `connection.py`.
+- Suites that are not about SQL persistence say so with `db_sql_fake_fixtures.no_database()` or use
+  an in-memory fake.
+
+`scripts/test-core.sh` additionally fails if a core suite even *attempts* a connection, and, when the
+database is reachable, fingerprints it (per-table row counts and auto-increment counters, read-only,
+`scripts/live_db_fingerprint.py`) before and after and fails on any change.
+`scripts/test-all.sh` does the same for every `*_test.py` in the repository and lists the suites that
+attempted a connection. `agent/db_sql_test_isolation_regression_test.py` proves the guard, including
+mutants (guard removed, the live socket declared "isolated").
 
 ## Deterministic vs. environment-dependent
 
@@ -37,9 +68,9 @@ The interpreter is `YANDI_PYTHON`, else `./.venv`, else `~/venv`, else `python3`
   behaviour (for example how often the model finds a genuine insult in a message) is measured with
   a separate live benchmark and is not a regression test; the regression tests script the model and
   check the protocol around it.
-- **Need a live SQL instance:** the `db_sql_live_*` and ownership/bootstrap proofs, which check a
-  real dedicated database instance. Do not run these against a database holding data you care about
-  unless you know what they do.
+- **Need a live SQL instance:** the `db_sql_live_*` proofs, which check a real dedicated database
+  instance and write tagged rows on purpose. They are operator tools, not tests: do not run them
+  against a database holding data you care about unless you know what they do.
 
 ## SQL integration tests (real engine, throw-away instance)
 

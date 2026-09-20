@@ -75,6 +75,9 @@ setup milliseconds.
 from __future__ import annotations
 
 import os
+import re
+import sys
+import types
 from contextlib import contextmanager
 from typing import Optional
 
@@ -95,6 +98,107 @@ class SqlUnavailable(Exception):
     exception type and never need to distinguish the two cases to do the
     right thing: skip the SQL write, never touch the JSON canonical path.
     """
+
+
+class LiveDatabaseRefused(SqlUnavailable):
+    """A test process tried to open a connection to anything but the explicitly
+    declared throw-away test database. It IS a SqlUnavailable, so fail-open
+    callers keep working exactly as if the database were down; it never
+    degrades into "connect to the live database instead"."""
+
+
+# TEST SUITE MUST NEVER WRITE THE LIVE OWNER DATABASE.
+#
+# The canonical defaults above make "no environment set" mean "the owner's live
+# database". That is right for the running agent and wrong for a test: a test
+# that simply forgets to isolate itself would write real rows. So the rule is
+# enforced here, once, at the only place a real connection is opened, and does
+# not depend on any test remembering anything:
+#
+#   * in a TEST PROCESS the only connection ever allowed is to the socket named
+#     by YANDI_TEST_ISOLATED_SOCKET (set by scripts/test-sql-temp.sh for its own
+#     private mysqld) and that socket must not be the canonical live one;
+#   * no isolated socket declared -> every real connection is refused (the test
+#     fails or skips loudly; it never falls back to the live database);
+#   * there is deliberately NO switch that turns the guard off.
+_ISOLATED_SOCKET_ENV = "YANDI_TEST_ISOLATED_SOCKET"
+
+# Owner/operator-invoked LIVE verification tools (their own docstrings say they
+# are "NOT a regression test" and write tagged rows on purpose). They are not
+# part of any suite; named here explicitly so the exception is visible and
+# reviewable, and pinned by a test so it cannot grow silently.
+_LIVE_OPERATOR_TOOLS = frozenset({
+    "agent.db_sql_live_persistence_proof",
+    "agent.db_sql_live_immutability_proof",
+})
+
+_TEST_NAME_RE = re.compile(r"(^test_|_test$|_proof$|regression|benchmark|^bench_|^unittest\.__main__$)")
+
+
+def _entry_point_name() -> str:
+    """Dotted module name of the program's entry point (`python -m pkg.mod`),
+    or the script's file stem (`python path/to/file.py`), or ''."""
+    main = sys.modules.get("__main__")
+    spec = getattr(main, "__spec__", None)
+    if spec is not None and getattr(spec, "name", None):
+        return spec.name
+    path = getattr(main, "__file__", None) or (sys.argv[0] if sys.argv else "")
+    base = os.path.basename(path or "")
+    return base[:-3] if base.endswith(".py") else base
+
+
+def is_test_process() -> bool:
+    """True when this process is a test run: the explicit marker set by the
+    project's runners, a pytest/unittest runner, or a test-shaped entry point."""
+    if os.environ.get("YANDI_TEST_MODE", "").lower() in ("1", "true", "yes"):
+        return True
+    if "pytest" in sys.modules or "_pytest" in sys.modules:
+        return True
+    name = _entry_point_name()
+    if name in _LIVE_OPERATOR_TOOLS:
+        return False
+    return bool(_TEST_NAME_RE.search(name.split(".")[-1]) or _TEST_NAME_RE.search(name))
+
+
+def _same_path(a: str, b: str) -> bool:
+    try:
+        return os.path.realpath(a) == os.path.realpath(b)
+    except Exception:
+        return a == b
+
+
+def assert_connection_allowed(socket_path: str) -> None:
+    """Raise LiveDatabaseRefused if this is a test process and `socket_path`
+    is not the declared throw-away test database. Called immediately before a
+    real connection is opened."""
+    if not is_test_process():
+        return
+    isolated = os.environ.get(_ISOLATED_SOCKET_ENV, "")
+    if isolated and socket_path and not _same_path(isolated, _DEFAULT_SOCKET) and _same_path(isolated, socket_path):
+        return
+    # Visible even when a fail-open caller swallows the exception: a test that
+    # keeps "passing" while being refused would otherwise hide that it was about
+    # to touch a real database. (A path with no socket behind it could not have
+    # reached any database; that refusal is silent.)
+    if not socket_path or os.path.exists(socket_path):
+        import traceback
+        callers = [f"{os.path.basename(f.filename)}:{f.lineno}" for f in traceback.extract_stack()[:-1]
+                   if os.path.basename(f.filename) != "connection.py"][-2:]
+        print(f"[live-db-guard] REFUSED a database connection from test process "
+              f"{_entry_point_name() or '?'} (opened at {' <- '.join(reversed(callers))})", file=sys.stderr)
+    raise LiveDatabaseRefused(
+        "refusing to open a database connection from a test process: the target "
+        f"({socket_path or 'TCP host/port'}) is not the isolated test database "
+        f"declared in {_ISOLATED_SOCKET_ENV}. Tests must use a fake connection or "
+        "the throw-away instance (scripts/test-sql-temp.sh); they never fall back "
+        "to the live database."
+    )
+
+
+def _is_real_driver(module) -> bool:
+    """True for the genuine pymysql module. A test that swaps in a mock driver
+    cannot reach any database, so there is nothing to guard."""
+    return isinstance(module, types.ModuleType) and bool(getattr(module, "__file__", None))
 
 
 def _resolve(env_name: str, default: str) -> str:
@@ -210,6 +314,9 @@ def get_connection(autocommit: bool = False):
     else:
         connect_kwargs["host"] = cfg["host"]
         connect_kwargs["port"] = cfg["port"]
+
+    if _is_real_driver(pymysql):
+        assert_connection_allowed(cfg["socket"])
 
     try:
         conn = pymysql.connect(**connect_kwargs)

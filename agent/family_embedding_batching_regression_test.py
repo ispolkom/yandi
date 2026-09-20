@@ -40,6 +40,9 @@ from agent.claim_family_registry import ClaimFamilyRegistry
 import agent.claim_family_registry as registry_mod
 from agent.db.sql.repositories import _coerce_datetime
 from agent.belief_manager import BeliefManager
+
+# BeliefManager() decays the stored beliefs on construction; a test must never do that to a real database.
+patch.object(BeliefManager, "_apply_decay", lambda self: None).start()
 import agent.claim_semantic_identity_prototype as prototype_mod
 from agent.claim_semantic_identity_prototype import classify_claim_pair, EMBEDDING_PREFILTER_THRESHOLD
 

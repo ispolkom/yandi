@@ -211,3 +211,20 @@ def record(conn, run_id, claims_data, evidence_data, query_text=None, started_at
     if query_text is not None:
         conn.run_query[run_id] = query_text
     sw.record_claims_and_evidence(run_id=run_id, claims_data=claims_data, evidence_data=evidence_data)
+
+
+def no_database():
+    """The test has NO database: every get_connection() the shadow-write /
+    verification-memory / tracer paths resolve raises SqlUnavailable, silently.
+    Fail-open callers then behave exactly as if the database were down. A test
+    that is not about SQL persistence says so with this, instead of leaving the
+    real connection layer to refuse (or, before the guard existed, to reach the
+    live database)."""
+    @contextlib.contextmanager
+    def _unavailable(autocommit=False):
+        raise sqlconn.SqlUnavailable("no database in this test")
+        yield  # pragma: no cover
+
+    sw.get_connection = _unavailable
+    vm.get_connection = _unavailable
+    sqlconn.get_connection = _unavailable

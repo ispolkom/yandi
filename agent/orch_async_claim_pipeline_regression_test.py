@@ -23,6 +23,11 @@ from unittest.mock import patch
 import agent.orchestrator.claims.async_pipeline as pipeline_mod
 from agent.orch_schemas import ClaimRecord
 
+from agent.db_sql_fake_fixtures import no_database
+
+# This suite is not about SQL persistence: it has no database (never the real connection layer).
+no_database()
+
 PASS = 0
 FAIL = 0
 

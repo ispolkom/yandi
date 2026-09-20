@@ -47,4 +47,7 @@ for _ in $(seq 1 60); do [ -S "$SOCK" ] && "$MYSQL" --no-defaults -uroot -S "$SO
 export YANDI_SQL_SOCKET="$SOCK" YANDI_SQL_USER=tmp_admin YANDI_SQL_AUTH_MODE=password YANDI_SQL_PASSWORD=tmp-only-pw
 "$PYTHON" -m agent.db.sql.migrate >/dev/null
 export YANDI_TEST_SQL_SOCKET="$SOCK" YANDI_TEST_SQL_ADMIN=tmp_admin YANDI_TEST_SQL_ADMIN_PW=tmp-only-pw
+# Declares THIS throw-away instance as the only database a test process may open
+# (agent/db/sql/connection.py refuses everything else, the live database first).
+export YANDI_TEST_MODE=1 YANDI_TEST_ISOLATED_SOCKET="$SOCK"
 "$PYTHON" -m agent.relationship_idempotency_sql_integration_test

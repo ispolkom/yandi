@@ -47,6 +47,11 @@ import agent.db.sql.shadow_write as sw
 import agent.db.sql.connection as sqlconn
 from agent.claim_family_registry import ClaimFamilyRegistry
 import agent.claim_family_registry as cfr_mod
+from agent.db_sql_fake_fixtures import no_database
+
+# Paths this suite does not wire to its own fake reach the shadow writer; they get NO database (this suite
+# once wrote its fixture families into the live database through exactly such a path).
+no_database()
 
 PASS = 0
 FAIL = 0

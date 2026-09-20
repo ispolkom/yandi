@@ -49,6 +49,8 @@ def main() -> int:
     current_extractor = [scripted_llm([])]
     real_extraction_llm = chat_local._extraction_llm
     chat_local._extraction_llm = lambda model: current_extractor[0]
+    # The self-model reader would open (and, if absent, create) the owner's real self record.
+    chat_local._self_knowledge_message = lambda: None
 
     remote_entry = lambda model: {
         "backend": "remote", "protocol": "openai",

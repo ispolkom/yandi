@@ -34,6 +34,11 @@ from agent.claim_family_registry import ClaimFamilyRegistry
 import agent.claim_family_registry as registry_mod
 from agent.db_sql_fake_fixtures import fresh_fake as _fresh_fake
 
+from agent.db_sql_fake_fixtures import no_database
+
+# This suite is not about SQL persistence: it has no database (never the real connection layer).
+no_database()
+
 
 # "ТОЧКА НОЛЬ": ClaimFamilyRegistry is SQL-only now (no storage_file) —
 # a tiny isolated fake claim_family/family_member connection, freshly

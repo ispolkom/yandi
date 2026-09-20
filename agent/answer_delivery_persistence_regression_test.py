@@ -44,6 +44,10 @@ from unittest.mock import patch
 import agent.orch_tracer as ot
 import agent.orchestrator.response.writeback as wb
 from agent.orch_schemas import SynthesisResult
+from agent.db_sql_fake_fixtures import fresh_fake
+
+# save_trace() writes trace_record through get_connection(); give it an in-memory fake, never a real database.
+FAKE_DB = fresh_fake()
 
 PASS = 0
 FAIL = 0
@@ -162,12 +166,14 @@ check(
     f"observation={trace._observations.get('delivered_answer_text')!r} resp={resp.answer!r}",
 )
 
-saved_line_path = next(traces_dir.glob("*.jsonl"))
-with saved_line_path.open("r", encoding="utf-8") as f:
-    saved = json.loads(f.readline())
+# The JSONL trace file was retired with "точка ноль" v13: save_trace() now
+# persists the trace to SQL (trace_record). The persisted envelope is the trace's
+# own to_dict(); the write itself is checked against the in-memory fake.
+saved = json.loads(json.dumps(trace.to_dict()))
+check("B0: save_trace() wrote its trace_record row (SQL path, in-memory fake)", "t_wb_main" in FAKE_DB.trace_records)
 
 check(
-    "B: delivered_answer_text ROUND-TRIPPED through real save_trace()/JSONL == OrchestratorResponse.answer",
+    "B: delivered_answer_text ROUND-TRIPPED through the serialised persisted trace == OrchestratorResponse.answer",
     saved.get("observations", {}).get("delivered_answer_text") == resp.answer,
     f"persisted={saved.get('observations', {}).get('delivered_answer_text')!r} resp={resp.answer!r}",
 )

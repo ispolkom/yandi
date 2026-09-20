@@ -25,6 +25,9 @@ from agent.claim_semantic_identity_prototype import classify_claim_pair
 import agent.claim_semantic_identity_prototype as proto_mod
 from agent.belief_manager import BeliefManager
 
+# BeliefManager() decays the stored beliefs on construction; a test must never do that to a real database.
+patch.object(BeliefManager, "_apply_decay", lambda self: None).start()
+
 PASS = 0
 FAIL = 0
 

@@ -32,6 +32,11 @@ from unittest.mock import patch
 
 import pet.council_chat_server as ccs
 
+from agent.db_sql_fake_fixtures import no_database
+
+# This suite is not about SQL persistence: it has no database (never the real connection layer).
+no_database()
+
 PASS = 0
 FAIL = 0
 

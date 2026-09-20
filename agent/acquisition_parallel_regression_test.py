@@ -25,6 +25,11 @@ from agent.acquisition import (
     persist_acquisition_observation,
 )
 
+from agent.db_sql_fake_fixtures import no_database
+
+# This suite is not about SQL persistence: it has no database (never the real connection layer).
+no_database()
+
 
 BASE = Path(__file__).resolve().parent.parent
 

@@ -51,6 +51,10 @@ from agent.claim_family_registry import ClaimFamilyRegistry
 import agent.claim_family_registry as registry_mod
 from agent.claim_identity import extract_subject_anchors
 from agent.db_sql_fake_fixtures import fresh_fake as _fresh_fake, record as _record
+from agent.belief_manager import BeliefManager
+
+# BeliefManager() decays the stored beliefs on construction; a test must never do that to a real database.
+patch.object(BeliefManager, "_apply_decay", lambda self: None).start()
 
 
 # "ТОЧКА НОЛЬ": ClaimFamilyRegistry is SQL-only now (no storage_file) —
