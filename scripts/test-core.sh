@@ -23,6 +23,7 @@ SUITES=(
   llm_gateway.intelligence_bridge_regression_test
   llm_gateway.secure_store_regression_test
   pet.pet_chat_local_regression_test
+  pet.pet_event_extraction_regression_test
   pet.pet_event_provenance_regression_test
   pet.pet_relationship_focus_regression_test
   pet.pet_relationship_state_causality_regression_test
