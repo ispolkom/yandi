@@ -23,12 +23,14 @@ final report's "READY / NOT READY" section.
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 import uuid
 from typing import Any, Callable, Optional
 
 from agent.db.sql.connection import get_connection, SqlUnavailable
 import agent.db.sql.repositories as repo
+import agent.relationship_commitments as relationship_commitments
 import agent.relationship_memory as relationship_memory
 import agent.relationship_state as relationship_state
 
@@ -709,6 +711,60 @@ def shadow_get_relationship_context(
             "relationship_state": {k: round(v, 1) for k, v in relationship_state.get_state(conn, user_id).items()},
             "open_count": focus["open_count"],
             "candidates": [relationship_memory.memory_facts(g) for g in focus["candidates"]],
+            "commitments": _commitment_context(conn, user_id, current_text),
         }
 
     return _shadow(log, verbose, "get_relationship_context", _do)
+
+
+_commitments_unavailable_warned = False
+
+
+def _commitment_context(conn, user_id: str, current_text: str) -> Optional[dict]:
+    """The promise ledger's part of the relationship context, isolated so that
+    a missing ledger (schema v15 not applied yet) can never degrade the
+    grievance memory: None means UNKNOWN (nothing is claimed about promises
+    and no promise event is written), never "no promises"."""
+    global _commitments_unavailable_warned
+    try:
+        focus = relationship_commitments.resolve_commitment_focus(conn, user_id, current_text)
+        reported = [c for c in relationship_commitments.commitment_statuses(conn, user_id)
+                    if c["status"] == "reported_fulfilled"][-2:]
+    except Exception:
+        if not _commitments_unavailable_warned:
+            _commitments_unavailable_warned = True
+            logging.getLogger(__name__).warning(
+                "promise ledger unavailable (schema v15 not applied?); promise events are not recorded", exc_info=True)
+        return None
+    target = focus["commitment"]
+    return {
+        "focus": (
+            {"commitment_id": target["commitment_id"], "text": target["text"], "status": target["status"]}
+            if target else None
+        ),
+        "basis": focus["basis"],
+        "open_count": focus["open_count"],
+        "candidates": [c["text"] for c in focus["candidates"]],
+        "reported": [c["text"] for c in reported],
+    }
+
+
+def shadow_create_commitment(
+    *, user_id: str, text: str, evidence: str, log=None, verbose: bool = False,
+) -> Optional[dict]:
+    """A promise the person made in the CURRENT message (validated upstream)."""
+    def _do(conn):
+        return relationship_commitments.create_commitment(conn, user_id, text, evidence)
+
+    return _shadow(log, verbose, "create_commitment", _do)
+
+
+def shadow_record_fulfillment_claim(
+    *, user_id: str, commitment_id: Optional[str], evidence: str, log=None, verbose: bool = False,
+) -> Optional[dict]:
+    """The person REPORTS having kept the promise the reply was built around.
+    Recorded as a report only; it changes no relationship coordinate."""
+    def _do(conn):
+        return relationship_commitments.record_fulfillment_claim(conn, user_id, commitment_id, evidence)
+
+    return _shadow(log, verbose, "record_fulfillment_claim", _do)

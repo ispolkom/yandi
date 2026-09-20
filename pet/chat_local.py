@@ -16,12 +16,14 @@ import redis.asyncio as aioredis
 from fastapi import APIRouter
 
 from pet.shared import REDIS_URL, LOCAL_MSGS_KEY, MAX_MESSAGES
+import dataclasses
 import re
 
 from agent.message_intensity import IntensityResult, intensity_from_state
 import agent.relationship_memory as relationship_memory
 from agent.db.sql.shadow_write import (
     shadow_add_grievance, shadow_apply_apology, shadow_get_relationship_context,
+    shadow_create_commitment, shadow_record_fulfillment_claim,
 )
 
 router = APIRouter()
@@ -104,11 +106,19 @@ _STATE_SCHEMA = {
         "severity": {"type": "number"},
         "is_apology": {"type": "boolean"},
         "sincerity": {"type": "number"},
+        "is_promise": {
+            "type": "boolean",
+            "description": "true только если ПОСЛЕДНЕЕ сообщение пользователя само содержит его обещание что-то сделать",
+        },
+        "claims_fulfilled": {
+            "type": "boolean",
+            "description": "true только если ПОСЛЕДНЕЕ сообщение пользователя само сообщает, что он выполнил ранее обещанное",
+        },
         "evidence": {
             "type": "string",
             "description": (
-                "если is_insult или is_apology равен true — дословная цитата из "
-                "последнего сообщения пользователя, которая это показывает; "
+                "если is_insult, is_apology, is_promise или claims_fulfilled равен true — "
+                "дословная цитата из последнего сообщения пользователя, которая это показывает; "
                 "иначе пустая строка"
             ),
         },
@@ -144,11 +154,17 @@ def _dropped_event(error: str) -> IntensityResult:
 
 
 def _require_current_turn_provenance(intensity: IntensityResult, state: object, current_text: str) -> IntensityResult:
-    """Drop an asserted insult/apology unless (a) its cited evidence comes
-    from the CURRENT user message (see the note above _STATE_SCHEMA) and
-    (b) the number that carries the event is inside its 0..1 contract.
-    A neutral state (no event asserted) has nothing to attribute and passes
-    through.
+    """Drop an asserted event unless (a) its cited evidence comes from the
+    CURRENT user message (see the note above _STATE_SCHEMA) and (b) the number
+    that carries an insult/apology is inside its 0..1 contract. A neutral
+    state (no event asserted) has nothing to attribute and passes through.
+
+    Commitment events (a promise, a claim of having kept one) share the single
+    evidence quote, so they are accepted only when they are the ONLY event
+    asserted in the turn: an apology or insult that is grounded must not vouch
+    for a promise the model merely remembered, and "promise" together with
+    "claim" is contradictory. Ambiguity drops the commitment event (a missed
+    event, never a fabricated one) and leaves the grounded insult/apology alone.
 
     (b) exists because intensity_from_state() clamps to 0..1, which turns
     garbage into a plausible event: in the live experiments the few false
@@ -157,7 +173,10 @@ def _require_current_turn_provenance(intensity: IntensityResult, state: object, 
     clamping made that a valid apology. An out-of-range number is a
     malformed state, not a weak event. Shape validation only - it never
     judges what the message means."""
-    if not intensity.ok or not (intensity.is_insult or intensity.is_apology):
+    if not intensity.ok:
+        return intensity
+    commitment_asserted = intensity.is_promise or intensity.claims_fulfilled
+    if not (intensity.is_insult or intensity.is_apology or commitment_asserted):
         return intensity
     if not _event_evidence_in_current_message(state, current_text):
         return _dropped_event("asserted event has no evidence quoted from the current user message")
@@ -165,7 +184,12 @@ def _require_current_turn_provenance(intensity: IntensityResult, state: object, 
         return _dropped_event("asserted insult has severity outside the 0..1 contract")
     if intensity.is_apology and not _in_unit_range(state.get("sincerity")):
         return _dropped_event("asserted apology has sincerity outside the 0..1 contract")
-    return intensity
+    exclusive = commitment_asserted and not (intensity.is_insult or intensity.is_apology) \
+        and not (intensity.is_promise and intensity.claims_fulfilled)
+    if commitment_asserted and not exclusive:
+        intensity = dataclasses.replace(intensity, is_promise=False, claims_fulfilled=False)
+    return dataclasses.replace(intensity, evidence=str(state.get("evidence") or "").strip())
+
 
 _SEMANTIC_FAILURE_REPLY = "Прости, я сейчас не смогла нормально сформулировать ответ."
 
@@ -231,6 +255,33 @@ def _state_fact(ctx: dict) -> str:
     return " Твоё нынешнее отношение к этому человеку: " + "; ".join(parts) + "."
 
 
+def _commitment_facts(ctx: dict) -> str:
+    """Promises, as plain facts: which open promise the current message is
+    about (or that it does not single one out), and reports of fulfilment
+    that were never verified. None (ledger unreadable) -> nothing is claimed."""
+    c = ctx.get("commitments")
+    if not isinstance(c, dict):
+        return ""
+    parts = []
+    focus = c.get("focus")
+    if focus and focus.get("status") == "reported_fulfilled":
+        parts.append(f"пользователь заявлял, что выполнил «{focus['text']}», но ты этого не проверяла")
+    elif focus:
+        parts.append(f"пользователь обещал тебе «{focus['text']}» — выполнение пока не подтверждено")
+    elif c.get("basis") == "ambiguous":
+        parts.append(
+            f"ожидающих выполнения обещаний пользователя несколько ({c.get('open_count')}), "
+            "и текущее сообщение не указывает, о каком речь"
+        )
+    reported = [t for t in (c.get("reported") or []) if not (focus and focus.get("text") == t)]
+    if reported:
+        parts.append(
+            "пользователь заявлял, что выполнил " + "; ".join(f"«{t}»" for t in reported)
+            + ", но ты этого не проверяла"
+        )
+    return (" Обещания: " + "; ".join(parts) + ".") if parts else ""
+
+
 def _memory_context_message(ctx: dict | None) -> str | None:
     """Plain statement of RAW FACTS only — never an instruction on how
     to feel about them (see module docstring above). The grievance shown is
@@ -248,7 +299,7 @@ def _memory_context_message(ctx: dict | None) -> str | None:
     open_count = ctx.get("open_count") if isinstance(ctx.get("open_count"), int) else None
     basis = ctx.get("focus_basis")
     past = "Историческая память об отношениях (это ПРОШЛОЕ, а не текущее сообщение пользователя): "
-    tail = " Эта память может влиять на твой ответ, но не является новым событием." + _state_fact(ctx)
+    tail = " Эта память может влиять на твой ответ, но не является новым событием." + _state_fact(ctx) + _commitment_facts(ctx)
     if grievance:
         others = f" Всего открытых обид на пользователя: {open_count}." if open_count and open_count > 1 else ""
         return (
@@ -269,7 +320,7 @@ def _memory_context_message(ctx: dict | None) -> str | None:
             past + "то, о чём говорит пользователь, уже урегулировано; ни одна из открытых обид "
             f"({open_count}) к текущему сообщению не относится." + tail
         )
-    return "Память об отношениях: сейчас открытых обид на пользователя нет." + _state_fact(ctx)
+    return "Память об отношениях: сейчас открытых обид на пользователя нет." + _state_fact(ctx) + _commitment_facts(ctx)
 
 
 def _self_knowledge_message() -> str | None:
@@ -432,7 +483,11 @@ def _apply_current_turn_event(text: str, intensity, memory_ctx: dict | None) -> 
     An apology changes ONLY the grievance the reply was built around
     (`memory_ctx["grievance"]`, resolved before generation from the current
     text), so the visible reply and the persistent transition share one
-    causal target. No focused grievance -> nothing is written.
+    causal target. No focused grievance -> nothing is written. A claim of
+    having kept a promise is recorded, as a REPORT, against the one open
+    promise the reply was built around (`memory_ctx["commitments"]["focus"]`);
+    ambiguous or unknown -> nothing is written. Neither a promise nor a claim
+    moves any relationship coordinate here: only a verified outcome does.
 
     Fail-open: intensity.ok=False (no marker, malformed JSON, etc.)
     means nothing gets written — a broken self-report degrades to "no
@@ -449,6 +504,14 @@ def _apply_current_turn_event(text: str, intensity, memory_ctx: dict | None) -> 
         shadow_add_grievance(
             user_id=_RELATIONSHIP_USER_ID, event_type="insult", description=text, severity=intensity.severity,
         )
+    if intensity.is_promise:
+        shadow_create_commitment(user_id=_RELATIONSHIP_USER_ID, text=text, evidence=intensity.evidence)
+    elif intensity.claims_fulfilled:
+        target = ((memory_ctx or {}).get("commitments") or {}).get("focus")
+        if target:
+            shadow_record_fulfillment_claim(
+                user_id=_RELATIONSHIP_USER_ID, commitment_id=target["commitment_id"], evidence=intensity.evidence,
+            )
 
 
 def _respond_with_character(model: str, messages: list[dict], temperature: float) -> str:

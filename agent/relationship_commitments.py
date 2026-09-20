@@ -107,21 +107,26 @@ def create_commitment(
 
 
 def resolve_commitment_focus(conn, user_id: str, current_text: str) -> Dict[str, Any]:
-    """Which still-open promise (if any) the CURRENT message is about, resolved
-    before the reply so the reply and a later claim share one target.
+    """Which promise (if any) the CURRENT message is about, resolved before the
+    reply so the reply and a later claim share one target.
 
     Read-only; never decides that the message is a claim. Policy:
-      1. content overlap with a promise's own words: a unique best -> it;
-         a tie -> ambiguous (a claim is never assigned arbitrarily);
-      2. no overlap: exactly one open promise -> it; otherwise ambiguous.
+      1. content overlap with a promise's own words, among promises that are
+         open OR already reported (a repeated claim must find ITS promise, not
+         another one): a unique best -> it; a tie -> ambiguous;
+      2. no overlap with any: exactly one OPEN promise -> it; otherwise
+         ambiguous.
     Returns {"commitment": row | None, "basis": str, "open_count": int,
-    "candidates": [rows]} (candidates only when ambiguous)."""
-    open_items = [c for c in commitment_statuses(conn, user_id) if c["status"] == "open"]
-    if not open_items:
+    "candidates": [rows]} (candidates only when ambiguous). `commitment`
+    carries its folded `status`."""
+    items = commitment_statuses(conn, user_id)
+    open_items = [c for c in items if c["status"] == "open"]
+    live = [c for c in items if c["status"] in ("open", "reported_fulfilled")]
+    if not live:
         return {"commitment": None, "basis": "no_open_commitment", "open_count": 0, "candidates": []}
     current = _stems(current_text)
     if current:
-        scored = [(len(current & _stems(c["text"])) / len(current), c) for c in open_items]
+        scored = [(len(current & _stems(c["text"])) / len(current), c) for c in live]
         best = max(score for score, _ in scored)
         if best > 0:
             top = [c for score, c in scored if score == best]
@@ -130,6 +135,8 @@ def resolve_commitment_focus(conn, user_id: str, current_text: str) -> Dict[str,
             return {"commitment": None, "basis": "ambiguous", "open_count": len(open_items), "candidates": top[:MAX_FOCUS_CANDIDATES]}
     if len(open_items) == 1:
         return {"commitment": open_items[0], "basis": "sole_open_commitment", "open_count": 1, "candidates": []}
+    if not open_items:
+        return {"commitment": None, "basis": "no_open_commitment", "open_count": 0, "candidates": []}
     return {"commitment": None, "basis": "ambiguous", "open_count": len(open_items),
             "candidates": open_items[-MAX_FOCUS_CANDIDATES:]}
 

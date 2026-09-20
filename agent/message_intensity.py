@@ -80,6 +80,11 @@ class IntensityResult:
     severity: float
     sincerity: float
     error: str = ""
+    # Optional commitment events (strict booleans; absent -> False) and the
+    # verbatim evidence quote that pet/chat_local.py validated for them.
+    is_promise: bool = False
+    claims_fulfilled: bool = False
+    evidence: str = ""
 
 
 def _neutral(error: str) -> IntensityResult:
@@ -103,6 +108,8 @@ def intensity_from_state(state: object, *, error: str = "") -> IntensityResult:
             severity=max(0.0, min(1.0, float(state["severity"]))),
             sincerity=max(0.0, min(1.0, float(state["sincerity"]))),
             error=error,
+            is_promise=state.get("is_promise") is True,
+            claims_fulfilled=state.get("claims_fulfilled") is True,
         )
     except (KeyError, TypeError, ValueError) as e:
         return _neutral(f"semantic state missing/invalid fields: {e}")

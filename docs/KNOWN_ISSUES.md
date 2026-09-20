@@ -3,13 +3,26 @@
 Recorded, not hidden. None of these are fixed by the documentation change that introduced this
 file.
 
-## Event evidence recall
+## Event evidence recall (the current bottleneck)
 
 The current-event provenance guard requires the model to quote, verbatim, the part of the *current*
-user message that shows an insult or apology. This removes false events created from memory or
-history, but the model often omits or invents the quote, so some genuine insults and apologies are
-dropped. The guard is fail-safe (an event may be missed, never fabricated). Improving recall is open
-work and must not weaken the provenance check.
+user message that shows an insult, an apology, a promise or a claim of having kept one. This removes
+false events created from memory or history, but the local 9B model almost never produces such a
+quote. Measured on synthetic, realistic messages (n=10 each, single generation, guard applied):
+
+| Message | Model asserts the event | Passes the guard |
+|---|---|---|
+| insult | ~10/10 | 0-1/10 |
+| apology | ~10/10 | 0/10 |
+| promise / claim of having kept one | not measured before the schema fields existed | 0/10 |
+| neutral turns (false events) | 0 | 0 |
+
+The model classifies correctly but leaves `evidence` empty, paraphrases it or writes it in English
+("[user admits fault]"). The guard is fail-safe (an event may be missed, never fabricated), so the
+cost is that almost no real event reaches the relationship state on messages of this kind. Because
+everything downstream (grievances, relationship state, the promise ledger) is driven by these events,
+improving evidence compliance is the highest-value open item. It must not weaken the check: forcing
+a verbatim substring by construction would let a hallucinated event pass too.
 
 ## Embedding routing
 

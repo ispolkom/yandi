@@ -99,6 +99,12 @@ ONE CAUSAL EVENT -> ONE STATE TRANSITION.
   and leaves `affection` alone; a verified broken promise hits trust hardest. No verifier is wired
   into the personal chat yet, so today the live path records promises and reports but does not
   move trust.
+- In the personal chat a promise or a claim is an event only if the model's state asserts it **and**
+  quotes it verbatim from the current message (the same provenance guard as insults and
+  apologies). Promise and claim are accepted only when they are the only event asserted in the turn,
+  so a grounded apology cannot vouch for a promise the model merely remembered. The claim is linked
+  to one open promise chosen before the reply; the reply's memory context states that promise, or
+  the ambiguity, or an earlier unverified report, as plain facts.
 - A missed deadline is only a derived `overdue` flag. It never breaks a promise by itself.
 - A claim is linked to a **specific** promise (content overlap, or the only open one). With several
   candidates and no clear winner it is ambiguous and nothing is written.
