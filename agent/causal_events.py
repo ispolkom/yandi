@@ -51,6 +51,11 @@ def _is_missing_table(exc: BaseException) -> bool:
     return "doesn't exist" in text or "does not exist" in text
 
 
+def is_missing_table(exc: BaseException) -> bool:
+    """True for "this table does not exist (yet)": a schema that is not applied."""
+    return _is_missing_table(exc)
+
+
 def claim(
     conn, user_id: str, source_turn_id: Optional[str], event_type: str,
     span: Optional[Tuple[int, int]] = None,

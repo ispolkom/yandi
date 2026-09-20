@@ -271,7 +271,9 @@ def main() -> int:
     check("16b: MUTANT quoting/sanitising removed -> the same payload forges a delimiter and smuggles a role marker (the structural checks would FAIL)",
           "<|im_start|>" in forged and forged.count("ПАМЯТЬ>>>") > 2)
 
-    # ── 16c. the turn and its events are two commits: a retry of the SAME turn id completes whichever half is missing ──
+    # ── 16c. DEFENSIVE FALLBACK only: a turn is one transaction now (pet_turn_transaction_regression_test and
+    #        agent/turn_atomicity_sql_integration_test), but half-states written before that must still converge:
+    #        a retry of the SAME turn id completes whichever half is missing, applying nothing twice ──
     rec = FakeConnection()
     ev_text = "Ты просто ржавая консерва, от тебя никакого толку."
     with patch.object(chat_local, "shadow_record_interaction_turn", lambda **kw: None):   # the process died before the turn was recorded

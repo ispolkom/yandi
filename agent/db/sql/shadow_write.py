@@ -30,6 +30,7 @@ from typing import Any, Callable, Optional
 
 from agent.db.sql.connection import get_connection, SqlUnavailable
 import agent.db.sql.repositories as repo
+import agent.causal_events as causal_events
 import agent.personal_memory as personal_memory
 import agent.relationship_commitments as relationship_commitments
 import agent.relationship_memory as relationship_memory
@@ -86,6 +87,67 @@ def _shadow(log, verbose: bool, label: str, fn: Callable[[Any], Any]) -> Optiona
         if verbose and log:
             log(f"[SqlShadow] {label} SKIPPED (unexpected: {e})")
         return None
+
+
+def _run(conn, log, verbose: bool, label: str, fn: Callable[[Any], Any], *, optional_table: bool = False) -> Optional[Any]:
+    """Run `fn` either in its own fail-open transaction (`conn` is None: the
+    historical behaviour every other caller relies on) or as one step of a
+    transaction the CALLER owns (`conn` given): then nothing is committed, rolled
+    back or swallowed here, so an exception reaches the owner and takes the whole
+    unit with it. `optional_table` marks a store that may not exist yet (schema
+    not applied): in a caller-owned transaction its absence skips this step (None)
+    instead of failing the unit; a failed statement leaves the transaction usable."""
+    if conn is None:
+        return _shadow(log, verbose, label, fn)
+    try:
+        return fn(conn)
+    except Exception as exc:  # noqa: BLE001
+        if optional_table and causal_events.is_missing_table(exc):
+            logging.getLogger("yandi.turn").warning("%s skipped: its table does not exist (schema not applied)", label)
+            return None
+        raise
+
+
+_DEADLOCK_CODES = (1213, 1205)  # ER_LOCK_DEADLOCK, ER_LOCK_WAIT_TIMEOUT
+
+
+def shadow_persist_turn(
+    *, unit: Callable[[Any], Any], attempts: int = 3, log=None, verbose: bool = False,
+) -> Optional[Any]:
+    """The ONE transaction of a personal chat turn: `unit(conn)` performs every
+    SQL write of the turn (the source record, the causal claims and the state
+    transitions they guard) on the connection it is given, and all of it commits
+    together or none of it does.
+
+    The caller finishes all model work and validation BEFORE calling this, so the
+    transaction is short and never spans an inference. A deadlock or lock-wait
+    timeout (concurrent deliveries) rolls the whole unit back and runs it again
+    (at most `attempts` times): every write inside is idempotent by its causal
+    identity, so a re-run cannot apply anything twice. Anything else is not
+    retried. Returns `unit`'s result, or None if nothing was committed
+    (fail-open, like every shadow write: the reply must not depend on it)."""
+    failure: dict = {}
+
+    def guarded(conn):
+        try:
+            return unit(conn)
+        except Exception as exc:  # noqa: BLE001
+            failure["exc"] = exc
+            raise
+
+    for attempt in range(1, attempts + 1):
+        failure.clear()
+        result = _shadow(log, verbose, "persist_turn", guarded)
+        if result is not None:
+            return result
+        exc = failure.get("exc")
+        code = exc.args[0] if exc is not None and getattr(exc, "args", None) else None
+        if code in _DEADLOCK_CODES and attempt < attempts:
+            continue
+        if exc is not None:
+            logging.getLogger("yandi.turn").warning("turn persistence rolled back, nothing was written: %s", exc)
+        return None
+    return None
 
 
 def shadow_record_question_and_run(
@@ -639,13 +701,13 @@ def shadow_record_ai_observation(
 def shadow_add_grievance(
     *, user_id: str, event_type: str, description: str, severity: float,
     context: Optional[dict] = None, source_turn_id: Optional[str] = None, span: Optional[tuple] = None,
-    log=None, verbose: bool = False,
+    conn=None, log=None, verbose: bool = False,
 ) -> Optional[str]:
-    def _do(conn):
+    def _do(c):
         return relationship_memory.add_grievance(
-            conn, user_id, event_type, description, severity, context, source_turn_id=source_turn_id, span=span)
+            c, user_id, event_type, description, severity, context, source_turn_id=source_turn_id, span=span)
 
-    return _shadow(log, verbose, "add_grievance", _do)
+    return _run(conn, log, verbose, "add_grievance", _do)
 
 
 def shadow_acknowledge_apology(
@@ -666,18 +728,18 @@ def shadow_progress_healing(*, grievance_id: str, log=None, verbose: bool = Fals
 
 def shadow_apply_apology(
     *, user_id: str, grievance_id: Optional[str], sincerity: float,
-    source_turn_id: Optional[str] = None, span: Optional[tuple] = None, log=None, verbose: bool = False,
+    source_turn_id: Optional[str] = None, span: Optional[tuple] = None, conn=None, log=None, verbose: bool = False,
 ) -> Optional[dict]:
     """Runs acknowledge -> progress-healing on the ONE grievance the reply
     was built around (the focus from shadow_get_relationship_context), in a
-    single transaction. Returns {"target": id|None, "acknowledged": bool,
-    "forgiven": bool}, or None if SQL was unreachable. With no target
-    nothing is written."""
-    def _do(conn):
+    single transaction (or as a step of the caller's, when `conn` is given).
+    Returns {"target": id|None, "acknowledged": bool, "forgiven": bool}, or
+    None if SQL was unreachable. With no target nothing is written."""
+    def _do(c):
         return relationship_memory.apply_apology(
-            conn, user_id, grievance_id, sincerity, source_turn_id=source_turn_id, span=span)
+            c, user_id, grievance_id, sincerity, source_turn_id=source_turn_id, span=span)
 
-    return _shadow(log, verbose, "apply_apology", _do)
+    return _run(conn, log, verbose, "apply_apology", _do)
 
 
 def shadow_get_relationship_context(
@@ -756,27 +818,27 @@ def _commitment_context(conn, user_id: str, current_text: str) -> Optional[dict]
 
 def shadow_create_commitment(
     *, user_id: str, text: str, evidence: str,
-    source_turn_id: Optional[str] = None, span: Optional[tuple] = None, log=None, verbose: bool = False,
+    source_turn_id: Optional[str] = None, span: Optional[tuple] = None, conn=None, log=None, verbose: bool = False,
 ) -> Optional[dict]:
     """A promise the person made in the CURRENT message (validated upstream)."""
-    def _do(conn):
+    def _do(c):
         return relationship_commitments.create_commitment(
-            conn, user_id, text, evidence, source_turn_id=source_turn_id, span=span)
+            c, user_id, text, evidence, source_turn_id=source_turn_id, span=span)
 
-    return _shadow(log, verbose, "create_commitment", _do)
+    return _run(conn, log, verbose, "create_commitment", _do, optional_table=True)
 
 
 def shadow_record_fulfillment_claim(
     *, user_id: str, commitment_id: Optional[str], evidence: str,
-    source_turn_id: Optional[str] = None, span: Optional[tuple] = None, log=None, verbose: bool = False,
+    source_turn_id: Optional[str] = None, span: Optional[tuple] = None, conn=None, log=None, verbose: bool = False,
 ) -> Optional[dict]:
     """The person REPORTS having kept the promise the reply was built around.
     Recorded as a report only; it changes no relationship coordinate."""
-    def _do(conn):
+    def _do(c):
         return relationship_commitments.record_fulfillment_claim(
-            conn, user_id, commitment_id, evidence, source_turn_id=source_turn_id, span=span)
+            c, user_id, commitment_id, evidence, source_turn_id=source_turn_id, span=span)
 
-    return _shadow(log, verbose, "record_fulfillment_claim", _do)
+    return _run(conn, log, verbose, "record_fulfillment_claim", _do, optional_table=True)
 
 
 _interaction_unavailable_warned = False
@@ -821,18 +883,20 @@ def shadow_get_personal_memory(
 def shadow_record_interaction_turn(
     *, user_id: str, source_turn_id: Optional[str], user_text: str, assistant_text: Optional[str],
     model: Optional[str] = None, adapter: Optional[str] = None, recalled_turn_ids: Optional[list] = None,
-    log=None, verbose: bool = False,
+    conn=None, log=None, verbose: bool = False,
 ) -> Optional[dict]:
     """Append the immutable source record of this chat turn (person, source
-    turn id, both sides, model). A retry of the same turn is a no-op."""
-    def _do(conn):
+    turn id, both sides, model). A retry of the same turn is a no-op. With
+    `conn` it is one step of the caller's transaction (and a missing table, i.e.
+    schema v16 not applied, skips only this step)."""
+    def _do(c):
         try:
             return personal_memory.record_turn(
-                conn, user_id, source_turn_id, user_text, assistant_text,
+                c, user_id, source_turn_id, user_text, assistant_text,
                 model=model, adapter=adapter, recalled_turn_ids=recalled_turn_ids)
         except Exception as exc:  # noqa: BLE001
             if _interaction_unavailable(exc, "recorded"):
                 return None
             raise
 
-    return _shadow(log, verbose, "record_interaction_turn", _do)
+    return _run(conn, log, verbose, "record_interaction_turn", _do)

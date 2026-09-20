@@ -234,6 +234,22 @@ Why not the existing tables: `episode` is the system's own life log (no person, 
 immutable source record without becoming something else. Legacy `episode` rows are neither read nor
 changed by this path.
 
+### One turn, one transaction
+
+```text
+ONE IDENTIFIED PERSONAL TURN -> ONE interaction_turn -> ZERO OR MORE validated causal writes -> ONE COMMIT
+LLM INFERENCE MUST NOT HOLD AN OPEN SQL TRANSACTION
+```
+
+The turn first does all its model work (event extraction, reply) and validates the events; only then
+does it open one short transaction in which it writes the source record (`interaction_turn`, first:
+its unique key also serialises concurrent deliveries of the same turn), claims each causal identity and
+applies the grievance / apology / relationship-state / commitment writes those claims guard. Everything
+commits together or is rolled back together; the HTTP reply is returned after the commit, so a reply
+the client never received is a retry of a turn that is already whole (nothing is applied twice). The
+repository and lifecycle helpers take the caller's connection and never commit; a caller that gives
+none (other code paths) keeps the old one-transaction-per-call behaviour.
+
 ### Relationship focus: one causal target for reply and write
 
 Before the reply is generated, `resolve_relationship_focus` decides which open grievance (if any)

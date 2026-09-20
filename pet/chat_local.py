@@ -23,7 +23,7 @@ import agent.relationship_memory as relationship_memory
 from agent.db.sql.shadow_write import (
     shadow_add_grievance, shadow_apply_apology, shadow_get_relationship_context,
     shadow_create_commitment, shadow_record_fulfillment_claim,
-    shadow_get_personal_memory, shadow_record_interaction_turn,
+    shadow_get_personal_memory, shadow_record_interaction_turn, shadow_persist_turn,
 )
 
 router = APIRouter()
@@ -445,7 +445,7 @@ def _call_model_semantic(
 
 
 def _apply_current_turn_event(
-    text: str, intensity, memory_ctx: dict | None, source_turn_id: str | None = None,
+    text: str, intensity, memory_ctx: dict | None, source_turn_id: str | None = None, conn=None,
 ) -> None:
     """Owner mandate ("характер, обидчива... простое извени - не
     канает"): writes the CURRENT-TURN EVENTS (insult / apology / promise /
@@ -473,6 +473,10 @@ def _apply_current_turn_event(
     ambiguous or unknown -> nothing is written. Neither a promise nor a claim
     moves any relationship coordinate here: only a verified outcome does.
 
+    With `conn` every write is a step of the caller's transaction (the turn's one
+    atomic unit, see _respond_with_character); without it each write is its own
+    fail-open transaction, as before.
+
     Fail-open: intensity.ok=False (extraction produced nothing usable) means
     nothing gets written: a broken step degrades to "no memory update this
     turn," never a crash or a guessed value."""
@@ -484,24 +488,24 @@ def _apply_current_turn_event(
         if grievance:
             shadow_apply_apology(
                 user_id=_RELATIONSHIP_USER_ID, grievance_id=grievance["grievance_id"], sincerity=intensity.sincerity,
-                source_turn_id=source_turn_id, span=spans.get("apology"),
+                source_turn_id=source_turn_id, span=spans.get("apology"), conn=conn,
             )
     if intensity.is_insult and intensity.severity >= _INSULT_SEVERITY_THRESHOLD:
         shadow_add_grievance(
             user_id=_RELATIONSHIP_USER_ID, event_type="insult", description=text, severity=intensity.severity,
-            source_turn_id=source_turn_id, span=spans.get("insult"),
+            source_turn_id=source_turn_id, span=spans.get("insult"), conn=conn,
         )
     if intensity.is_promise:
         shadow_create_commitment(
             user_id=_RELATIONSHIP_USER_ID, text=text, evidence=intensity.evidence,
-            source_turn_id=source_turn_id, span=spans.get("promise"),
+            source_turn_id=source_turn_id, span=spans.get("promise"), conn=conn,
         )
     elif intensity.claims_fulfilled:
         target = ((memory_ctx or {}).get("commitments") or {}).get("focus")
         if target:
             shadow_record_fulfillment_claim(
                 user_id=_RELATIONSHIP_USER_ID, commitment_id=target["commitment_id"], evidence=intensity.evidence,
-                source_turn_id=source_turn_id, span=spans.get("fulfilment_claim"),
+                source_turn_id=source_turn_id, span=spans.get("fulfilment_claim"), conn=conn,
             )
 
 
@@ -541,15 +545,45 @@ def _respond_with_character(
     semantic = _call_model_semantic(model, messages, temperature, memory_ctx, past)
     visible = semantic.reply if semantic.reply_ok else _SEMANTIC_FAILURE_REPLY
     reply = _clean_response(visible)
-    _apply_current_turn_event(last_user_text, to_intensity(extraction), memory_ctx, source_turn_id)
+    intensity = to_intensity(extraction)
     resolved_model, adapter = _generation_target(semantic, model)
-    if source_turn_id:
-        shadow_record_interaction_turn(
-            user_id=_RELATIONSHIP_USER_ID, source_turn_id=source_turn_id, user_text=last_user_text,
-            assistant_text=reply if semantic.reply_ok else None, model=resolved_model, adapter=adapter,
-            recalled_turn_ids=[m["source_turn_id"] for m in past or []],
-        )
+
+    # ALL model work is finished and every event is validated: only now does the
+    # turn touch SQL for writing, in ONE short transaction.
+    #
+    #   ONE IDENTIFIED PERSONAL TURN -> ONE interaction_turn -> ZERO OR MORE
+    #   validated causal / relationship writes -> ONE COMMIT (all or nothing).
+    #
+    # The source record goes first: its unique key (person, turn id) also
+    # serialises concurrent deliveries of the same turn. A failure anywhere in the
+    # unit rolls everything back (no half-state); a retry with the same client turn
+    # id then applies it normally, and a retry after a commit applies nothing again
+    # (every write is claimed by its causal identity). The HTTP reply is returned
+    # only after this commit, so a reply the client never received is a retry of a
+    # turn that is already whole.
+    def unit(conn):
+        if source_turn_id:
+            shadow_record_interaction_turn(
+                user_id=_RELATIONSHIP_USER_ID, source_turn_id=source_turn_id, user_text=last_user_text,
+                assistant_text=reply if semantic.reply_ok else None, model=resolved_model, adapter=adapter,
+                recalled_turn_ids=[m["source_turn_id"] for m in past or []], conn=conn,
+            )
+        _apply_current_turn_event(last_user_text, intensity, memory_ctx, source_turn_id, conn=conn)
+        return {"applied": True}
+
+    if source_turn_id or _has_current_turn_event(intensity):
+        shadow_persist_turn(unit=unit, log=_log_turn, verbose=True)
     return reply
+
+
+def _log_turn(message: str) -> None:
+    import logging
+    logging.getLogger("yandi.turn").info(message)
+
+
+def _has_current_turn_event(intensity) -> bool:
+    return bool(intensity.ok and (
+        intensity.is_apology or intensity.is_insult or intensity.is_promise or intensity.claims_fulfilled))
 
 
 def _generation_target(semantic, requested_model: str) -> tuple[str, str | None]:

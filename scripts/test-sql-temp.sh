@@ -53,3 +53,4 @@ export YANDI_TEST_SQL_SOCKET="$SOCK" YANDI_TEST_SQL_ADMIN=tmp_admin YANDI_TEST_S
 export YANDI_TEST_MODE=1 YANDI_TEST_ISOLATED_SOCKET="$SOCK"
 "$PYTHON" -m agent.relationship_idempotency_sql_integration_test
 "$PYTHON" -m agent.personal_memory_sql_integration_test
+"$PYTHON" -m agent.turn_atomicity_sql_integration_test

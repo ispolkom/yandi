@@ -54,6 +54,7 @@ def main() -> int:
     # These tests are about the reply path: no database for personal memory (its own suite covers it).
     chat_local.shadow_get_personal_memory = lambda **kw: []
     chat_local.shadow_record_interaction_turn = lambda **kw: None
+    chat_local.shadow_persist_turn = lambda *, unit, **kw: unit(None)   # no database: the shadow_* fakes below stand in for its steps
 
     remote_entry = lambda model: {
         "backend": "remote", "protocol": "openai",
