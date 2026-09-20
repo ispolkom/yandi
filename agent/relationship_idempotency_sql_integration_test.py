@@ -72,14 +72,31 @@ def main() -> int:
         collations = {r["column_name"] if "column_name" in r else r["COLUMN_NAME"]: (r.get("collation_name") or r.get("COLLATION_NAME")) for r in cur.fetchall()}
     check("S: the turn identity is compared exactly (binary collation), not case- or accent-insensitively", set(collations.values()) == {"ascii_bin"}, repr(collations))
 
+    # ── upgrading a v14 database: drop the three v15 tables and the v15 version row, keep data, migrate ──
+    with root.cursor() as cur:
+        cur.execute("INSERT INTO grievance (id, user_id, event_type, description, severity, status, created_at, updated_at) "
+                    "VALUES ('g_v14_row', 'v14_owner', 'insult', 'row that existed at schema v14', 0.5, 'registered', NOW(), NOW())")
+        cur.execute("DROP TABLE causal_event"); cur.execute("DROP TABLE commitment_event"); cur.execute("DROP TABLE commitment")
+        cur.execute("DELETE FROM schema_migrations WHERE version=15")
+        cur.execute("INSERT IGNORE INTO schema_migrations (version, description) VALUES (14, 'simulated v14')")
+    check("U: the simulated v14 database has schema version 14 and no v15 tables",
+          scalar(root, "SELECT MAX(version) FROM schema_migrations") == 14
+          and scalar(root, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='yandi_epistemic' AND table_name IN ('causal_event','commitment','commitment_event')") == 0)
+    os.environ.update({"YANDI_SQL_SOCKET": socket, "YANDI_SQL_USER": admin, "YANDI_SQL_AUTH_MODE": "password", "YANDI_SQL_PASSWORD": admin_pw})
+    import io, contextlib
+    with contextlib.redirect_stdout(io.StringIO()):
+        upgraded = migrate.apply()
+    check("U: the migration upgrades v14 -> v15: three tables added, version 15 recorded, the v14 row untouched",
+          upgraded and scalar(root, "SELECT MAX(version) FROM schema_migrations") == 15
+          and scalar(root, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='yandi_epistemic' AND table_name IN ('causal_event','commitment','commitment_event')") == 3
+          and scalar(root, "SELECT description FROM grievance WHERE id='g_v14_row'") == "row that existed at schema v14")
+
     # ── the migration is re-runnable and touches nothing that exists ──
     with root.cursor() as cur:
         cur.execute("INSERT INTO grievance (id, user_id, event_type, description, severity, status, created_at, updated_at) "
                     "VALUES ('g_preexisting', 'legacy_owner', 'insult', 'pre-migration row', 0.5, 'registered', NOW(), NOW())")
     before = (scalar(root, "SELECT COUNT(*) FROM grievance"), scalar(root, "SELECT COUNT(*) FROM schema_migrations"),
               scalar(root, "SELECT description FROM grievance WHERE id='g_preexisting'"))
-    os.environ.update({"YANDI_SQL_SOCKET": socket, "YANDI_SQL_USER": admin, "YANDI_SQL_AUTH_MODE": "password", "YANDI_SQL_PASSWORD": admin_pw})
-    import io, contextlib
     with contextlib.redirect_stdout(io.StringIO()):
         ok_again = migrate.apply()
     after = (scalar(root, "SELECT COUNT(*) FROM grievance"), scalar(root, "SELECT COUNT(*) FROM schema_migrations"),
