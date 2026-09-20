@@ -333,19 +333,19 @@ import pet.chat_local as chat_local
 # complete_semantic()) by the same structural discipline, not by naming Ollama.
 _src_respond = inspect.getsource(chat_local._respond_with_character)
 check(
-    "4: _respond_with_character() makes exactly ONE generation call (_call_model_semantic) — "
-    "накал recognition and the visible reply come from the SAME generation, regardless of "
-    "which backend physically answers, not a separate classifier call feeding a second one",
+    "4: _respond_with_character() makes exactly ONE reply generation call (_call_model_semantic); "
+    "relational events are recognised by the separate, message-only extraction step, never by the "
+    "reply generation, regardless of which backend physically answers",
     _src_respond.count("_call_model_semantic(") == 1,
 )
+_pos_extract = _src_respond.find("extract_relational_events(")
 _pos_raw_call = _src_respond.find("_call_model_semantic(")
-_pos_parse = _src_respond.find("intensity_from_state(")
 _pos_apply = _src_respond.find("_apply_current_turn_event(")
 check(
-    "4: the model is called BEFORE her normalized state is converted, which happens BEFORE it's "
-    "written to memory (correct data dependency order)",
-    -1 < _pos_raw_call < _pos_parse < _pos_apply,
-    f"call={_pos_raw_call} parse={_pos_parse} apply={_pos_apply}",
+    "4: the current message is extracted into events, the reply is generated, and only then are the "
+    "extracted events written to memory (correct data dependency order)",
+    -1 < _pos_extract < _pos_raw_call < _pos_apply,
+    f"extract={_pos_extract} reply={_pos_raw_call} apply={_pos_apply}",
 )
 
 _src_call_raw = inspect.getsource(chat_local._call_model_semantic)

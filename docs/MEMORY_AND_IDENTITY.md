@@ -99,9 +99,9 @@ ONE CAUSAL EVENT -> ONE STATE TRANSITION.
   and leaves `affection` alone; a verified broken promise hits trust hardest. No verifier is wired
   into the personal chat yet, so today the live path records promises and reports but does not
   move trust.
-- In the personal chat a promise or a claim is an event only if the model's state asserts it **and**
-  quotes it verbatim from the current message (the same provenance guard as insults and
-  apologies). Promise and claim are accepted only when they are the only event asserted in the turn,
+- In the personal chat a promise or a claim is an event only if the extraction step confirms it from
+  the current message (the same evidence rules as insults and apologies). Promise and claim are
+  accepted only when they are the only event in the turn,
   so a grounded apology cannot vouch for a promise the model merely remembered. The claim is linked
   to one open promise chosen before the reply; the reply's memory context states that promise, or
   the ambiguity, or an earlier unverified report, as plain facts.
@@ -113,19 +113,38 @@ ONE CAUSAL EVENT -> ONE STATE TRANSITION.
 - The audit trail carries each event's machine-readable magnitude, so `relationship_state.replay()`
   rebuilds trust, respect and affection from the trail alone.
 
-### Current-event provenance
+### Current-event provenance and event extraction
 
-The model produces its reply and a small state object in one generation. The state may claim "the
-user just insulted me / apologised". That claim is only accepted as a **new event** if:
+```text
+THE MODEL MAY CHOOSE THE EVIDENCE LOCATION.
+THE CODE OWNS THE EVIDENCE TEXT.
+NO EXACT SUPPORT IN THE USER'S MESSAGE = NO EVENT.
+```
 
-- the state is well-formed (severity/sincerity numeric and within 0..1), and
-- the `evidence` quote it supplies occurs verbatim in the **current** user message.
+A remembered insult or an apology earlier in the history may colour a reply, but must not be
+re-recorded as something the user just did. Relationship events are therefore recognised by a step
+that is separate from the reply (`pet/event_extraction.py`):
 
-Otherwise the event is dropped (fail-safe: an event may be missed, but is never fabricated). This is
-a structural check, not a second classifier. Its purpose is exactly the invariant above: a
-remembered insult or an apology earlier in the history may colour the reply, but must not be
-re-recorded as something the user just did. Trade-off: recall of genuine events is lower than
-without the guard (see [KNOWN_ISSUES.md](KNOWN_ISSUES.md)).
+1. The current message is cut into numbered words. The extractor sees **only** that message, never
+   memory or history.
+2. For each candidate event it returns the **word range** that constitutes it, then the event type
+   (plus severity for an insult and sincerity for an apology). It never returns quote text.
+3. Code validates the references (integers, in range, non-empty, bounded) and reconstructs the
+   evidence itself as a slice of the message, so it is literally part of the message.
+4. A second judgement about that exact span, **blind** to what the extractor claimed, says which act
+   the fragment expresses and in what frame (performed now by the user, a quotation, a hypothetical,
+   a negation, a report about the past, a topic). The event is admissible only if the act equals the
+   extracted type and the frame is "performed now".
+5. Malformed output, invalid references, overlapping spans, disagreement or a failed call all mean
+   no event (fail closed).
+
+The recogniser holds no vocabulary of insults, apologies or promises; the string operations in the code
+are segmentation, offset validation and exact reconstruction. It never changes trust, respect or
+affection, never creates grievance transitions and never verifies that a promise was kept.
+Why it replaced the earlier design (reply and events in one generation, with a quote supplied by the
+model): the model classified events correctly but almost never copied the quote verbatim, so nearly
+every real event was rejected. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for measured rates and the
+remaining failure modes.
 
 ### Relationship focus: one causal target for reply and write
 

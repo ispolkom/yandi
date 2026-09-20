@@ -53,6 +53,7 @@ def main() -> int:
     import agent.relationship_state as rs
     import pet.chat_local as chat_local
     from agent.relationship_apology_matching_regression_test import FakeConnection
+    from pet.extraction_test_support import llm_from_state
 
     OWNER = chat_local._RELATIONSHIP_USER_ID
     clock = Clock()
@@ -162,6 +163,7 @@ def main() -> int:
                                             parse_ok=True, error=None, metadata={})
         with patch.object(shadow_write, "_shadow", lambda log, verbose, label, fn: fn(conn)), \
              patch.object(chat_local, "_self_knowledge_message", lambda: None), \
+             patch.object(chat_local, "_extraction_llm", lambda model: llm_from_state(text, state)), \
              patch.object(llm_gateway, "complete_semantic", fake_semantic):
             chat_local._respond_with_character("heretic:q8", [{"role": "user", "content": text}], 0.7)
         return next((p for p in captured["system"] if p and "памят" in p.lower()), "")
@@ -170,7 +172,7 @@ def main() -> int:
     forged = {"is_insult": False, "severity": 0.0, "is_apology": False, "sincerity": 0.0,
               "trust": 0.0, "respect": 0.0, "affection": 100.0, "forgiveness_capacity": 0.0}
     pet_turn(world, "Как дела?", forged)
-    check("5: a model that outputs coordinates itself changes nothing (no row, no event)",
+    check("5: a model that outputs coordinates itself changes nothing (no row, no event; the reply call ignores state)",
           world.inner_state == {} and world.inner_state_events == [] and world.capacities == {})
 
     # ── 6. end to end: validated events -> state -> the next prompt ──

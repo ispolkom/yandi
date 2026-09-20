@@ -3,26 +3,46 @@
 Recorded, not hidden. None of these are fixed by the documentation change that introduced this
 file.
 
-## Event evidence recall (the current bottleneck)
+## Event recognition: measured rates and remaining failure modes
 
-The current-event provenance guard requires the model to quote, verbatim, the part of the *current*
-user message that shows an insult, an apology, a promise or a claim of having kept one. This removes
-false events created from memory or history, but the local 9B model almost never produces such a
-quote. Measured on synthetic, realistic messages (n=10 each, single generation, guard applied):
+Relationship events are recognised by `pet/event_extraction.py` (the model chooses where the
+evidence is; code reconstructs and owns the evidence text; a blind check on the exact span must
+agree). It replaced a design in which the reply generation returned the events together with a quote
+it had to copy verbatim: the model classified events correctly but almost never produced the quote,
+so only 0-1 of 10 real insults or apologies and 0 of 10 promises or claims got through.
 
-| Message | Model asserts the event | Passes the guard |
-|---|---|---|
-| insult | ~10/10 | 0-1/10 |
-| apology | ~10/10 | 0/10 |
-| promise / claim of having kept one | not measured before the schema fields existed | 0/10 |
-| neutral turns (false events) | 0 | 0 |
+Measured with the local `heretic:q8` model (temperature 0, one run per message) on three synthetic
+message sets, 28 positives per event type and 126 negatives (neutral, resembling relational language,
+somebody else's words quoted, hypotheticals, negations, retrospective mentions):
 
-The model classifies correctly but leaves `evidence` empty, paraphrases it or writes it in English
-("[user admits fault]"). The guard is fail-safe (an event may be missed, never fabricated), so the
-cost is that almost no real event reaches the relationship state on messages of this kind. Because
-everything downstream (grievances, relationship state, the promise ledger) is driven by these events,
-improving evidence compliance is the highest-value open item. It must not weaken the check: forcing
-a verbatim substring by construction would let a hallucinated event pass too.
+| Event | Recognised by the extractor | Passed evidence + blind check (written) | Before |
+|---|---|---|---|
+| insult | 28/28 | 28/28 | 0-1/10 |
+| apology | 28/28 | 28/28 | 0/10 |
+| promise | 25/28 | 17/28 | 0/10 |
+| claim of fulfilment | 27/28 | 20/28 | 0/10 |
+
+False events (an event on a negative message) and wrong-type events (a different event than the message
+contains): **0** in all 154 messages.
+
+A stronger or dedicated model was not needed: `Rocinante-X-12B` under the same protocol was worse
+(insult 2/8, claim 1/8). The prompts were tuned on two of the three sets, so treat the numbers as
+indicative; the third set (never tuned on before the final protocol) gave 8/8, 8/8, 4/8 and 6/8.
+
+Remaining failure modes:
+
+- **Promise and claim recall is lower** (17/28 and 20/28). Misses fail closed: the extractor or the
+  blind check declines, or a claim such as "Отчёт готов" is judged a report about the past.
+- **The blind check is a model too.** It is independent of the extractor's claim and code compares
+  the two, but correlated model errors could still confirm a wrong event. Zero were observed in 126
+  negatives; the sample is small. One such case appeared during development (a one-word fragment
+  confirmed as the wrong commitment type) and led to the rule that a commitment event is admitted only
+  as the sole candidate the extractor proposed; a mixed message therefore loses its commitment event.
+- **Coverage.** Messages longer than 120 words, or in languages the model handles poorly, produce no
+  events. A one-word message needed the word count in the prompt to avoid an off-by-one reference.
+- **Cost.** One extra model call per turn (and one per candidate event).
+- **Retries.** Nothing deduplicates a repeated request: the same insult processed twice is a
+  recurrence of the grievance. Promise and claim writes are already idempotent.
 
 ## Embedding routing
 

@@ -37,6 +37,7 @@ def main() -> int:
     import pet.chat_local as chat_local
     from llm_gateway.types import SemanticCompletionResult
     from agent.relationship_apology_matching_regression_test import FakeConnection
+    from pet.extraction_test_support import llm_from_state
 
     OWNER = chat_local._RELATIONSHIP_USER_ID
     MIN, HOUR, DAY = timedelta(minutes=1), timedelta(hours=1), timedelta(days=1)
@@ -61,6 +62,7 @@ def main() -> int:
         shadow = (lambda log, verbose, label, fn: None) if unavailable else (lambda log, verbose, label, fn: fn(conn))
         with patch.object(shadow_write, "_shadow", shadow), \
              patch.object(chat_local, "_self_knowledge_message", lambda: None), \
+             patch.object(chat_local, "_extraction_llm", lambda model: llm_from_state(text, state)), \
              patch.object(llm_gateway, "complete_semantic", fake_semantic), \
              patch.object(chat_local, "shadow_add_grievance", lambda **kw: new_grievances.append(kw)):
             chat_local._respond_with_character("heretic:q8", [{"role": "user", "content": text}], 0.7)
@@ -133,12 +135,13 @@ def main() -> int:
                      {"role": "user", "content": "Как дела?"}]
     with patch.object(shadow_write, "_shadow", lambda log, verbose, label, fn: fn(conn)), \
          patch.object(chat_local, "_self_knowledge_message", lambda: None), \
+         patch.object(chat_local, "_extraction_llm", lambda model: llm_from_state("Как дела?", apology_state("Извини за велосипед"))), \
          patch.object(llm_gateway, "complete_semantic", lambda **kw: SemanticCompletionResult(
              reply="Нормально.", state=apology_state("Извини за велосипед"), reply_ok=True, state_ok=True,
              parse_ok=True, error=None, metadata={})):
         before = conn.snapshot()
         chat_local._respond_with_character("heretic:q8", captured_msgs, 0.7)
-    check("F: earlier apology in the transcript + neutral current message -> provenance guard: no transition",
+    check("F: earlier apology in the transcript + neutral current message -> the extractor's span can only lie in the current message and the check refuses it: no transition",
           conn.changed(before) == [], repr(conn.changed(before)))
 
     # ── G. write-time safety: the focused grievance is no longer open / is not this user's ──

@@ -57,14 +57,20 @@ changing the model, restarting the process, or clearing a context window does no
 
 ## One turn of the personal chat
 
-1. The current user message and history go to `llm_gateway.complete_semantic()`, together with the
-   agent's self facts and (as historical context only) a remembered grievance.
-2. The gateway resolves exactly one target and adapter, picks the strongest output contract that
-   target supports, and returns `reply` and an optional internal `state`.
-3. The caller validates `state` against the **current** user message (provenance check) before it
-   may become a memory event. Only `reply` is shown to the user.
-4. A validated insult creates a grievance; a validated apology is matched to at most one existing
-   grievance and advances only that one.
+1. **Focus.** The current message and the grievance/promise ledgers are read to decide which
+   remembered grievance or promise the message is about (deterministic, before any generation).
+2. **Event extraction** (`pet/event_extraction.py`). A separate model call sees **only** the current
+   message, cut into numbered words, and points at the words that make up an insult, apology,
+   promise or claim of fulfilment. Code reconstructs the evidence text from those references and an
+   independent, blind check on that exact span must agree. Anything malformed, uncertain or in
+   disagreement is "no event".
+3. **Reply.** `llm_gateway.complete_semantic()` produces the visible reply from the history, the
+   agent's self facts and the remembered context (as history only). It is not asked for events.
+4. **Write.** Confirmed events go to the ledgers: an insult creates a grievance, an apology advances
+   the one focused grievance, a promise or claim goes to the promise ledger. Relationship state moves
+   only through those lifecycle rules.
+
+Each model call is its own generation attempt with its own resolved target and adapter.
 
 ## Storage and privacy stance
 

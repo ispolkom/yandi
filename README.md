@@ -106,7 +106,7 @@ cannot choose the backend model. The node is experimental; its own state notes a
 | Area | State |
 |---|---|
 | `llm_gateway` adapters, target resolution, semantic (reply + state) output | Implemented, covered by regression tests |
-| PET personal chat with persistent relationship state | Implemented; event recall is still being improved |
+| PET personal chat with persistent relationship state | Implemented; relationship events come from a separate evidence-first extraction step (no false events observed; recall is lower for promises and claims) |
 | Orchestrator with claim/evidence verification | Implemented; canonical trust computed in shadow mode alongside the live value |
 | Beliefs, reflection, episodic memory | Implemented; only partly wired into the live chat path |
 | P2P node (Rust) | Experimental |

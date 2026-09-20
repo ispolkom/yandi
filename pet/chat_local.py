@@ -16,10 +16,9 @@ import redis.asyncio as aioredis
 from fastapi import APIRouter
 
 from pet.shared import REDIS_URL, LOCAL_MSGS_KEY, MAX_MESSAGES
-import dataclasses
 import re
 
-from agent.message_intensity import IntensityResult, intensity_from_state
+from pet.event_extraction import extract_relational_events, to_intensity
 import agent.relationship_memory as relationship_memory
 from agent.db.sql.shadow_write import (
     shadow_add_grievance, shadow_apply_apology, shadow_get_relationship_context,
@@ -67,128 +66,39 @@ _BASE_CHARACTER_PROMPT = (
     "их смысл, чтобы решить, что сказать."
 )
 
-# Semantic self-report state owned by PET. llm_gateway owns the transport
-# used to obtain this shape for the actually resolved inference target.
+# RELATIONAL EVENTS ARE NOT READ FROM THE REPLY GENERATION.
 #
-# CURRENT-EVENT PROVENANCE (live test 2026-09-19, real llama.cpp target):
-#   MEMORY MAY AFFECT THE REPLY; MEMORY MUST NOT BECOME A NEW USER EVENT.
-# is_insult / severity / is_apology / sincerity describe ONE thing: the
-# CURRENT (last) user message. Measured on the real model with a neutral
-# current message plus an old insult in memory / an old apology earlier in
-# the history: the model asserted a false CURRENT event in 13-60% of
-# generations (e.g. "Как ты?" after an old apology -> is_apology in 9/15).
-# Prompt-level fixes were measured and are NOT enough on their own: marking
-# memory as historical cut false insults but not false apologies, and an
-# explicit "classify only the last message" rule made false apologies WORSE
-# (13-14/15) while also suppressing the reply's use of memory (0/15 vs 4/15).
-# So the boundary is enforced structurally: an asserted event must carry
-# `evidence` - a verbatim quote from the CURRENT user message - and
-# _require_current_turn_provenance() applies the event only if that quote
-# literally occurs in the current message. This verifies WHERE the model's
-# claim came from; it is deliberately not a second classifier (no keyword
-# lists, no NLP). Missing/empty/foreign evidence => the event is dropped
-# (fail-safe: at worst a real event is missed, never a false one recorded).
-#
-# MEASURED TRADE-OFF (real model, 85 generations per variant, no false event
-# recorded in ANY variant): the model sometimes leaves `evidence` empty while
-# asserting a real event, so recall of real events is below the pre-fix
-# baseline (apology 3-5/10 vs 7/10; noisy at n=10). Moving `evidence` to the
-# FIRST property lifted apology recall (up to 9/10) but leaked service text
-# ("state:null") into the visible reply in 2-3 of 85 replies (0/170 with it
-# last; 1/65 in the old baseline) - VISIBLE REPLY != INTERNAL STATE matters
-# more than recall, so it stays last. Making it `required` was worse (the
-# model then fabricates a quote from the current message; two false events got
-# through). Improving evidence compliance is an open model-quality item.
-_STATE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "is_insult": {"type": "boolean"},
-        "severity": {"type": "number"},
-        "is_apology": {"type": "boolean"},
-        "sincerity": {"type": "number"},
-        "is_promise": {
-            "type": "boolean",
-            "description": "true только если ПОСЛЕДНЕЕ сообщение пользователя само содержит его обещание что-то сделать",
-        },
-        "claims_fulfilled": {
-            "type": "boolean",
-            "description": "true только если ПОСЛЕДНЕЕ сообщение пользователя само сообщает, что он выполнил ранее обещанное",
-        },
-        "evidence": {
-            "type": "string",
-            "description": (
-                "если is_insult, is_apology, is_promise или claims_fulfilled равен true — "
-                "дословная цитата из последнего сообщения пользователя, которая это показывает; "
-                "иначе пустая строка"
-            ),
-        },
-    },
-    "required": ["is_insult", "severity", "is_apology", "sincerity"],
-}
+# History (measured on the real model, 2026-09-19/20): when the reply call also
+# returned `is_insult` / `is_apology` / ... plus a verbatim `evidence` quote,
+#   * memory contaminated the classification: a neutral current message plus an
+#     old insult in memory / an old apology in the history produced a false
+#     CURRENT event in 13-60% of generations, and prompt-level fixes were not
+#     enough; so an event had to be backed by a verbatim quote from the CURRENT
+#     message (MEMORY MAY AFFECT THE REPLY; MEMORY MUST NOT BECOME A NEW USER EVENT);
+#   * the model classified correctly but almost never produced that quote
+#     (empty / paraphrased / English): 0-1 of 10 real events survived the guard.
+# The guard was right; asking the model to COPY text was the weak step. Events
+# now come from pet/event_extraction.py: a separate step that sees ONLY the
+# current message, lets the model choose WHERE the evidence is (word references)
+# while the code reconstructs the evidence text, and confirms the exact span
+# with an independent check. The reply call therefore returns the visible reply
+# only (VISIBLE REPLY != INTERNAL STATE); it is no longer asked for events and
+# whatever `state` it might add is ignored.
+_STATE_SCHEMA = {"type": "object", "properties": {}}
 
-_EVIDENCE_MIN_CHARS = 3  # a 1-2 char "quote" ("ты", "а") would occur in almost any message
+_EXTRACTION_TIMEOUT_S = 60
 
 
-def _normalize_for_provenance(text: object) -> str:
-    """Case/punctuation/whitespace-insensitive form used ONLY to check that
-    a quote occurs in a message. Not a classifier."""
-    if not isinstance(text, str):
-        return ""
-    folded = text.casefold().replace("ё", "е")
-    return " ".join(re.sub(r"[^\w\s]", " ", folded).split())
-
-
-def _event_evidence_in_current_message(state: object, current_text: str) -> bool:
-    if not isinstance(state, dict):
-        return False
-    quote = _normalize_for_provenance(state.get("evidence"))
-    return len(quote) >= _EVIDENCE_MIN_CHARS and quote in _normalize_for_provenance(current_text)
-
-
-def _in_unit_range(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and 0.0 <= value <= 1.0
-
-
-def _dropped_event(error: str) -> IntensityResult:
-    return IntensityResult(ok=False, is_insult=False, is_apology=False, severity=0.0, sincerity=0.0, error=error)
-
-
-def _require_current_turn_provenance(intensity: IntensityResult, state: object, current_text: str) -> IntensityResult:
-    """Drop an asserted event unless (a) its cited evidence comes from the
-    CURRENT user message (see the note above _STATE_SCHEMA) and (b) the number
-    that carries an insult/apology is inside its 0..1 contract. A neutral
-    state (no event asserted) has nothing to attribute and passes through.
-
-    Commitment events (a promise, a claim of having kept one) share the single
-    evidence quote, so they are accepted only when they are the ONLY event
-    asserted in the turn: an apology or insult that is grounded must not vouch
-    for a promise the model merely remembered, and "promise" together with
-    "claim" is contradictory. Ambiguity drops the commitment event (a missed
-    event, never a fabricated one) and leaves the grounded insult/apology alone.
-
-    (b) exists because intensity_from_state() clamps to 0..1, which turns
-    garbage into a plausible event: in the live experiments the few false
-    events that still carried a quote from the current message all had an
-    out-of-contract number (e.g. sincerity -0.28 on "Как дела?"), and
-    clamping made that a valid apology. An out-of-range number is a
-    malformed state, not a weak event. Shape validation only - it never
-    judges what the message means."""
-    if not intensity.ok:
-        return intensity
-    commitment_asserted = intensity.is_promise or intensity.claims_fulfilled
-    if not (intensity.is_insult or intensity.is_apology or commitment_asserted):
-        return intensity
-    if not _event_evidence_in_current_message(state, current_text):
-        return _dropped_event("asserted event has no evidence quoted from the current user message")
-    if intensity.is_insult and not _in_unit_range(state.get("severity")):
-        return _dropped_event("asserted insult has severity outside the 0..1 contract")
-    if intensity.is_apology and not _in_unit_range(state.get("sincerity")):
-        return _dropped_event("asserted apology has sincerity outside the 0..1 contract")
-    exclusive = commitment_asserted and not (intensity.is_insult or intensity.is_apology) \
-        and not (intensity.is_promise and intensity.claims_fulfilled)
-    if commitment_asserted and not exclusive:
-        intensity = dataclasses.replace(intensity, is_promise=False, claims_fulfilled=False)
-    return dataclasses.replace(intensity, evidence=str(state.get("evidence") or "").strip())
+def _extraction_llm(model: str):
+    """The model call used by the event extraction protocol: deterministic
+    (temperature 0), JSON mode, same logical model and gateway as the reply."""
+    def call(messages: list[dict]) -> str:
+        from llm_gateway import complete
+        return complete(
+            model=model, messages=messages, temperature=0.0, max_tokens=300,
+            response_format="json", timeout=_EXTRACTION_TIMEOUT_S,
+        )
+    return call
 
 
 _SEMANTIC_FAILURE_REPLY = "Прости, я сейчас не смогла нормально сформулировать ответ."
@@ -473,12 +383,11 @@ def _call_model_semantic(model: str, messages: list[dict], temperature: float, m
 
 def _apply_current_turn_event(text: str, intensity, memory_ctx: dict | None) -> None:
     """Owner mandate ("характер, обидчива... простое извени - не
-    канает"): writes the CURRENT-TURN EVENT (insult / apology) of the last
-    user message — recognised by the model in the same generation that
-    produced her reply and already provenance-checked by
-    _require_current_turn_provenance() — into the SQL-backed grievance /
-    forgiveness_capacity state. It is never derived from memory and never a
-    second opinion overriding what she already decided.
+    канает"): writes the CURRENT-TURN EVENTS (insult / apology / promise /
+    claim of fulfilment) of the last user message into the SQL-backed
+    grievance / forgiveness_capacity / promise-ledger state. The events come
+    from pet/event_extraction.py (evidence located by the model, reconstructed
+    and confirmed by code); they are never derived from memory.
 
     An apology changes ONLY the grievance the reply was built around
     (`memory_ctx["grievance"]`, resolved before generation from the current
@@ -489,9 +398,9 @@ def _apply_current_turn_event(text: str, intensity, memory_ctx: dict | None) -> 
     ambiguous or unknown -> nothing is written. Neither a promise nor a claim
     moves any relationship coordinate here: only a verified outcome does.
 
-    Fail-open: intensity.ok=False (no marker, malformed JSON, etc.)
-    means nothing gets written — a broken self-report degrades to "no
-    memory update this turn," never a crash or a guessed value."""
+    Fail-open: intensity.ok=False (extraction produced nothing usable) means
+    nothing gets written: a broken step degrades to "no memory update this
+    turn," never a crash or a guessed value."""
     if not intensity.ok:
         return
     if intensity.is_apology:
@@ -515,20 +424,25 @@ def _apply_current_turn_event(text: str, intensity, memory_ctx: dict | None) -> 
 
 
 def _respond_with_character(model: str, messages: list[dict], temperature: float) -> str:
-    """Synchronous — run via run_in_executor. The ONE model call:
-    memory facts go in as plain statements, her own reply AND her own
-    reading of the conversation come out of the SAME generation (see
-    module docstring's "CHARACTER" note for why this replaced an
-    earlier two-call design)."""
+    """Synchronous — run via run_in_executor. Two separate jobs, two
+    separate model calls, each its own generation attempt:
+
+      1. event extraction (pet/event_extraction.py): sees ONLY the current
+         user message; the events it confirms are the only source of
+         relationship writes;
+      2. the reply: memory facts go in as plain statements and only the
+         visible reply comes out.
+
+    Neither call sees the other's output, so remembered events cannot become
+    current ones and a reply can never write relationship state itself."""
     last_user_text = next(
         (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "",
     )
     memory_ctx = shadow_get_relationship_context(user_id=_RELATIONSHIP_USER_ID, current_text=last_user_text)
+    extraction = extract_relational_events(last_user_text, _extraction_llm(model))
     semantic = _call_model_semantic(model, messages, temperature, memory_ctx)
     visible = semantic.reply if semantic.reply_ok else _SEMANTIC_FAILURE_REPLY
-    intensity = intensity_from_state(semantic.state) if semantic.state_ok and semantic.state is not None else intensity_from_state(None)
-    intensity = _require_current_turn_provenance(intensity, semantic.state, last_user_text)
-    _apply_current_turn_event(last_user_text, intensity, memory_ctx)
+    _apply_current_turn_event(last_user_text, to_intensity(extraction), memory_ctx)
     return _clean_response(visible)
 
 

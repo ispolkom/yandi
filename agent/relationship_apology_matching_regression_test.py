@@ -375,6 +375,7 @@ def main() -> int:
                                         parse_ok=True, error=None, metadata={})
 
     import agent.db.sql.shadow_write as shadow_write
+    from pet.extraction_test_support import llm_from_state
 
     OWNER = chat_local._RELATIONSHIP_USER_ID
 
@@ -382,6 +383,8 @@ def main() -> int:
         """Real chat_local + real shadow_write wrappers, over the fake connection."""
         with patch.object(shadow_write, "_shadow", lambda log, verbose, label, fn: fn(conn)), \
              patch.object(chat_local, "_self_knowledge_message", lambda: None), \
+             patch.object(chat_local, "_extraction_llm",
+                          lambda model: llm_from_state(messages[-1]["content"], state)), \
              patch.object(chat_local, "_call_model_semantic", lambda *a, **k: sem(reply, state)), \
              patch.object(chat_local, "shadow_add_grievance", lambda **kw: None):
             return chat_local._respond_with_character("heretic:q8", messages, 0.7)

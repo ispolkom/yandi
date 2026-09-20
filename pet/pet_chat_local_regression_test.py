@@ -40,6 +40,15 @@ def main() -> int:
     from llm_gateway import remote_backend, llamacpp_backend
 
     import pet.chat_local as chat_local
+    from pet.extraction_test_support import scripted_llm
+
+    # Relational events come from a SEPARATE extraction generation
+    # (pet/event_extraction.py). These tests are about the reply path, so the
+    # extractor is scripted (no events) unless a test sets it; the real
+    # extraction transport gets its own test below.
+    current_extractor = [scripted_llm([])]
+    real_extraction_llm = chat_local._extraction_llm
+    chat_local._extraction_llm = lambda model: current_extractor[0]
 
     remote_entry = lambda model: {
         "backend": "remote", "protocol": "openai",
@@ -129,7 +138,9 @@ def main() -> int:
                     "Ну ты и дура.",
                     {"is_insult": True, "severity": 0.6, "is_apology": False, "sincerity": 0.0, "evidence": "ты дура"},
                 ))
+                current_extractor[0] = scripted_llm([("ты дура", "insult", {"severity": 0.6})])
                 result = chat_local._respond_with_character("heretic:q8", [{"role": "user", "content": "ты дура"}], 0.7)
+                current_extractor[0] = scripted_llm([])
                 check("TEST4: grievance IS recorded for a real insult above threshold", len(grievance_calls) == 1 and grievance_calls[0][0] == "insult")
                 check(
                     "TEST4: the recorded description is what the USER said (the grievance is about their words), not the model's reply or the raw tag",
@@ -150,7 +161,9 @@ def main() -> int:
                     "Ну ты и дура.",
                     {"is_insult": True, "severity": 0.6, "is_apology": False, "sincerity": 0.0, "evidence": "ты дура"},
                 ))
+                current_extractor[0] = scripted_llm([("ты дура", "insult", {"severity": 0.6})])
                 result = chat_local._respond_with_character("heretic:q8", [{"role": "user", "content": "ты дура"}], 0.7)
+                current_extractor[0] = scripted_llm([])
                 check("TEST4b: structured contract -> visible reply extracted correctly", result == "Ну ты и дура.", repr(result))
                 check("TEST4b: structured contract -> grievance IS recorded for a real insult above threshold", len(grievance_calls) == 1 and grievance_calls[0][0] == "insult")
                 check(
@@ -354,8 +367,10 @@ def main() -> int:
                     "Ничего страшного, я тебя прощаю.",
                     {"is_insult": False, "severity": 0.0, "is_apology": True, "sincerity": 0.9, "evidence": "извини"},
                 ))
+                current_extractor[0] = scripted_llm([("извини", "apology", {"sincerity": 0.9})])
                 result = chat_local._respond_with_character("heretic:q8", [{"role": "user", "content": "извини, был не прав"}], 0.7)
-                check("§7: sincere apology -> one apply_apology (match + acknowledge + healing in the memory layer), from the SAME generation", len(apology_calls) == 1)
+                current_extractor[0] = scripted_llm([])
+                check("§7: sincere apology -> one apply_apology (match + acknowledge + healing in the memory layer), from the extraction step", len(apology_calls) == 1)
                 check("§7: apology path still shows the model's real visible reply", result == "Ничего страшного, я тебя прощаю.")
 
             grievance_calls.clear()
@@ -369,6 +384,20 @@ def main() -> int:
                 result = chat_local._respond_with_character("heretic:q8", [{"role": "user", "content": "Извини, я зря это сказал."}], 0.7)
                 check("§7: state-only JSON never leaks into visible PET reply", "is_insult" not in result and "severity" not in result, repr(result))
                 check("§7: state-only JSON does not mutate relationship memory", grievance_calls == [], repr(grievance_calls))
+
+            # ── extraction transport: same logical model and gateway as the reply, deterministic JSON ──
+            chat_local._extraction_llm = real_extraction_llm
+            with patch.object(node_config, "get_model_entry", return_value=None), \
+                 patch.object(gw_client._session, "post") as mock_post:
+                mock_post.return_value = make_ok_response('{"events": []}')
+                raw = chat_local._extraction_llm("heretic:q8")([{"role": "system", "content": "s"}, {"role": "user", "content": "u"}])
+                sent = mock_post.call_args.kwargs["json"]
+                check("EXTRACTION: goes through the same gateway to the SAME logical model as the reply",
+                      mock_post.call_count == 1 and sent["model"] == "heretic:q8" and raw == '{"events": []}', repr(sent.get("model")))
+                check("EXTRACTION: deterministic (temperature 0) and asks for JSON output",
+                      (sent.get("options") or {}).get("temperature") == 0.0 and sent.get("format") == "json", repr(sent))
+                check("EXTRACTION: exactly one system message, at the beginning (template-safe)",
+                      [m["role"] for m in sent["messages"]] == ["system", "user"])
 
     print()
     print("=" * 72)

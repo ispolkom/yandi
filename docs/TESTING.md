@@ -24,7 +24,7 @@ The interpreter is `YANDI_PYTHON`, else `./.venv`, else `~/venv`, else `python3`
 | Area | Suites |
 |---|---|
 | Gateway | `llm_gateway.client_regression_test`, `remote_backend_`, `llamacpp_backend_`, `intelligence_bridge_`, `secure_store_` |
-| Personal chat | `pet.pet_chat_local_regression_test`, `pet.pet_event_provenance_regression_test`, `pet.pet_relationship_focus_regression_test`, `pet.pet_relationship_state_causality_regression_test`, `pet.pet_commitment_events_regression_test` |
+| Personal chat | `pet.pet_chat_local_regression_test`, `pet.pet_event_extraction_regression_test`, `pet.pet_event_provenance_regression_test`, `pet.pet_relationship_focus_regression_test`, `pet.pet_relationship_state_causality_regression_test`, `pet.pet_commitment_events_regression_test` |
 | Relationship memory | `agent.message_intensity_regression_test`, `agent.relationship_memory_regression_test`, `agent.relationship_apology_matching_regression_test`, `agent.relationship_healing_clock_regression_test`, `agent.relationship_state_regression_test`, `agent.relationship_commitments_regression_test` |
 | Epistemic / write-back | `agent.epistemic_canonical_trust_shadow_regression_test`, `agent.writeback_episodic_sql_regression_test` |
 | SQL layer | `agent.db_sql_shadow_write_regression_test`, `agent.db_sql_security_injection_regression_test` |
@@ -34,8 +34,9 @@ The interpreter is `YANDI_PYTHON`, else `./.venv`, else `~/venv`, else `python3`
 - **Deterministic (the core suite):** the model is mocked at the gateway/HTTP boundary and SQL is an
   in-memory fake. No model, database, network or Redis is required.
 - **Need a local model:** anything that loads real weights or calls a live server. Model
-  behaviour (for example how often a model reports a genuine insult) is measured with separate
-  experiments and is not a regression test.
+  behaviour (for example how often the model finds a genuine insult in a message) is measured with
+  a separate live benchmark and is not a regression test; the regression tests script the model and
+  check the protocol around it.
 - **Need a live SQL instance:** the `db_sql_live_*` and ownership/bootstrap proofs, which check a
   real dedicated database instance. Do not run these against a database holding data you care about
   unless you know what they do.
