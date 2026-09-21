@@ -7,7 +7,7 @@ Proof: `agent/db_sql_field_protection_regression_test.py`, `agent/db_sql_field_p
 
 ## Status in one paragraph
 
-**The mechanism is built and proven; it is OFF until you run `seal` on your database.** Nothing changes for a database that has not been
+**The mechanism is built and proven; it is OFF until you run `seal` on your database. The owner sealed his live database on 2026-09-22 (7 turns, 7 grievances; mode on, no plaintext left).** Nothing changes for a database that has not been
 sealed: the application writes and reads plaintext exactly as before. Once `seal` has been run, the words of the personal ledger are
 stored as AES-256-GCM ciphertext and can be opened only by a process that holds the key derived from the node's root key.
 **It protects data at rest** (a stolen disk, a leaked database dump or backup). It does **not** protect against something that already
@@ -44,9 +44,9 @@ are row counts and times. Extending the list is one line in `PROTECTED`/`ENTITY_
 * A process reads the mode at most every 10 seconds, so a switch reaches running processes without a restart (they start refusing / sealing within 10 s).
 * What a person types cannot pose as a sealed value: while protection is off, a typed `yp1:…` is stored escaped (`yp0:…`) and read back unescaped.
 * The Core installs the key when it is **unlocked** and forgets it when **locked** (`pet/core_lifecycle.py`).
-* The legacy PET (`./start.sh`, not unlocked by the node) gets the key from the node's key tool when started as `YANDI_PROTECTED_STORAGE=1 ./start.sh`:
+* The legacy PET (`./start.sh`, not unlocked by the node) gets the key from the node's key tool when started by `./start.sh` (it uses the key tool automatically when it is built; `YANDI_PROTECTED_STORAGE=0` turns that off):
   it runs `yandi-keys core-key` (the tool opens the root with this machine's device key; it refuses to print into a terminal), holds the key in memory
-  and stops loudly if it cannot get it. Without that flag, on a sealed database, the PET starts but says clearly that it can neither read nor write the personal memory.
+  and stops loudly if it cannot get it. Without the tool (or with `YANDI_PROTECTED_STORAGE=0`), on a sealed database, the PET starts but says clearly that it can neither read nor write the personal memory.
 
 ## Turn it on (the owner)
 
@@ -67,7 +67,7 @@ sudo YANDI_SQL_USER=root YANDI_SQL_PASSWORD='...' ~/venv/bin/python3 -m agent.db
 $KEYS core-key | sudo -E YANDI_SQL_USER=root YANDI_SQL_PASSWORD='...' ~/venv/bin/python3 -m agent.db.sql.protect backup --out ~/personal-before-seal.bak
 # 4. seal (needs UPDATE and TRIGGER rights: an administrator, like the migration):
 $KEYS core-key | sudo -E YANDI_SQL_USER=root YANDI_SQL_PASSWORD='...' ~/venv/bin/python3 -m agent.db.sql.protect seal
-# 5. from now on start the PET as:  YANDI_PROTECTED_STORAGE=1 ./start.sh
+# 5. start the PET as usual:  ./start.sh   (it fetches the key by itself)
 ```
 
 (The exact way you reach the database as an administrator is the same as for `migrate`; if your setup uses the socket login instead of a password, use it the same way.
