@@ -10,7 +10,9 @@
                                                        K12 setting YANDI_KEY_PASSWORD overwrites a legacy identity
   and: K13 loose file permissions accepted, K14 KDF floor removed, K15 atomic write skips its verification, K16 public identity fields unauthenticated,
   K17 a typo in a recovery code accepted, K18 a new code committed unconfirmed, K19 the old recovery secret still works, K20 a new code without the device,
-  K21 core-key prints the root instead of the derived key, K22 core-key prints into a terminal
+  K21 core-key prints the root instead of the derived key, K22 core-key prints into a terminal,
+  L1, L3-L7 the shared web account (login.rs): wrong password accepted, no backup on reset, weak inputs, tool exit codes
+  (L2, removing the device-key-exists guard of create_keys, was tried and is EQUIVALENT: the device key file is created exclusively, so the second guard is redundant)
 
 Run: python scripts/key_root_mutants.py [--only K1,K6]   (needs cargo; offline)
 """
@@ -40,6 +42,8 @@ AT = "src/atomic.rs"
 CLI = "src/bin/yandi-keys.rs"
 
 T = "--test", "key_root"
+LT = "--test", "login"
+LG = "src/login.rs"
 
 F11_ALL = ("f11_a_damaged_identity_is_never_replaced", "f11_setting_yandi_key_password_never_destroys_a_legacy_identity", "f11_a_changed_machine_id_never_replaces_a_legacy_identity")
 OVERWRITE_ON_ERR = (
@@ -79,6 +83,12 @@ MUTANTS = [
     ("K20", "a new recovery code can be set without the device opening the key", {MIG: [("        doc.unlock_with_device(&key, self.machine)?; // only the device may replace the recovery secret\n", "")]}, [T + ("replacing_the_recovery_secret_by_a_code_needs_the_device_and_the_typed_confirmation",)]),
     ("K21", "core-key prints the ROOT key instead of the derived Core key", {CLI: [("                    let key = derive_domain(&root, DOMAIN_CORE);\n", "                    let key = root;\n")]}, [T + ("core_key_prints_exactly_the_key_the_node_gives_the_core_and_nothing_else",)]),
     ("K22", "core-key prints into a terminal", {CLI: [("            if unsafe { libc::isatty(1) } == 1 {\n", "            if false {\n")]}, [T + ("core_key_never_prints_into_a_terminal",)]),
+    ("L1", "the login password check says yes to a wrong password", {LG: [("        .verify_password(password.as_bytes(), &hash)\n        .is_ok()", "        .verify_password(password.as_bytes(), &hash)\n        .is_ok()\n        || true")]}, [LT + ("the_keys_made_from_what_the_person_typed_open_two_ways_and_the_login_password_checks",)]),
+    ("L3", "a login reset keeps no copy of the previous file", {LG: [("    crate::atomic::backup_copy(&auth_path, \"before-login-reset\")\n        .map_err(|_| \"Не удалось сохранить копию ключей; ничего не изменено\".to_string())?;", "    let _ = &auth_path;")]}, [LT + ("the_master_password_resets_the_login_password_and_touches_nothing_else",)]),
+    ("L4", "the master password may equal the login password", {LG: [("    if master == login {", "    if false {")]}, [LT + ("the_rules_for_what_the_person_typed",)]),
+    ("L5", "a too-short login password is accepted at setup", {LG: [("    if login.chars().count() < 8 {", "    if false {")]}, [LT + ("the_rules_for_what_the_person_typed", "the_tool_creates_the_account_checks_the_password_and_resets_it_and_never_prints_a_secret")]),
+    ("L6", "a too-short NEW login password is accepted at reset", {LG: [("    if new_login_password.chars().count() < 8 {", "    if false {")]}, [LT + ("a_wrong_or_mistyped_secret_or_a_short_new_password_changes_nothing",)]),
+    ("L7", "the tool's login-check exits 0 for a wrong password", {CLI: [("                    eprintln!(\"yandi-keys: login_wrong\");\n                    Ok(1)", "                    eprintln!(\"yandi-keys: login_wrong\");\n                    Ok(0)")]}, [LT + ("the_tool_creates_the_account_checks_the_password_and_resets_it_and_never_prints_a_secret",)]),
 ]
 
 

@@ -4,6 +4,9 @@
 //!   yandi-keys migrate           legacy → recoverable root; YOU choose the master password (typed twice); --generate-code makes a recovery code instead
 //!   yandi-keys new-recovery-code replace the recovery secret by a fresh recovery code (the device opens the key; identity and chats untouched)
 //!   yandi-keys recover           new machine / lost device key: type the recovery code
+//!   yandi-keys login-check       (used by the assistant's web page) is the line on standard input the web login password? exit 0 yes, 1 no
+//!   yandi-keys login-reset       (same) standard input: recovery secret, new login password. Exit 0 done, 1 refused (short message on stderr)
+//!   yandi-keys setup             (same) standard input: login password and its repeat, master password and its repeat; creates the keys
 //!   yandi-keys core-key          print the key the Core is given (base64), for `python -m agent.db.sql.protect`; only into a pipe, never a terminal
 //!
 //!   options: --dir D (default ~/.yandi_keys)  --port N (9000)  --machine-id ID
@@ -318,6 +321,57 @@ fn run() -> Result<i32, String> {
                     Ok(0)
                 }
                 Err(e) => Ok(fail(&e)),
+            }
+        }
+        "login-check" => {
+            let password = read_line_stdin()?;
+            match key_root::login::verify_login_in(&dir, &password) {
+                Ok(true) => Ok(0),
+                Ok(false) => {
+                    eprintln!("yandi-keys: login_wrong");
+                    Ok(1)
+                }
+                Err(message) => {
+                    eprintln!("yandi-keys: {message}");
+                    Ok(2)
+                }
+            }
+        }
+        "login-reset" => {
+            let code = read_line_stdin()?;
+            let new_password = read_line_stdin()?;
+            match key_root::login::reset_login(&dir, &code, &new_password, &policy) {
+                Ok(()) => Ok(0),
+                Err(message) => {
+                    eprintln!("yandi-keys: {message}");
+                    Ok(1)
+                }
+            }
+        }
+        "setup" => {
+            let login = read_line_stdin()?;
+            let login_repeat = read_line_stdin()?;
+            let master = read_line_stdin()?;
+            let master_repeat = read_line_stdin()?;
+            let made =
+                key_root::login::check_setup_inputs(&login, &login_repeat, &master, &master_repeat)
+                    .and_then(|_| {
+                        key_root::login::create_keys(
+                            &dir,
+                            machine.as_ref(),
+                            &device,
+                            &login,
+                            &master,
+                            KdfParams::RECOMMENDED,
+                            &policy,
+                        )
+                    });
+            match made {
+                Ok(_root) => Ok(0),
+                Err(message) => {
+                    eprintln!("yandi-keys: {message}");
+                    Ok(1)
+                }
             }
         }
         "core-key" => {

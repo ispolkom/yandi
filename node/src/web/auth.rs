@@ -230,7 +230,14 @@ fn machine_passphrase() -> Vec<u8> {
     format!("YANDI_MACHINE:{}", machine_id.trim()).into_bytes()
 }
 
-/// Hash a login password using Argon2id. Returns a PHC-format string.
+/// Hash a login password using Argon2id. Returns a PHC-format string. (On Unix this is the shared implementation in `key_root::login`, the
+/// one `yandi-keys` and the second web page use, so that every door checks the same password the same way.)
+#[cfg(unix)]
+pub fn hash_login_password(password: &str) -> Result<String, String> {
+    key_root::login::hash_login_password(password)
+}
+
+#[cfg(not(unix))]
 pub fn hash_login_password(password: &str) -> Result<String, String> {
     use argon2::password_hash::{PasswordHasher, SaltString};
     let salt = SaltString::generate(&mut rand::rngs::OsRng);
@@ -241,6 +248,12 @@ pub fn hash_login_password(password: &str) -> Result<String, String> {
 }
 
 /// Verify a login password against stored PHC hash.
+#[cfg(unix)]
+pub fn verify_login_password(password: &str, stored_hash: &str) -> bool {
+    key_root::login::verify_login_password(password, stored_hash)
+}
+
+#[cfg(not(unix))]
 pub fn verify_login_password(password: &str, stored_hash: &str) -> bool {
     use argon2::password_hash::{PasswordVerifier, PasswordHash};
     let Ok(hash) = PasswordHash::new(stored_hash) else { return false };
@@ -402,6 +415,7 @@ pub fn load_auth_state() -> AuthState {
 }
 
 /// Never overwrite existing key material: an auth.json that exists (even one this build cannot open) is somebody's master key.
+#[cfg_attr(unix, allow(dead_code))] // on Unix the shared `key_root::login` does this; the tests and the Windows path still use it
 fn ensure_no_existing_auth(path: &std::path::Path) -> Result<(), String> {
     if std::fs::symlink_metadata(path).is_ok() {
         return Err("Auth is already set up; refusing to overwrite the existing key file".to_string());
@@ -440,7 +454,13 @@ pub fn setup_auth(
     }
 }
 
-/// The rules for what the person typed, in words that are safe to show.
+/// The rules for what the person typed, in words that are safe to show (the shared rules of `key_root::login` on Unix).
+#[cfg(unix)]
+pub(crate) fn check_setup_inputs(login: &str, login_repeat: &str, master: &str, master_repeat: &str) -> Result<(), String> {
+    key_root::login::check_setup_inputs(login, login_repeat, master, master_repeat)
+}
+
+#[cfg(not(unix))]
 pub(crate) fn check_setup_inputs(login: &str, login_repeat: &str, master: &str, master_repeat: &str) -> Result<(), String> {
     if login.chars().count() < 8 {
         return Err("Пароль входа: минимум 8 символов".to_string());
@@ -471,37 +491,7 @@ pub(crate) fn setup_auth_in(
     params: key_root::KdfParams,
     policy: &key_root::KdfPolicy,
 ) -> Result<[u8; 32], String> {
-    use key_root::{RootDocument, Zeroizing};
-    let auth_path = dir.auth_file();
-    ensure_no_existing_auth(&auth_path)?;
-    if device.load().map(|k| k.is_some()).unwrap_or(true) {
-        return Err("В каталоге ключей уже есть ключ устройства; настройка не выполнена, чтобы ничего не затереть".to_string());
-    }
-    let root = Zeroizing::new(key_root::wrap::random_bytes::<32>());
-    let login_hash = hash_login_password(login_password)?;
-    let device_key = device.create().map_err(|_| "Не удалось создать ключ устройства".to_string())?;
-    let created = (|| -> Result<(), String> {
-        let doc = RootDocument::create(&root, &login_hash, &device_key, device.name(), machine, master_password, params, policy)
-            .map_err(|e| format!("Не удалось создать ключи: {}", e))?;
-        key_root::atomic::create_new_file(&auth_path, &doc.to_json()).map_err(|_| "Не удалось записать файл ключей".to_string())?;
-        // both ways in must open the very root that was just made, read back from disk
-        let bytes = key_root::keydir::read_private_file(&auth_path).map_err(|_| "Файл ключей не прочитался".to_string())?;
-        let doc = RootDocument::parse(&bytes).map_err(|_| "Файл ключей не прошёл проверку".to_string())?;
-        let by_device = doc.unlock_with_device(&device_key, machine).map_err(|_| "Ключ устройства не открывает корень".to_string())?;
-        let by_password = doc.unlock_with_password(master_password, policy).map_err(|_| "Мастер-пароль не открывает корень".to_string())?;
-        if *by_device != *root || *by_password != *root {
-            return Err("Проверка ключей не прошла".to_string());
-        }
-        Ok(())
-    })();
-    if let Err(e) = created {
-        // undo only what this call has just created (nothing existed before: that was checked above)
-        let _ = std::fs::remove_file(&auth_path);
-        if let Some(p) = dir.file("device.key").to_str() {
-            let _ = std::fs::remove_file(p);
-        }
-        return Err(e);
-    }
+    let root = key_root::login::create_keys(dir, machine, device, login_password, master_password, params, policy)?;
     state.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
     state.needs_rebind.store(false, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut mk) = state.master_key.lock() {
@@ -617,37 +607,7 @@ pub(crate) fn recover_login_in(
     new_login_password: &str,
     policy: &key_root::KdfPolicy,
 ) -> Result<(), String> {
-    use key_root::{recovery_secret, KeyRootError, RecoveryCode, RootDocument};
-    if new_login_password.chars().count() < 8 {
-        return Err("Новый пароль входа должен быть не короче 8 символов".to_string());
-    }
-    let bytes = key_root::keydir::read_private_file(&dir.auth_file()).map_err(|_| "Файл ключей недоступен".to_string())?;
-    match key_root::legacy::auth_format(&bytes) {
-        Ok(key_root::legacy::AuthFormat::RootV2) => {}
-        Ok(_) => return Err("Ключи в старом формате: сначала выполните `yandi-keys migrate`".to_string()),
-        Err(_) => return Err("Файл ключей повреждён".to_string()),
-    }
-    // a code with a typo is a typo, not "wrong"
-    if key_root::recovery_code::looks_like_code(code_input) && RecoveryCode::parse(code_input).is_err() {
-        return Err("В коде опечатка: он не проходит проверку. Проверьте, что записано, и введите ещё раз".to_string());
-    }
-    let doc = RootDocument::parse(&bytes).map_err(|_| "Файл ключей повреждён".to_string())?;
-    let secret = recovery_secret(code_input);
-    let root = match doc.unlock_with_password(&secret, policy) {
-        Ok(r) => r,
-        Err(KeyRootError::RecoveryFailed) => return Err("Код восстановления не подошёл".to_string()),
-        Err(_) => return Err("Файл ключей повреждён".to_string()),
-    };
-    let hash = hash_login_password(new_login_password)?;
-    let next = doc.with_login_hash(&hash).to_json();
-    let auth_path = dir.auth_file();
-    key_root::atomic::backup_copy(&auth_path, "before-login-reset").map_err(|_| "Не удалось сохранить копию ключей; ничего не изменено".to_string())?;
-    key_root::atomic::write_atomic(&auth_path, &next, |written| {
-        RootDocument::parse(written)
-            .and_then(|d| Ok(d.login_hash == hash && *d.unlock_with_password(&secret, policy)? == *root))
-            .unwrap_or(false)
-    })
-    .map_err(|_| "Не удалось записать новый пароль; ничего не изменено".to_string())?;
+    key_root::login::reset_login(dir, code_input, new_login_password, policy)?;
     if let Ok(mut sessions) = state.sessions.lock() {
         sessions.clear(); // a password reset ends every session that existed before it
     }

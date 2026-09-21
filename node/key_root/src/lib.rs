@@ -14,6 +14,7 @@ pub mod error;
 pub mod identity_store;
 pub mod keydir;
 pub mod legacy;
+pub mod login;
 pub mod machine;
 pub mod migrate;
 pub mod recovery_code;
