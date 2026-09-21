@@ -65,13 +65,29 @@ value, held in memory only. But its root is the master key of F1/F2, so unlockin
 **F10 — Other plaintext stores** (already documented in `SECURITY_ARCHITECTURE.md` §18): the legacy SQLite `KnowledgeDB`, `registry/*.json`, trace JSONL files,
 and Redis (council chat lists). Full-disk protection is all that covers them.
 
+**F11 — A failed identity load silently replaces the node's identity.** `NodeIdentity::load_or_create` (`identity.rs:423-441`): if the saved identity cannot be
+decrypted (the machine id changed after a reinstall or a hardware move, `YANDI_KEY_PASSWORD` was set or changed, the file is damaged), it prints one line, creates a
+**new** identity and **overwrites the saved file**; the old one is not kept. The node id, the keys and every pairing that depends on them are lost with no
+error and no backup. This makes F2/F3 worse: the protection is public, *and* a change of it destroys the data instead of stopping. **Do not set
+`YANDI_KEY_PASSWORD` on a node whose identity already exists** without a migration: the existing file was encrypted with the machine-id fallback and would not load.
+
+## Observed on the owner's machine (2026-09-21)
+
+* `~/.yandi_keys/auth.json` 0600 (2026-06-28), `node_identity_9000.json` 0600, but the **directory `~/.yandi_keys` is 0755** (files inside are 0600, so other users
+  see the names but not the contents; it should be 0700).
+* `/etc/machine-id` is `-r--r--r--`: world-readable, as expected (F2).
+* `YANDI_KEY_PASSWORD` is **not set**, so the identity private keys are protected only by public values (F3, in effect).
+* `~/.local/share/yandi/keys/node_kek.bin` 0600 (2026-09-13, 32 bytes) with `node_config_chain_tip.json`, in a 0700 directory (F7).
+* `~/.local/share/yandi/core/check-value.json` (0600, 137 bytes) was created by the first managed-Core run (P1b), as designed.
+* Not seen from here: any backup of these files or of the database.
+
 ## What is secret today, and what is recoverable from disk files alone
 
 | Store | Protected by | Real user secret involved? | Recoverable from the disk files alone? | After backup → new machine | After machine-id change / OS reinstall |
 |---|---|---|---|---|---|
 | `auth.json` master key | public machine-id (F2) | no | **yes** | opens only on the same machine-id; otherwise "rebind" | rebind makes a **different** key (F1) |
 | Login to the web UI | Argon2id of the login password | yes | no (needs the password) | works | works |
-| Identity private keys | env password, else public values (F3) | only if `YANDI_KEY_PASSWORD` is set | **yes** unless the env password is set | opens only with the same machine-id (fallback) | needs the env password or fails |
+| Identity private keys | env password, else public values (F3); a failed load replaces them (F11) | only if `YANDI_KEY_PASSWORD` is set (it is **not** on the owner's machine) | **yes** unless the env password is set | opens only with the same machine-id (fallback) | needs the env password or fails |
 | Chat store | master key (F4) | no | **yes** | unreadable on another machine-id | unreadable after a rebind (F1) |
 | Node model/API config | `node_kek.bin` (F7) | no | yes, if the backup has both files | opens if both files are restored | unaffected by the machine id |
 | MySQL personal/epistemic memory | nothing at rest (F6) | no | **yes, plain text** | as the database backup | unaffected |
