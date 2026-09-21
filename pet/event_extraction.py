@@ -85,6 +85,9 @@ class ExtractionResult:
     validated: List[str] = field(default_factory=list)   # types whose evidence reference was valid
     rejected: List[str] = field(default_factory=list)   # why candidates / the whole turn were dropped
     calls: int = 0
+    answered: bool = False                               # the model answered with the expected JSON (an empty list is an answer)
+    judged: List[Tuple[str, int, int]] = field(default_factory=list)  # (type, start, end) of every span the blind judgement confirmed,
+                                                                      # including a commitment that the sole-candidate rule later dropped
 
 
 _EXTRACT_SYSTEM = (
@@ -219,6 +222,7 @@ def extract_relational_events(message: str, llm: LlmCall) -> ExtractionResult:
     if data is None or not isinstance(data.get("events"), list):
         result.rejected.append("extractor output is not the expected JSON object")
         return result
+    result.answered = True
     proposed = data["events"]
     if len(proposed) > MAX_EVENTS:
         result.rejected.append("extractor proposed too many events")
@@ -264,6 +268,7 @@ def extract_relational_events(message: str, llm: LlmCall) -> ExtractionResult:
             result.rejected.append(f"{kind}: the span is not an act performed now by the user")
             continue
         result.events.append(ExtractedEvent(kind, evidence, start, end, severity, sincerity))
+        result.judged.append((kind, start, end))
 
     # A promise or a claim of fulfilment is admissible only as the ONLY candidate
     # the extractor proposed in this turn. If the model proposed anything else

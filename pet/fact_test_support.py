@@ -94,13 +94,21 @@ def scripted_fact_llm(
     return llm
 
 
-def scripted_router(event_llm: Callable, fact_llm: Callable):
+def scripted_router(event_llm: Callable, fact_llm: Callable, verify_llm: Optional[Callable] = None):
     """One callable for both extractors; remembers what each was shown."""
     fact_prompts = {fe._EXTRACT_SYSTEM, fe._CHECK_SYSTEM, fe._SUPPORT_SYSTEM, fe._LINK_SYSTEM, fe._CONFLICT_SYSTEM}
     event_inputs: List[List[Dict[str, str]]] = []
     fact_inputs: List[List[Dict[str, str]]] = []
+    verify_inputs: List[List[Dict[str, str]]] = []
+    from pet import commitment_verification as cv
+    verify_prompts = {cv._CLASSIFY_SYSTEM, cv._VERIFY_SYSTEM, cv._DELIVERS_SYSTEM}
 
     def llm(messages: List[Dict[str, str]]) -> str:
+        if messages[0]["content"] in verify_prompts:
+            verify_inputs.append(messages)
+            if verify_llm is None:
+                raise RuntimeError("no verification model scripted for this test")
+            return verify_llm(messages)
         if messages[0]["content"] in fact_prompts:
             fact_inputs.append(messages)
             return fact_llm(messages)
@@ -109,4 +117,5 @@ def scripted_router(event_llm: Callable, fact_llm: Callable):
 
     llm.event_inputs = event_inputs  # type: ignore[attr-defined]
     llm.fact_inputs = fact_inputs    # type: ignore[attr-defined]
+    llm.verify_inputs = verify_inputs  # type: ignore[attr-defined]
     return llm

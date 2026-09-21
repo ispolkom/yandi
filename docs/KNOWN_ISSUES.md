@@ -127,6 +127,27 @@ exists in the personal chat yet, so reported fulfilment is remembered but does n
   model does not recognise, worded in words, could be kept as a statement. Old wording of the same fact is
   recognised as a restatement only when the extractor links it or the normalised statement is equal; two
   different wordings the extractor does not link stay two facts.
+- **Verified commitments need schema v18, and only in-chat deliveries can be verified.** Until
+  `python -m agent.db.sql.migrate` (DDL rights) is run, promises and reports work as before and nothing
+  is verified (no provenance columns). Only a promise whose fulfilment is the delivery of something in the
+  chat can ever be verified; everything about the world stays a report. Whether a message *is* the
+  promised delivery is a model judgement (two independent calls, a code cross-check with the event
+  extraction and a structural quotation check); a false verification is bounded by the trust rule (about
+  +5 trust in total, ever, from this source, never above 60), and a real one can be missed. Measured on
+  real models: see the cycle report (the benchmark is `python -m pet.bench_commitment_verification`).
+  The person can address the verifier through their own message (an instruction inside it); the bound above
+  is what limits that. Each identified turn with an open in-chat promise adds one extraction call and one
+  judgement per open promise (at most five); a promise turn adds one classification call.
+- **Trivial promises barely count.** The reward for an observed in-chat delivery is small on purpose, so
+  trust cannot be rebuilt after serious harm with such promises; trust after harm needs a verifier of
+  something meaningful (not built).
+- **The reward is per verified promise, not per kind of promise.** No significance weighting exists; a
+  meaningful promise is not worth more than a trivial one.
+- **Broken promises are not inferred.** A passed deadline is not a broken promise; there is no source that
+  could verify one yet.
+- **`relationship_state._apply` still swallows a failed write for the older events** (insult, apology,
+  verified-by-another-verifier outcomes): in the turn's transaction such a failure leaves the grievance
+  without its state change. The new observed-delivery transition is strict (its failure rolls the turn back).
 - **Old episodes are not adopted.** The earlier `episode` rows have no person or turn identity and are
   left as they are; they are not read by the personal chat.
 - **Stored in plain text.** Message texts are stored like the other personal tables (grievance

@@ -11,22 +11,27 @@ Endpoint: /api/local/*
 """
 import asyncio
 import json
+import logging
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter
 
 from pet.shared import REDIS_URL, LOCAL_MSGS_KEY, MAX_MESSAGES
+import os
 import re
 
 from pet.event_extraction import extract_relational_events, to_intensity
 from pet.fact_extraction import extract_personal_facts
+from pet.commitment_verification import classify_commitment, drop_if_reported, verify_direct_fulfilment
 import agent.personal_facts as personal_facts
+import agent.relationship_commitments as relationship_commitments
 import agent.relationship_memory as relationship_memory
 from agent.db.sql.shadow_write import (
     shadow_add_grievance, shadow_apply_apology, shadow_get_relationship_context,
     shadow_create_commitment, shadow_record_fulfillment_claim,
     shadow_get_personal_memory, shadow_record_interaction_turn, shadow_persist_turn,
     shadow_get_personal_facts, shadow_record_personal_facts,
+    shadow_get_verifiable_commitments, shadow_record_direct_fulfilment, shadow_lock_relationship_state,
 )
 
 router = APIRouter()
@@ -93,16 +98,45 @@ _STATE_SCHEMA = {"type": "object", "properties": {}}
 _EXTRACTION_TIMEOUT_S = 60
 
 
-def _extraction_llm(model: str):
-    """The model call used by the event extraction protocol: deterministic
-    (temperature 0), JSON mode, same logical model and gateway as the reply."""
+# Which logical model answers the STRUCTURED calls (event / fact extraction, promise classification, fulfilment
+# verification). Unset -> the chat model itself (the behaviour before these existed). A small voice model can be weak at
+# strict JSON; the owner may point these calls at another logical model of the node's gateway configuration without
+# touching the voice. There is NO hidden fallback: a configured target that fails is a failed call, and every protocol
+# here treats a failed call as "nothing extracted / not verified / external" (never as a guess).
+_EXTRACTION_MODEL_ENV = "YANDI_EXTRACTION_MODEL"
+_VERIFIER_MODEL_ENV = "YANDI_VERIFIER_MODEL"
+
+
+def _structured_target(chat_model: str, *env_names: str) -> str:
+    for name in env_names:
+        configured = os.environ.get(name, "").strip()
+        if configured:
+            return configured
+    return chat_model
+
+
+def _structured_llm(target: str):
+    """A deterministic (temperature 0), JSON-mode call to one logical model through the gateway."""
     def call(messages: list[dict]) -> str:
         from llm_gateway import complete
         return complete(
-            model=model, messages=messages, temperature=0.0, max_tokens=500,
+            model=target, messages=messages, temperature=0.0, max_tokens=500,
             response_format="json", timeout=_EXTRACTION_TIMEOUT_S,
         )
     return call
+
+
+def _extraction_llm(model: str):
+    """The model call used by the event / fact extraction protocols: the chat model unless YANDI_EXTRACTION_MODEL is set."""
+    return _structured_llm(_structured_target(model, _EXTRACTION_MODEL_ENV))
+
+
+def _verification_llm(model: str):
+    """The model call used by promise classification and fulfilment verification: YANDI_VERIFIER_MODEL when set, otherwise
+    exactly the extraction call (YANDI_EXTRACTION_MODEL, else the chat model)."""
+    if not os.environ.get(_VERIFIER_MODEL_ENV, "").strip():
+        return _extraction_llm(model)
+    return _structured_llm(_structured_target(model, _VERIFIER_MODEL_ENV))
 
 
 _SEMANTIC_FAILURE_REPLY = "Прости, я сейчас не смогла нормально сформулировать ответ."
@@ -475,6 +509,7 @@ def _call_model_semantic(
 
 def _apply_current_turn_event(
     text: str, intensity, memory_ctx: dict | None, source_turn_id: str | None = None, conn=None,
+    promise_kind: str | None = None,
 ) -> None:
     """Owner mandate ("характер, обидчива... простое извени - не
     канает"): writes the CURRENT-TURN EVENTS (insult / apology / promise /
@@ -527,6 +562,7 @@ def _apply_current_turn_event(
     if intensity.is_promise:
         shadow_create_commitment(
             user_id=_RELATIONSHIP_USER_ID, text=text, evidence=intensity.evidence,
+            kind=promise_kind or relationship_commitments.KIND_GENERAL,
             source_turn_id=source_turn_id, span=spans.get("promise"), conn=conn,
         )
     elif intensity.claims_fulfilled:
@@ -573,6 +609,7 @@ def _respond_with_character(
     # link a new statement to a known fact (restates / corrects it), and the reply is told the relevant ones.
     stored_facts = shadow_get_personal_facts(user_id=_RELATIONSHIP_USER_ID) if source_turn_id else None
     llm = _extraction_llm(model)
+    verifier_llm = _verification_llm(model)
     # The EVENT extractor gets the current message and nothing else: neither past memory nor facts reach it.
     extraction = extract_relational_events(last_user_text, llm)
     # The FACT extractor gets the current message (the only source of evidence) and, purely as link targets,
@@ -593,10 +630,31 @@ def _respond_with_character(
         skip = {f["source_turn_id"] for f in person_facts or []}
         skip |= {f["source_turn_id"] for f in stored_facts if f["status"] == personal_facts.SUPERSEDED}
         past = [m for m in past if m["source_turn_id"] not in skip]
+    # A promise made in this message is classified: is its fulfilment something that will appear IN the chat (the only
+    # kind YANDI can ever observe directly) or something in the world? Anything but a clear in_chat is external.
+    intensity_now = to_intensity(extraction)
+    promise_kind = (
+        classify_commitment(last_user_text, intensity_now.evidence, verifier_llm)
+        if source_turn_id and intensity_now.ok and intensity_now.is_promise else None
+    )
+    # Fulfilment that YANDI can OBSERVE: does THIS message itself contain the promised in-chat deliverable of exactly one
+    # of the person's earlier open in_chat promises? Evidence is the current message only (never the assistant's words,
+    # conversation memory, personal facts or the relationship state); a report that it was done proves nothing here.
+    verifiable = shadow_get_verifiable_commitments(user_id=_RELATIONSHIP_USER_ID, current_turn_id=source_turn_id) if source_turn_id else None
+    # Only when the event extraction ANSWERED for this message: the code cross-checks the evidence against the words the event
+    # extraction classified as a report or a promise, and without that answer the cross-check cannot be made (fail closed).
+    verification = verify_direct_fulfilment(last_user_text, verifier_llm, verifiable) if verifiable and extraction.answered else None
+    if verification is not None:
+        # every span the event extraction confirmed in this message, including a claim that it (and to_intensity) later dropped
+        # because it shared the message with another event: that claim is exactly what must not be read as a delivery
+        drop_if_reported(verification, extraction.judged)
+        logging.getLogger("yandi.turn").info(
+            "commitment verification: candidates=%d verified=%s model_calls=%d rejected=%s", len(verifiable),
+            verification.verified.commitment_id if verification.verified else None, verification.calls, verification.rejected)
     semantic = _call_model_semantic(model, messages, temperature, memory_ctx, past, person_facts)
     visible = semantic.reply if semantic.reply_ok else _SEMANTIC_FAILURE_REPLY
     reply = _clean_response(visible)
-    intensity = to_intensity(extraction)
+    intensity = intensity_now
     resolved_model, adapter = _generation_target(semantic, model)
 
     # ALL model work is finished and every event is validated: only now does the
@@ -613,13 +671,22 @@ def _respond_with_character(
     # only after this commit, so a reply the client never received is a retry of a
     # turn that is already whole.
     def unit(conn):
+        if source_turn_id and verification is not None and verification.verified is not None:
+            # FIRST statement of the transaction, before anything is read: the reward for this proof depends on the
+            # person's earlier proofs, so the state row lock must precede the read snapshot (see the helper).
+            shadow_lock_relationship_state(user_id=_RELATIONSHIP_USER_ID, conn=conn)
         if source_turn_id:
             shadow_record_interaction_turn(
                 user_id=_RELATIONSHIP_USER_ID, source_turn_id=source_turn_id, user_text=last_user_text,
                 assistant_text=reply if semantic.reply_ok else None, model=resolved_model, adapter=adapter,
                 recalled_turn_ids=[m["source_turn_id"] for m in past or []], conn=conn,
             )
-        _apply_current_turn_event(last_user_text, intensity, memory_ctx, source_turn_id, conn=conn)
+        _apply_current_turn_event(last_user_text, intensity, memory_ctx, source_turn_id, conn=conn, promise_kind=promise_kind)
+        if source_turn_id and verification is not None and verification.verified is not None:
+            v = verification.verified
+            shadow_record_direct_fulfilment(
+                user_id=_RELATIONSHIP_USER_ID, commitment_id=v.commitment_id, evidence=v.evidence,
+                source_turn_id=source_turn_id, span=(v.start, v.end), conn=conn)
         if source_turn_id and fact_extraction is not None and fact_extraction.facts:
             shadow_record_personal_facts(
                 user_id=_RELATIONSHIP_USER_ID, source_turn_id=source_turn_id, facts=fact_extraction.facts, conn=conn)

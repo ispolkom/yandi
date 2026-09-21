@@ -66,13 +66,17 @@ changing the model, restarting the process, or clearing a context window does no
    promise or claim of fulfilment. Code reconstructs the evidence text from those references and an
    independent, blind check on that exact span must agree. Anything malformed, uncertain or in
    disagreement is "no event". The same protocol finds stable facts the person states about their own
-   life (`pet/fact_extraction.py`).
+   life (`pet/fact_extraction.py`) and, for a person who has open promises to deliver something in the
+   chat, looks for that deliverable in the current message (`pet/commitment_verification.py`; only a
+   directly observed delivery can ever be verified, only then trust moves, and a report of having done
+   something never does).
 3. **Reply.** `llm_gateway.complete_semantic()` produces the visible reply from the history, the
    agent's self facts and the remembered context (as history only, marked as the past). It is not
    asked for events.
 4. **Write.** Confirmed events go to the ledgers: an insult creates a grievance, an apology advances
-   the one focused grievance, a promise or claim goes to the promise ledger. Relationship state moves
-   only through those lifecycle rules. The turn itself (both sides, model, time) is appended to the
+   the one focused grievance, a promise or claim goes to the promise ledger, and a directly observed
+   delivery of a promised in-chat deliverable is appended as a verified fulfilment. Relationship state
+   moves only through those lifecycle rules. The turn itself (both sides, model, time) is appended to the
    immutable per-person `interaction_turn` history.
 
 Each model call is its own generation attempt with its own resolved target and adapter.

@@ -818,13 +818,15 @@ def _commitment_context(conn, user_id: str, current_text: str) -> Optional[dict]
 
 
 def shadow_create_commitment(
-    *, user_id: str, text: str, evidence: str,
+    *, user_id: str, text: str, evidence: str, kind: str = relationship_commitments.KIND_GENERAL,
     source_turn_id: Optional[str] = None, span: Optional[tuple] = None, conn=None, log=None, verbose: bool = False,
 ) -> Optional[dict]:
-    """A promise the person made in the CURRENT message (validated upstream)."""
+    """A promise the person made in the CURRENT message (validated upstream). `kind` is the classification of how its
+    fulfilment could ever be established (in_chat / external): only a proposal, verified by nothing until the deliverable
+    itself appears."""
     def _do(c):
         return relationship_commitments.create_commitment(
-            c, user_id, text, evidence, source_turn_id=source_turn_id, span=span)
+            c, user_id, text, evidence, kind=kind, source_turn_id=source_turn_id, span=span)
 
     return _run(conn, log, verbose, "create_commitment", _do, optional_table=True)
 
@@ -936,3 +938,36 @@ def shadow_record_personal_facts(
         return personal_facts.record_turn_facts(c, user_id, source_turn_id, facts)
 
     return _run(conn, log, verbose, "record_personal_facts", _do, optional_table=True)
+
+
+def shadow_get_verifiable_commitments(
+    *, user_id: str, current_turn_id: Optional[str], log=None, verbose: bool = False,
+) -> Optional[list]:
+    """Read-only: the person's open promises whose fulfilment could be observed directly in the chat (classified
+    in_chat, unverified, not made in this very turn), as [{"commitment_id", "evidence"}]. [] = none (or schema v18 not
+    applied); None = UNKNOWN (SQL unreachable)."""
+    def _do(conn):
+        return [{"commitment_id": c["commitment_id"], "evidence": c["evidence"]}
+                for c in relationship_commitments.verifiable_commitments(conn, user_id, current_turn_id)]
+
+    return _shadow(log, verbose, "get_verifiable_commitments", _do)
+
+
+def shadow_lock_relationship_state(*, user_id: str, conn, log=None, verbose: bool = False) -> None:
+    """Take the person's relationship-state row lock (creating the row if absent) as the FIRST statement of the caller's
+    turn transaction, before it reads anything: InnoDB fixes a transaction's read snapshot at its first plain read, so
+    a lock taken after one would still leave the transaction counting the person's earlier proofs from a stale snapshot.
+    Only a turn that is about to record a verified fulfilment calls this (the reward depends on that count)."""
+    _run(conn, log, verbose, "lock_relationship_state", lambda c: repo.get_or_create_inner_state(c, user_id, for_update=True) and None)
+
+
+def shadow_record_direct_fulfilment(
+    *, user_id: str, commitment_id: str, evidence: str, source_turn_id: Optional[str],
+    span: Optional[tuple] = None, conn=None, log=None, verbose: bool = False,
+) -> Optional[dict]:
+    """The promised in-chat deliverable was observed in the current identified turn (exact evidence validated upstream):
+    the verified event WITH provenance and the one bounded trust transition. One step of the caller's transaction."""
+    def _do(c):
+        return relationship_commitments.record_direct_fulfilment(c, user_id, commitment_id, evidence, source_turn_id, span)
+
+    return _run(conn, log, verbose, "record_direct_fulfilment", _do)

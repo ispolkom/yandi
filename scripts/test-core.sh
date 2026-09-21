@@ -43,12 +43,15 @@ SUITES=(
   pet.pet_turn_transaction_regression_test
   pet.pet_fact_extraction_regression_test
   pet.pet_personal_facts_regression_test
+  pet.pet_commitment_verification_regression_test
+  pet.pet_commitment_trust_regression_test
   agent.message_intensity_regression_test
   agent.relationship_memory_regression_test
   agent.relationship_apology_matching_regression_test
   agent.relationship_healing_clock_regression_test
   agent.relationship_state_regression_test
   agent.relationship_commitments_regression_test
+  agent.relationship_direct_fulfilment_regression_test
   agent.relationship_idempotency_regression_test
   agent.epistemic_canonical_trust_shadow_regression_test
   agent.writeback_episodic_sql_regression_test

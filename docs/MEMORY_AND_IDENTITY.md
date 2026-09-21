@@ -21,6 +21,7 @@ PERSISTED != FUNCTIONAL MEMORY: stored -> read later -> changes behaviour.
 |---|---|---|
 | Self model | `agent/self_model.py` | Durable facts about the agent (character metadata, public repo/website). Fail-loud: no silent fallback if it cannot be read. |
 | Episodic memory | `agent/memory_episodic.py`, `agent/orchestrator/response/writeback.py` | Answered questions with outcome and canonical trust, written back to SQL. |
+| Verified commitments | `pet/commitment_verification.py`, `agent/relationship_commitments.py`, `agent/relationship_state.py`, `commitment` / `commitment_event` | Promise ledger; a promise to deliver something in the chat is verified when the deliverable itself appears in a later turn; only then trust moves (bounded) |
 | Personal facts | `agent/personal_facts.py`, `pet/fact_extraction.py`, tables `personal_fact`, `personal_fact_event` | Durable, provenance-backed facts the person reported about their own life (append-only; corrections append). |
 | Personal conversation memory | `agent/personal_memory.py`, table `interaction_turn` | The immutable source record of each chat turn (what was said and answered, when, by which model) and a bounded recall of relevant past turns into the reply context. |
 | Relationship memory | `agent/relationship_memory.py` | Grievances and forgiveness for one interlocutor. |
@@ -271,6 +272,68 @@ facts, separately from the raw transcript (which stays exactly as it is in `inte
   window. Facts are stated to the model as the person's own report, as memory and not instruction, inert and
   delimited like the conversation memory; a fact the person has corrected is not stated, and the raw turn it
   came from is not re-told as conversation memory.
+
+## Verified commitments (what raises trust, and what does not)
+
+```text
+USER REPORTS FULFILMENT != FULFILMENT VERIFIED.   TRUST GROWS ONLY FROM VERIFIED EVIDENCE.
+EXTERNAL SELF-REPORT != DIRECT OBSERVATION.       AMBIGUOUS TARGET != VERIFIED TARGET.
+ONE COMMITMENT -> MAX ONE REWARD.  ONE EVIDENCE SPAN -> MAX ONE COMMITMENT.  FAIL CLOSED.
+APOLOGY != TRUST RESTORATION.      RELATIONAL TRUST != EPISTEMIC TRUST.
+```
+
+YANDI has not observed the world. "I paid the bill", "I sent the file", "I went to the doctor" stay what
+they are: **reports**. A report of having kept a promise is recorded (`fulfillment_claimed`, with the
+turn and span it came from) and moves nothing. Exactly one class of promise can be verified without
+anyone's word: a promise to **deliver something in the chat** ("in my next message I will give you a
+code word / a number / the answer"). When the deliverable itself appears in a later message, it is in
+front of her.
+
+- **Classification** (`pet/commitment_verification.py`): when a promise is made, a model proposes whether
+  its fulfilment happens in the chat (`in_chat`) or in the world (`external`). Only a clear `in_chat`
+  counts; a failure, a doubt or another answer is `external`. `in_chat` alone verifies nothing. Promises
+  made before this existed (`general`, no source turn) are never verified.
+- **Verification** (on a later identified turn, for the person's open `in_chat` promises, at most five):
+  the extractor points at the word range of the message that *is* the promised content and names which
+  promise it fulfils; **code reconstructs the evidence** (`message[start:end]`); a blind judgement, per
+  open promise, sees only the promise words, the exact fragment and the message and must say the fragment
+  itself contains what was promised, presented by the person now (not a report, not a request to
+  believe, not a hypothesis, not a quotation, not about someone else). It is verified only if **exactly
+  one** open promise passes and it is the one the extractor named; ambiguity, a wrong target, a
+  malformed answer, a timeout or a bad span all mean *not verified*. Two checks are made by code: a
+  fragment inside a quotation, and a fragment inside words the event extraction of the same message
+  confirmed as a report of fulfilment or as a new promise, are never a delivery.
+- **Sources.** The evidence comes only from the **current identified user message**: never from the
+  assistant's words, retrieved conversation memory, personal facts, the relationship state, or the claim
+  text as such. The judges are shown no trust, no history and no wish to confirm anything.
+  Before anything is written the ledger checks the evidence **against the immutable `interaction_turn`
+  record** of the named turn (`user_text[start:end] == evidence`): the provenance is verified against the
+  record, not against the caller. What is verified is "the promised in-chat action was performed", not
+  that everything it stands for is true (a delivered contract text is not a genuine contract).
+- **Ledger.** The verified fulfilment is a new, appended `commitment_event` (`verified_fulfilled`, source
+  `in_chat_direct`) with `source_turn_id`, `span_start`, `span_end` and the exact evidence (schema v18);
+  the earlier report is untouched; the status is folded from the events; a resolved commitment is no
+  longer an open target. Broken promises are not inferred (a passed deadline only sets an `overdue` flag).
+- **Trust.** Code owns the transition (`relationship_state.record_observed_commitment`); the model never
+  supplies a coordinate. A directly observed delivery proves only *trivial* reliability, so it moves
+  **trust only** (no respect, no affection), by `2.0 * 0.6^k` where *k* is the number of such proofs the
+  person already gave (2.0, 1.2, 0.72, ... zero once under 0.05: at most about 5 in total, ever) and never
+  above a ceiling of 60. One commitment pays once; the same turn, the same evidence again, or a retry pays
+  nothing; twenty trivial promises cannot buy a relationship, and after serious harm (an insult costs up
+  to 8 trust) they cannot buy it back either. The audit row carries the reward as its weight, so the
+  state is rebuilt from the audit trail alone.
+- **One transaction.** The verified event, the causal claim `(turn, commitment_verified)`, the trust
+  transition and the audit row are steps of the turn's one transaction: a failure at any point (including
+  after the event, or after the transition) rolls the whole turn back, and a retry applies it normally.
+  The transition never swallows its own failure. Concurrent turns are serialised on the person's state row:
+  the turn takes that lock as its **first statement** (an InnoDB read snapshot is fixed at the first plain
+  read, and the append-only ledger cannot be read with a locking clause because the runtime role has no
+  UPDATE on it), so two turns cannot both be "the first proof".
+- **Model targets.** By default the structured calls (events, facts, classification, verification) use the
+  chat model. `YANDI_EXTRACTION_MODEL` points events, facts and (by default) verification at another
+  logical model of the node's gateway configuration; `YANDI_VERIFIER_MODEL` points classification and
+  verification at yet another. There is no hidden fallback: an unavailable target is a failed call, which
+  means "nothing extracted / not verified / external".
 
 ### One turn, one transaction
 

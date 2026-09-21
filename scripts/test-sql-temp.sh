@@ -10,7 +10,7 @@
 # It applies the project's own schema migration to the temporary instance and
 # then runs agent/relationship_idempotency_sql_integration_test.py and
 # agent/personal_memory_sql_integration_test.py, agent/turn_atomicity_sql_integration_test.py and
-# agent/personal_facts_sql_integration_test.py. Skips (exit 0)
+# agent/personal_facts_sql_integration_test.py and agent/commitment_verification_sql_integration_test.py. Skips (exit 0)
 # when no mysqld binary is available or the script runs as root.
 set -euo pipefail
 
@@ -73,6 +73,7 @@ if [ "${#SUITES[@]}" -eq 0 ]; then
     agent.personal_memory_sql_integration_test
     agent.turn_atomicity_sql_integration_test
     agent.personal_facts_sql_integration_test
+    agent.commitment_verification_sql_integration_test
   )
 fi
 failed=()
