@@ -113,6 +113,20 @@ exists in the personal chat yet, so reported fulfilment is remembered but does n
 - **Only identified turns are remembered.** Requests without a client turn id (for example
   `agent/tools/tool_ai.py`) neither write to nor read from personal memory. Their relationship
   events are still extracted as before (see "Callers without a turn id").
+- **Personal facts need schema v17 and are only as good as the extraction model.** The fact tables are a
+  new migration (`python -m agent.db.sql.migrate` with DDL rights); until then facts are inert and the
+  chat behaves as before. Measured on synthetic messages with the real models (see the cycle report): the
+  persona model recognised most stable facts and produced no fact from any of 14 non-fact messages
+  (quotations, hypotheticals, plans, questions, moods, other people, a password, an injection); a message
+  mixing past and present in one sentence is refused (fail closed); a fact can be missed, never invented
+  from the assistant's words. Each extra call adds latency to every identified turn (one call, three per
+  candidate fact).
+- **A fact means "the person said so".** Facts are stored in plain text like the conversation transcript
+  (a normalised statement and the exact evidence span; the full message is not copied into the fact). A
+  credential-shaped token is never stored as a fact, but there is no general secret scanner: a secret the
+  model does not recognise, worded in words, could be kept as a statement. Old wording of the same fact is
+  recognised as a restatement only when the extractor links it or the normalised statement is equal; two
+  different wordings the extractor does not link stay two facts.
 - **Old episodes are not adopted.** The earlier `episode` rows have no person or turn identity and are
   left as they are; they are not read by the personal chat.
 - **Stored in plain text.** Message texts are stored like the other personal tables (grievance

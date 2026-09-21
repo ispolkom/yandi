@@ -87,13 +87,15 @@ def main() -> int:
             cur.execute(sql, params)
             return list(cur.fetchone().values())[0]
 
-    TABLES = ("interaction_turn", "causal_event", "grievance", "forgiveness_capacity", "inner_state_event",
-              "inner_state", "commitment_event", "commitment")
+    TABLES = ("personal_fact_event", "personal_fact", "interaction_turn", "causal_event", "grievance", "forgiveness_capacity",
+              "inner_state_event", "inner_state", "commitment_event", "commitment")
 
     def reset_world(with_grievance=True, with_commitment=False):
         with root.cursor() as cur:
+            cur.execute("SET FOREIGN_KEY_CHECKS=0")
             for t in TABLES:
                 cur.execute(f"TRUNCATE TABLE {t}")
+            cur.execute("SET FOREIGN_KEY_CHECKS=1")
         if with_grievance:
             rm.add_grievance(root, OWNER, "insult", "Ты сломал мой велосипед", 0.4)
         if with_commitment:

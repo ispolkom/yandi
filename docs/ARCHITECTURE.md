@@ -59,12 +59,14 @@ changing the model, restarting the process, or clearing a context window does no
 
 1. **Focus and memory.** The current message and the grievance/promise ledgers are read to decide
    which remembered grievance or promise the message is about (deterministic, before any
-   generation), and a few relevant past turns of this person are recalled from SQL.
+   generation), a few relevant past turns of this person are recalled from SQL, and the person's stored
+   personal facts are read.
 2. **Event extraction** (`pet/event_extraction.py`). A separate model call sees **only** the current
    message, cut into numbered words, and points at the words that make up an insult, apology,
    promise or claim of fulfilment. Code reconstructs the evidence text from those references and an
    independent, blind check on that exact span must agree. Anything malformed, uncertain or in
-   disagreement is "no event".
+   disagreement is "no event". The same protocol finds stable facts the person states about their own
+   life (`pet/fact_extraction.py`).
 3. **Reply.** `llm_gateway.complete_semantic()` produces the visible reply from the history, the
    agent's self facts and the remembered context (as history only, marked as the past). It is not
    asked for events.

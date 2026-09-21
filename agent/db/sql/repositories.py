@@ -2446,6 +2446,61 @@ def list_recent_interaction_turns(conn, user_id: str, limit: int = 300) -> List[
 
 
 # ============================================================
+# PERSONAL FACT / PERSONAL FACT EVENT (append-only; what the person reported)
+# ============================================================
+
+def insert_personal_fact(
+    conn, fact_id: str, user_id: str, fact_class: str, statement: str, polarity: str, temporality: str,
+    evidence: str, span_start: Optional[int], span_end: Optional[int], source_turn_id: str, created_at=None,
+) -> None:
+    """Append a fact. Its source turn must already be an interaction_turn row
+    (foreign key): a fact cannot exist without the immutable turn it was said in."""
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO personal_fact (fact_id, user_id, fact_class, statement, polarity, temporality, evidence, "
+            "span_start, span_end, source_turn_id, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (fact_id, user_id, fact_class, statement, polarity, temporality, evidence, span_start, span_end,
+             source_turn_id, created_at),
+        )
+
+
+def insert_personal_fact_event(
+    conn, fact_id: str, user_id: str, event_type: str, by_fact_id: Optional[str], evidence: str,
+    span_start: Optional[int], span_end: Optional[int], source_turn_id: str, created_at=None,
+) -> None:
+    """Append something that happened to a fact (restated / superseded)."""
+    created_at = _coerce_datetime(created_at) or _now()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO personal_fact_event (fact_id, user_id, event_type, by_fact_id, evidence, span_start, span_end, "
+            "source_turn_id, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (fact_id, user_id, event_type, by_fact_id, evidence, span_start, span_end, source_turn_id, created_at),
+        )
+
+
+def list_personal_facts(conn, user_id: str, limit: int = 1000) -> List[Dict[str, Any]]:
+    """The person's facts, newest first (statuses are folded from the events by the caller)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT fact_id, user_id, fact_class, statement, polarity, temporality, evidence, source_turn_id, created_at "
+            "FROM personal_fact WHERE user_id=%s ORDER BY created_at DESC, fact_id DESC LIMIT %s",
+            (user_id, int(limit)),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def list_personal_fact_events(conn, user_id: str) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT event_id, fact_id, event_type, by_fact_id, source_turn_id, created_at "
+            "FROM personal_fact_event WHERE user_id=%s ORDER BY event_id",
+            (user_id,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+# ============================================================
 # DISAGREEMENT
 # ============================================================
 

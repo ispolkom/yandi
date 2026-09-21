@@ -8,7 +8,8 @@
 #
 # It applies the project's own schema migration to the temporary instance and
 # then runs agent/relationship_idempotency_sql_integration_test.py and
-# agent/personal_memory_sql_integration_test.py. Skips (exit 0)
+# agent/personal_memory_sql_integration_test.py, agent/turn_atomicity_sql_integration_test.py and
+# agent/personal_facts_sql_integration_test.py. Skips (exit 0)
 # when no mysqld binary is available or the script runs as root.
 set -euo pipefail
 
@@ -54,3 +55,4 @@ export YANDI_TEST_MODE=1 YANDI_TEST_ISOLATED_SOCKET="$SOCK"
 "$PYTHON" -m agent.relationship_idempotency_sql_integration_test
 "$PYTHON" -m agent.personal_memory_sql_integration_test
 "$PYTHON" -m agent.turn_atomicity_sql_integration_test
+"$PYTHON" -m agent.personal_facts_sql_integration_test

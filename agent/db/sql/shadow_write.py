@@ -31,6 +31,7 @@ from typing import Any, Callable, Optional
 from agent.db.sql.connection import get_connection, SqlUnavailable
 import agent.db.sql.repositories as repo
 import agent.causal_events as causal_events
+import agent.personal_facts as personal_facts
 import agent.personal_memory as personal_memory
 import agent.relationship_commitments as relationship_commitments
 import agent.relationship_memory as relationship_memory
@@ -900,3 +901,38 @@ def shadow_record_interaction_turn(
             raise
 
     return _run(conn, log, verbose, "record_interaction_turn", _do)
+
+
+_facts_unavailable_warned = False
+
+
+def shadow_get_personal_facts(*, user_id: str, log=None, verbose: bool = False) -> Optional[list]:
+    """Read-only: the person's facts with their folded status (newest first).
+    [] = none yet; None = UNKNOWN (SQL unreachable or schema v17 not applied),
+    never reported to the model as "no facts"."""
+    def _do(conn):
+        global _facts_unavailable_warned
+        try:
+            return personal_facts.list_facts(conn, user_id)
+        except Exception as exc:  # noqa: BLE001
+            if causal_events.is_missing_table(exc):
+                if not _facts_unavailable_warned:
+                    _facts_unavailable_warned = True
+                    logging.getLogger("yandi.memory").warning(
+                        "personal_fact unavailable (schema v17 not applied?): personal facts are not read")
+                return None
+            raise
+
+    return _shadow(log, verbose, "get_personal_facts", _do)
+
+
+def shadow_record_personal_facts(
+    *, user_id: str, source_turn_id: Optional[str], facts: list, conn=None, log=None, verbose: bool = False,
+) -> Optional[dict]:
+    """Apply the validated personal facts of one identified turn. With `conn` it
+    is one step of the caller's transaction, after the turn's interaction_turn
+    row; a missing table (schema v17 not applied) skips only this step."""
+    def _do(c):
+        return personal_facts.record_turn_facts(c, user_id, source_turn_id, facts)
+
+    return _run(conn, log, verbose, "record_personal_facts", _do, optional_table=True)

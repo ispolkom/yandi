@@ -152,6 +152,30 @@ class FakeCursor:
                         "assistant_text": assistant_text, "model": model, "adapter": adapter,
                         "recalled_turn_ids": recalled, "created_at": created_at})
                     self.rowcount = 1
+        elif upper.startswith("INSERT INTO PERSONAL_FACT_EVENT"):
+            fact_id, user_id, event_type, by_fact_id, evidence, span_start, span_end, source_turn_id, created_at = params
+            self._require_turn(user_id, source_turn_id)
+            if not any(f["fact_id"] == fact_id for f in self.conn.personal_facts):
+                raise AssertionError("foreign key: personal_fact_event.fact_id must reference personal_fact")
+            self.conn.personal_fact_events.append({
+                "event_id": len(self.conn.personal_fact_events) + 1, "fact_id": fact_id, "user_id": user_id,
+                "event_type": event_type, "by_fact_id": by_fact_id, "evidence": evidence, "span_start": span_start,
+                "span_end": span_end, "source_turn_id": source_turn_id, "created_at": created_at})
+        elif upper.startswith("INSERT INTO PERSONAL_FACT"):
+            (fact_id, user_id, fact_class, statement, polarity, temporality, evidence, span_start, span_end,
+             source_turn_id, created_at) = params
+            self._require_turn(user_id, source_turn_id)
+            self.conn.personal_facts.append({
+                "fact_id": fact_id, "user_id": user_id, "fact_class": fact_class, "statement": statement,
+                "polarity": polarity, "temporality": temporality, "evidence": evidence, "span_start": span_start,
+                "span_end": span_end, "source_turn_id": source_turn_id, "created_at": created_at})
+        elif upper.startswith("SELECT FACT_ID, USER_ID, FACT_CLASS"):
+            user_id, limit = params
+            rows = sorted((f for f in self.conn.personal_facts if f["user_id"] == user_id),
+                          key=lambda f: (f["created_at"], f["fact_id"]), reverse=True)[:limit]
+            self._all = [dict(f) for f in rows]
+        elif upper.startswith("SELECT EVENT_ID, FACT_ID, EVENT_TYPE"):
+            self._all = [dict(e) for e in self.conn.personal_fact_events if e["user_id"] == params[0]]
         elif upper.startswith("SELECT T.INTERACTION_ID"):
             user_id, limit = params
             rows = sorted((t for t in self.conn.interaction_turns if t["user_id"] == user_id),
@@ -170,6 +194,11 @@ class FakeCursor:
         else:
             raise AssertionError(f"unexpected SQL in apology path: {sql!r}")
 
+    def _require_turn(self, user_id, source_turn_id):
+        """The foreign key: a fact / fact event needs the interaction_turn it was said in."""
+        if not any(t["user_id"] == user_id and t["source_turn_id"] == source_turn_id for t in self.conn.interaction_turns):
+            raise AssertionError(f"foreign key: no interaction_turn ({user_id!r}, {source_turn_id!r})")
+
     def fetchone(self):
         return self._one
 
@@ -187,6 +216,8 @@ class FakeConnection:
         self.commitment_events: list[dict] = []
         self.causal_events: list[dict] = []
         self.interaction_turns: list[dict] = []
+        self.personal_facts: list[dict] = []
+        self.personal_fact_events: list[dict] = []
         self.lock = threading.Lock()  # stands in for the database's unique-key serialisation
 
     def cursor(self):

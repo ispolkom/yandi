@@ -71,8 +71,9 @@ def main() -> int:
                     "VALUES ('g_v15_row', 'v15_owner', 'insult', 'row that existed at schema v15', 0.5, 'registered', NOW(), NOW())")
         cur.execute("INSERT IGNORE INTO causal_event (user_id, source_turn_id, event_type, created_at) "
                     "VALUES ('v15_owner', 'turn-v15-0001', 'insult', NOW())")
+        cur.execute("DROP TABLE IF EXISTS personal_fact_event"); cur.execute("DROP TABLE IF EXISTS personal_fact")
         cur.execute("DROP TABLE IF EXISTS interaction_turn")
-        cur.execute("DELETE FROM schema_migrations WHERE version=16")
+        cur.execute("DELETE FROM schema_migrations WHERE version IN (16, 17)")
         cur.execute("INSERT IGNORE INTO schema_migrations (version, description) VALUES (15, 'simulated v15')")
     check("U: the simulated v15 database has no interaction_turn and version 15",
           scalar(root, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='yandi_epistemic' AND table_name='interaction_turn'") == 0
@@ -80,8 +81,8 @@ def main() -> int:
     os.environ.update({"YANDI_SQL_SOCKET": socket, "YANDI_SQL_USER": admin, "YANDI_SQL_AUTH_MODE": "password", "YANDI_SQL_PASSWORD": admin_pw})
     with contextlib.redirect_stdout(io.StringIO()):
         upgraded = migrate.apply()
-    check("U: the migration upgrades v15 -> v16: interaction_turn added, version 16 recorded, existing rows untouched",
-          upgraded and scalar(root, "SELECT MAX(version) FROM schema_migrations") == 16
+    check("U: the migration upgrades v15 -> current: interaction_turn (and the v17 fact tables) added, version recorded, existing rows untouched",
+          upgraded and scalar(root, "SELECT MAX(version) FROM schema_migrations") == schema.SCHEMA_VERSION
           and scalar(root, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='yandi_epistemic' AND table_name='interaction_turn'") == 1
           and scalar(root, "SELECT description FROM grievance WHERE id='g_v15_row'") == "row that existed at schema v15"
           and scalar(root, "SELECT COUNT(*) FROM causal_event WHERE user_id='v15_owner'") == 1)

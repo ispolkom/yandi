@@ -21,6 +21,7 @@ PERSISTED != FUNCTIONAL MEMORY: stored -> read later -> changes behaviour.
 |---|---|---|
 | Self model | `agent/self_model.py` | Durable facts about the agent (character metadata, public repo/website). Fail-loud: no silent fallback if it cannot be read. |
 | Episodic memory | `agent/memory_episodic.py`, `agent/orchestrator/response/writeback.py` | Answered questions with outcome and canonical trust, written back to SQL. |
+| Personal facts | `agent/personal_facts.py`, `pet/fact_extraction.py`, tables `personal_fact`, `personal_fact_event` | Durable, provenance-backed facts the person reported about their own life (append-only; corrections append). |
 | Personal conversation memory | `agent/personal_memory.py`, table `interaction_turn` | The immutable source record of each chat turn (what was said and answered, when, by which model) and a bounded recall of relevant past turns into the reply context. |
 | Relationship memory | `agent/relationship_memory.py` | Grievances and forgiveness for one interlocutor. |
 | Beliefs | `agent/belief_manager.py` | Confidence with evidence for/against, history, decay. |
@@ -233,6 +234,43 @@ Why not the existing tables: `episode` is the system's own life log (no person, 
 `experience` is mutable and keyed by how a reply landed; neither can hold a per-person, per-turn,
 immutable source record without becoming something else. Legacy `episode` rows are neither read nor
 changed by this path.
+
+## Personal facts (what the person has told her about their own life)
+
+```text
+USER REPORTED FACT != OBJECTIVE TRUTH.   ASSISTANT SAID X != USER FACT.
+RAW TURN != DERIVED FACT.  FACT MUST HAVE A SOURCE TURN.  SESSION != PERSON.
+OLD FACT IS HISTORY: A CORRECTION APPENDS.   SAME TURN RETRY != NEW FACT HISTORY.
+THE MODEL MAY POINT TO EVIDENCE; THE CODE OWNS THE EVIDENCE TEXT.
+```
+
+Recalling *turns* cannot answer "what do you remember about me?": the stable facts are old, few and
+share no words with the question. So the stable things the person says about themselves are kept as
+facts, separately from the raw transcript (which stays exactly as it is in `interaction_turn`).
+
+- **Extraction** (`pet/fact_extraction.py`) follows the event protocol: the current message is cut into
+  numbered words; a model points at the word range of a stable personal fact and proposes its class,
+  a minimal normalised statement, polarity, time and stability; **code reconstructs the evidence** from
+  the message; a second judgement, blind to the claim, must find the span to be the person's own
+  current (or own past) statement, with the same polarity, stable and not a secret; a third checks the
+  statement says no more than the evidence. Quotations, hypotheticals, plans, questions, other people's
+  facts, moods and credentials produce nothing. The extractor sees only the current message (plus the
+  statements of known facts as numbered link targets, never as evidence); the assistant's words never
+  reach it, and it holds no vocabulary of facts.
+- **Ledger.** `personal_fact` holds a fact's identity and first statement (person, class, statement,
+  polarity `affirmed|negated`, time as stated `current|past`, the exact evidence span, the source turn);
+  `personal_fact_event` holds what happens later: `restated` (the same proposition in another turn: more
+  provenance, not a duplicate) and `superseded` (a correction: the new fact and turn are recorded). Nothing
+  is updated or deleted; a fact's status (current / historical / superseded) is folded from the events.
+  The source turn is a foreign key to `interaction_turn`, so a fact cannot exist without the immutable turn
+  it was said in, and it is written in the same transaction as that turn.
+- **Recall.** Two routes, chosen by the extractor's classification of the message (a retrieval mode, never
+  a write): a person asking what is known about them, or about something in their own life, gets their
+  current profile (at most 15 facts, plus up to 3 marked as past); any other message gets only the facts
+  that share content with it (at most 4). Neither depends on how long ago the turn was or on the interaction
+  window. Facts are stated to the model as the person's own report, as memory and not instruction, inert and
+  delimited like the conversation memory; a fact the person has corrected is not stated, and the raw turn it
+  came from is not re-told as conversation memory.
 
 ### One turn, one transaction
 

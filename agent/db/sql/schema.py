@@ -46,7 +46,7 @@ DESIGN NOTES (read before changing a table):
    no HTTP retry chatter. RUN_ERROR is 5 columns, not a log warehouse.
 """
 
-SCHEMA_VERSION = 16  # v16: interaction_turn (immutable per-person source record of each chat turn, keyed by the client-minted turn id). v15: commitment + commitment_event + causal_event (immutable promise ledger and the causal-event idempotency ledger for the relationship state). v14: knowledge_query_archive ("точка ноль" — agent/db/manager.py's sqlite KnowledgeDB query-log + moderation-queue system retired from registry/index.db + registry/knowledge/*.db)
+SCHEMA_VERSION = 17  # v17: personal_fact + personal_fact_event (provenance-backed, append-only ledger of what the person reported about themselves). v16: interaction_turn (immutable per-person source record of each chat turn, keyed by the client-minted turn id). v15: commitment + commitment_event + causal_event (immutable promise ledger and the causal-event idempotency ledger for the relationship state). v14: knowledge_query_archive ("точка ноль" — agent/db/manager.py's sqlite KnowledgeDB query-log + moderation-queue system retired from registry/index.db + registry/knowledge/*.db)
 
 SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1445,6 +1445,69 @@ CREATE TABLE IF NOT EXISTS interaction_turn (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
+# ── PERSONAL FACT / PERSONAL FACT EVENT (what the person reported about themselves) ──
+# A durable, append-only ledger of facts the PERSON stated about their own life,
+# each pointing back to the immutable source turn it came from.
+#
+#   USER REPORTED FACT != OBJECTIVE TRUTH.     ASSISTANT SAID X != USER FACT.
+#   RAW TURN != DERIVED FACT.                  FACT MUST HAVE A SOURCE TURN.
+#   OLD FACT IS HISTORY: A CORRECTION APPENDS, NEVER OVERWRITES.
+#   MODEL MAY POINT TO EVIDENCE; CODE OWNS THE EVIDENCE TEXT.
+#
+# personal_fact is the fact's IDENTITY and first statement: person, class, a
+# minimal normalised `statement` (derived, model-worded, checked against the
+# evidence), polarity (affirmed | negated: "has a dog" / "does not drink coffee"),
+# temporality AS STATED (current | past), the EXACT evidence span (reconstructed by
+# code from the source message) and the source turn. Nothing in it is ever UPDATEd.
+# personal_fact_event is everything that later happens to a fact: it was RESTATED in
+# another turn (another provenance occurrence, not a duplicate fact) or SUPERSEDED
+# by a correction (`by_fact_id`, evidence from the correcting turn). A fact's status
+# (current / historical / superseded) is FOLDED from these rows at read time, so a
+# correction is an appended event and the old row stays exactly as written.
+# The source turn of every row is a real interaction_turn (foreign key): a fact
+# cannot exist without the immutable turn it was said in, and it is written in the
+# same transaction as that turn. Whether one turn's facts were applied is claimed
+# once per turn in causal_event (event type 'personal_facts'), so a retry applies
+# nothing twice while the same words in another turn are a new occurrence.
+# agent/personal_facts.py is the only intended caller.
+PERSONAL_FACT = """
+CREATE TABLE IF NOT EXISTS personal_fact (
+    fact_id         VARCHAR(40) PRIMARY KEY,
+    user_id         VARCHAR(64) NOT NULL,
+    fact_class      VARCHAR(30) NOT NULL,
+    statement       VARCHAR(300) NOT NULL,
+    polarity        VARCHAR(10) NOT NULL,                 -- affirmed | negated
+    temporality     VARCHAR(10) NOT NULL,                 -- current | past (as the person stated it)
+    evidence        VARCHAR(500) NOT NULL,                -- exact span of the source message, code-reconstructed
+    span_start      INT NULL,
+    span_end        INT NULL,
+    source_turn_id  VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    created_at      DATETIME NOT NULL,
+    KEY idx_pf_user (user_id, created_at),
+    KEY idx_pf_turn (user_id, source_turn_id),
+    CONSTRAINT fk_pf_turn FOREIGN KEY (user_id, source_turn_id) REFERENCES interaction_turn (user_id, source_turn_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+PERSONAL_FACT_EVENT = """
+CREATE TABLE IF NOT EXISTS personal_fact_event (
+    event_id        BIGINT AUTO_INCREMENT PRIMARY KEY,
+    fact_id         VARCHAR(40) NOT NULL,
+    user_id         VARCHAR(64) NOT NULL,
+    event_type      VARCHAR(20) NOT NULL,                 -- restated | superseded
+    by_fact_id      VARCHAR(40) NULL,                     -- superseded: the fact that replaces it
+    evidence        VARCHAR(500) NOT NULL,                -- exact span from THIS event's source turn
+    span_start      INT NULL,
+    span_end        INT NULL,
+    source_turn_id  VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    created_at      DATETIME NOT NULL,
+    KEY idx_pfe_fact (fact_id, created_at),
+    KEY idx_pfe_user (user_id, created_at),
+    CONSTRAINT fk_pfe_fact FOREIGN KEY (fact_id) REFERENCES personal_fact (fact_id),
+    CONSTRAINT fk_pfe_turn FOREIGN KEY (user_id, source_turn_id) REFERENCES interaction_turn (user_id, source_turn_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
 # ── DISAGREEMENT ─────────────────────────────────────────────────────────
 # SQL-backed replacement for agent/disagreement_engine.py's registry/
 # disagreements.json ("точка ноль"). APPEND-ONLY (class B) — an argument
@@ -1702,6 +1765,8 @@ ALL_TABLES_IN_ORDER = [
     ("commitment_event", COMMITMENT_EVENT),
     ("causal_event", CAUSAL_EVENT),
     ("interaction_turn", INTERACTION_TURN),
+    ("personal_fact", PERSONAL_FACT),
+    ("personal_fact_event", PERSONAL_FACT_EVENT),
     ("disagreement", DISAGREEMENT),
     ("trait_graph", TRAIT_GRAPH),
     ("trait_change", TRAIT_CHANGE),
@@ -1794,6 +1859,8 @@ TABLE_CLASSIFICATION = {
     "commitment_event": "B",
     "causal_event": "B",
     "interaction_turn": "B",
+    "personal_fact": "B",
+    "personal_fact_event": "B",
     "disagreement": "B",
     "trait_graph": "C",
     "trait_change": "B",
