@@ -1,13 +1,13 @@
 //! yandi-keys — look at, migrate and recover the node's key directory.
 //!
 //!   yandi-keys status
-//!   yandi-keys migrate           legacy → recoverable root; makes and shows a RECOVERY CODE (write it down) — run where everything still opens
+//!   yandi-keys migrate           legacy → recoverable root; YOU choose the master password (typed twice); --generate-code makes a recovery code instead
 //!   yandi-keys new-recovery-code replace the recovery secret by a fresh recovery code (the device opens the key; identity and chats untouched)
 //!   yandi-keys recover           new machine / lost device key: type the recovery code
 //!
 //!   options: --dir D (default ~/.yandi_keys)  --port N (9000)  --machine-id ID
-//!            --own-password   (migrate: use a password you choose instead of a generated code; typed with no echo)
-//!            --hidden         (recover: do not show what you type)
+//!            --generate-code  (migrate: make and show a recovery code instead of choosing a password)
+//!            --show           (show what you type; by default a secret is typed with no echo)
 //!            --password-stdin (read every answer as a line from standard input; for scripts and tests)
 //!
 //! It never prints a key. The recovery code is printed once, on purpose, by `migrate` and `new-recovery-code`; it is never stored.
@@ -25,8 +25,8 @@ struct Args {
     dir: PathBuf,
     port: u16,
     stdin: bool,
-    own_password: bool,
-    hidden: bool,
+    generate_code: bool,
+    show: bool,
     machine_id: Option<String>,
 }
 
@@ -43,8 +43,8 @@ fn parse_args() -> Result<Args, String> {
         dir: home.join(".yandi_keys"),
         port: 9000,
         stdin: false,
-        own_password: false,
-        hidden: false,
+        generate_code: false,
+        show: false,
         machine_id: None,
     };
     while let Some(flag) = it.next() {
@@ -61,8 +61,9 @@ fn parse_args() -> Result<Args, String> {
                 args.machine_id = Some(it.next().ok_or("--machine-id needs a value")?)
             }
             "--password-stdin" | "--stdin" => args.stdin = true,
-            "--own-password" => args.own_password = true,
-            "--hidden" => args.hidden = true,
+            "--generate-code" => args.generate_code = true,
+            "--show" => args.show = true,
+            "--own-password" | "--hidden" => {} // the defaults now; accepted so that older instructions still work
             other => return Err(format!("unknown option {other}")),
         }
     }
@@ -200,13 +201,13 @@ fn run() -> Result<i32, String> {
         }
         "migrate" => {
             let env_pw = std::env::var("YANDI_KEY_PASSWORD").ok();
-            let secret: Zeroizing<String> = if args.own_password {
+            let secret: Zeroizing<String> = if !args.generate_code {
                 let pw = ask(
-                    "New recovery password (at least 12 characters): ",
+                    "New master password, your own recovery secret (at least 12 characters): ",
                     args.stdin,
-                    true,
+                    !args.show,
                 )?;
-                let again = ask("Repeat it: ", args.stdin, true)?;
+                let again = ask("Repeat it: ", args.stdin, !args.show)?;
                 if *pw != *again {
                     eprintln!("yandi-keys: the two passwords differ; nothing was changed");
                     return Ok(2);
@@ -284,7 +285,11 @@ fn run() -> Result<i32, String> {
             Ok(2)
         }
         "recover" => {
-            let typed = ask("Recovery code: ", args.stdin, args.hidden)?;
+            let typed = ask(
+                "Recovery secret (your master password, or a recovery code): ",
+                args.stdin,
+                !args.show,
+            )?;
             if looks_like_code(&typed) {
                 if let Err(e) = RecoveryCode::parse(&typed) {
                     eprintln!("yandi-keys: {e}. Nothing was changed.");

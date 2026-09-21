@@ -1,4 +1,4 @@
-# Key recovery (P1c-1) — the root key, the device, and the recovery code
+# Key recovery (P1c-1) — the root key, the device, and the master password you create
 
 What is **implemented**, and how the owner uses it. Design and findings: `docs/KEY_CHAIN_AUDIT.md`. Code: `node/key_root/` (library and the
 `yandi-keys` tool) and its use in `node/src/web/auth.rs`, `node/src/core/identity.rs`, `node/src/main.rs`.
@@ -38,13 +38,25 @@ loss of the device  !=  loss of the YANDI identity            a crypto error  !=
    `identity_recovery_required`, `identity_recovery_failed`, `identity_corrupt`, `identity_format_unsupported`, `identity_unreadable`.
 5. `~/.yandi_keys` is tightened to 0700 (a directory that is a link, another user's, or not a directory is refused, not chmod-ed); key files are 0600.
 
-## The recovery code (what you write down)
+## First run: you create the passwords yourself (nothing is generated)
 
-A password chosen by a person and typed with no echo is a poor secret for something that must never be lost: one wrong layout or caps-lock and it "does not fit",
-with nothing to say why. So **the system makes the secret**: 120 random bits, shown once as `XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-CCCC` (no look-alike letters; the last group
-is a check). You write it down, then **type it back** before anything is saved; case, spaces and dashes do not matter; a typo is reported as a typo ("does not pass its
-check"), not as "wrong". It is used exactly like the earlier password (Argon2id over its canonical form), so no file format changed, and an old chosen password still works
-where one was set. It is **not** the web login password and cannot be recovered: write it on paper, keep it away from the key files.
+On a machine with no `auth.json`, the node starts **only a setup page** (`http://127.0.0.1:<port>`, loopback only, nothing else is served) and waits. You type:
+
+1. a **login password** (at least 8 characters) and repeat it — this opens the web UI;
+2. a **master password** (at least 12 characters, different from the login password) and repeat it — this is the **recovery secret**: write it on paper.
+
+Only after both are typed twice and saved does the node create the root key, the device key and the identity, and continue starting. The master password is stretched
+with Argon2id; it is not stored. Nothing is generated for you and nothing is shown for you to copy. Later, on a new machine or after losing the device key, the same
+master password brings the same node id back (`yandi-keys recover`), and the login page's **"Забыли пароль?"** accepts it to set a new login password.
+
+## The generated recovery code (optional)
+
+If you would rather not choose a secret, `yandi-keys migrate --generate-code` makes one for you. It is optional; the rule for the first-run setup and for `migrate`
+is that **the person creates the secret**.
+
+It is shown once as `XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-CCCC` (120 random bits, no look-alike letters; the last group is a check). You write it down, then **type it back**
+before anything is saved; case, spaces and dashes do not matter; a typo is reported as a typo ("does not pass its check"), not as "wrong". It is used exactly like a chosen
+password (Argon2id over its canonical form), so no file format differs. It is **not** the web login password and cannot be recovered: write it on paper, keep it away from the key files.
 
 ## What to do (the owner)
 
@@ -52,10 +64,11 @@ where one was set. It is **not** the web login password and cannot be recovered:
 cd ~/yandi/node && cargo build --release -p yandi-key-root          # -> target/release/yandi-keys   (cargo build alone does NOT build the tool)
 ./target/release/yandi-keys status                                   # looks; only tightens the directory to 0700
 
-# not migrated yet: makes and shows a recovery code, asks you to type it back, then migrates (stop the node first)
+# an existing (legacy) directory: you type YOUR master password twice (typed with no echo; --show shows it), then it migrates (stop the node first)
 ./target/release/yandi-keys migrate
+./target/release/yandi-keys migrate --generate-code     # or: let the system make a code, shown once, that you type back
 
-# already migrated with a password you cannot reproduce: replace it by a recovery code (the DEVICE opens the key; node id, identity and chats are untouched)
+# already migrated and the recovery secret is lost or does not fit: replace it (the DEVICE opens the key; node id, identity and chats are untouched)
 ./target/release/yandi-keys new-recovery-code
 ```
 
@@ -64,11 +77,9 @@ Then rehearse on a copy (this is what proves the code you wrote down works):
 ```bash
 rm -rf ~/recovery_test && mkdir -p ~/recovery_test/.yandi_keys
 cp ~/.yandi_keys/auth.json ~/.yandi_keys/node_identity_9000.json ~/recovery_test/.yandi_keys/ && chmod 700 ~/recovery_test ~/recovery_test/.yandi_keys
-./target/release/yandi-keys recover --dir ~/recovery_test/.yandi_keys     # type the code (shown as you type; --hidden hides it)
+./target/release/yandi-keys recover --dir ~/recovery_test/.yandi_keys     # type the master password / code (hidden as you type; --show shows it)
 rm -rf ~/recovery_test
 ```
-
-`migrate --own-password` still lets you choose a password (typed with no echo); the code is the recommended way.
 
 After migration the old files remain as `auth.json.legacy-000` and `node_identity_9000.json.legacy-000`, protected only by the public machine id: keep them until you have
 restarted and checked, then move them somewhere safe or delete them yourself. The tool never deletes them. `new-recovery-code` also keeps the previous `auth.json` as
@@ -86,7 +97,7 @@ existing session is ended. The keys, the identity and the chats are not touched.
 
 ```bash
 # copy auth.json and node_identity_9000.json into ~/.yandi_keys on the new machine (do NOT copy device.key)
-~/yandi/node/target/release/yandi-keys recover        # asks for the recovery code
+~/yandi/node/target/release/yandi-keys recover        # asks for the master password (or recovery code)
 # the same node id comes back; a new device key is made for this machine; the next start needs no code
 ```
 
@@ -94,7 +105,9 @@ A directory copied **with** `device.key` to another machine does not open by its
 old device key as `device.key.replaced-000`. (Recovery from the login page on a machine whose node cannot start is not built: the node stops at start with the instruction to run this command.)
 
 **A clean slate** (a NEW identity, losing the node id and the chat history) is possible but not needed to fix a lost recovery secret: move `~/.yandi_keys` aside
-(`mv ~/.yandi_keys ~/.yandi_keys.old`, never delete it), start the node, complete the web setup, then run `yandi-keys migrate` to get a recovery code.
+(`mv ~/.yandi_keys ~/.yandi_keys.old`, never delete it), stop any running node, start the node, open the setup page and type the new login password and the new master
+password (each twice). The node then has a recoverable key from its first second; `yandi-keys migrate` is not needed. Warnings: the node id changes, chats made under
+the old identity do not open, and paired devices must be paired again.
 
 ## The device key: how strong is it? (honest)
 
@@ -110,7 +123,7 @@ node now stops and changes nothing. In the new format it has no role. Do not set
 
 ## Limits
 
-* A fresh install is still created in the legacy format (the identity is made before the first-run web setup); run `yandi-keys migrate` after the first setup. Reworking the first-run flow is later work.
+* The first-run setup is Unix only; on Windows the node keeps its old setup path (legacy format).
 * The web "rebind" page no longer changes keys: it answers that recovery is done on the command line. The login page has "Forgot password → recovery code" for the web password.
 * Linux and macOS (Unix). On Windows the node keeps its old code path.
 * The SQL / personal memory, Redis and the Core's own storage are **not** encrypted or bound to the root (P1c-2).

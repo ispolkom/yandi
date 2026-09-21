@@ -226,7 +226,6 @@ identity or per-user relationship state yet.
 * The node's master key is decrypted automatically at start on the same machine, but the key that protects it is derived from `/etc/machine-id`, which is not a secret:
   anyone who can read `~/.yandi_keys/auth.json` recovers it, with no password. **The master password cannot re-derive the master key** (its salt is never stored), so it is
   not a recovery path, and a rebind produces a different key. See `docs/KEY_CHAIN_AUDIT.md` (F1, F2).
-* **P1c-1 (key root and identity recovery) is implemented but not yet applied to the owner's directory**: until `yandi-keys migrate` is run, the node keeps the legacy
-  formats, whose master key is protected only by the public machine id (`docs/KEY_RECOVERY.md`). The identity-overwrite hazard (audit F11) is fixed for both formats.
-* A fresh install is created in the legacy format; the web "rebind" page no longer changes keys; Windows keeps the old key code path.
+* **P1c-1 (key root and identity recovery) is implemented** (`docs/KEY_RECOVERY.md`). A directory that is still in the legacy format keeps a master key protected only by the public machine id until `yandi-keys migrate` is run or the directory is recreated through the first-run setup. The identity-overwrite hazard (audit F11) is fixed for both formats.
+* A fresh install (Unix) now starts a first-run web setup where the person types a login password and a master password (each twice); nothing is generated. The web "rebind" page no longer changes keys; Windows keeps the old key code path and legacy format.
 * Supervision is Linux/Unix only (process groups, `/proc`, `PR_SET_PDEATHSIG`); Windows and macOS need their own launcher.

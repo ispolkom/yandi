@@ -1569,6 +1569,7 @@ fn the_tool_makes_shows_and_confirms_a_recovery_code_and_it_restores_the_identit
     let (code, _out, err, _shown) = run_tool_with_code(
         &[
             "migrate",
+            "--generate-code",
             "--dir",
             &dir_a,
             "--machine-id",
@@ -1591,6 +1592,7 @@ fn the_tool_makes_shows_and_confirms_a_recovery_code_and_it_restores_the_identit
     let (code, out, err, shown) = run_tool_with_code(
         &[
             "migrate",
+            "--generate-code",
             "--dir",
             &dir_a,
             "--machine-id",

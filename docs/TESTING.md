@@ -165,3 +165,4 @@ the load policy, atomic writes, migration with rollback, recovery on a "new mach
 node, and the mutation check (`scripts/key_root_mutants.py`, 21 deliberate defects: a failed decrypt that creates or overwrites an identity, a wrong password that leaves a trace, the machine id
 used as a key, a weak hash for the recovery password, a printed password, a migration that cannot restore or keep backups, recovery that returns another identity, …). Everything uses temporary
 directories and a fake machine id: **the owner's real `~/.yandi_keys` is never touched.**
+The node's own tests (`cargo test --lib`, 196) cover the first-run web setup with the person's typed passwords (repeat mismatch, too short, never overwrites, restart, recovery on another "machine" with the typed master password, login-page reset) and the setup-only server (only `/setup` is served, other hosts refused, it stops after success); the mutation script also holds web mutants W1–W3.
