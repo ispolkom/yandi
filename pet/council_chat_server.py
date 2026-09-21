@@ -88,6 +88,7 @@ def _loads_visible_messages(raw: list[str]) -> list[dict]:
     return _visible_council_messages(messages)
 
 from pet.local_guard import EXTENSION_CORS_ORIGIN_REGEX, LocalOnlyMiddleware
+from pet import web_login as _web_login
 
 app = FastAPI()
 # CORS отвечает только расширению Firefox (а не «всем сайтам»); чужие страницы не получают разрешения читать ответы.
@@ -97,6 +98,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Вход по паролю (тот же аккаунт, что у ноды: ~/.yandi_keys/auth.json; pet/web_login.py): запрос из браузера без сессии дальше не идёт.
+app.add_middleware(_web_login.WebLoginMiddleware)
 # Самая внешняя прослойка (добавлена последней): весь сервер, HTTP и WebSocket, по правилу «по умолчанию нельзя»
 # (pet/local_guard.py). Раньше сервер отвечал любому сайту и позволял ему, например, запускать инструменты агента.
 app.add_middleware(LocalOnlyMiddleware)
@@ -116,6 +119,7 @@ from pet.settings_api   import router as _settings_router
 # and stop-token cleanup) instead of reusing it. Import the single owner.
 from pet.chat_translate import _ollama_mini
 
+app.include_router(_web_login.router)      # /login, /setup, /api/auth/*
 app.include_router(_local_router)
 app.include_router(_translate_router)
 app.include_router(_orch_router)
@@ -2213,6 +2217,9 @@ def _build_bootstrap(messages: list) -> str:
 
 # ── routes ────────────────────────────────────────────────────────────────────
 
+HTML = HTML.replace("</body>", _web_login.LOGOUT_SNIPPET + "</body>", 1)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return HTML
@@ -3438,6 +3445,7 @@ if __name__ == "__main__":
     except Exception as _exc:  # noqa: BLE001 — a status line must never stop the server
         print(f"[storage] состояние защиты не определено ({type(_exc).__name__})")
 
+    print(f"[login] {_web_login.startup_line()}")
     print(f"[PET] Запуск на http://{args.host}:{args.port}")
     uvicorn.run(
         app,

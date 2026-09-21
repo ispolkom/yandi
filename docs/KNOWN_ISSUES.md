@@ -231,3 +231,6 @@ identity or per-user relationship state yet.
 * **P1c-1 (key root and identity recovery) is implemented** (`docs/KEY_RECOVERY.md`). A directory that is still in the legacy format keeps a master key protected only by the public machine id until `yandi-keys migrate` is run or the directory is recreated through the first-run setup. The identity-overwrite hazard (audit F11) is fixed for both formats.
 * A fresh install (Unix) now starts a first-run web setup where the person types a login password and a master password (each twice); nothing is generated. The web "rebind" page no longer changes keys; Windows keeps the old key code path and legacy format.
 * Supervision is Linux/Unix only (process groups, `/proc`, `PR_SET_PDEATHSIG`); Windows and macOS need their own launcher.
+
+* **The assistant's web page now has a login (same account as the node), but local programs are not asked** (`docs/WEB_LOGIN.md`): the password gates requests that come from a browser;
+  the agent, the council scripts and `curl` on this computer still reach the assistant's API without one until they move behind the node (P3/P4) or get a service token.
