@@ -8,6 +8,7 @@
 | [EPISTEMIC_CORE.md](EPISTEMIC_CORE.md) | Claims, evidence, trust labels, beliefs, reflection |
 | [EXTENSION.md](EXTENSION.md) | Firefox extension: what it does, build, install, tests, limits |
 | [NODE_CORE_CONTRACT.md](NODE_CORE_CONTRACT.md) | Contract (1.0-rc1) between the node and the YANDI core: invariants, lifecycle, keys, conversation, egress, events, migration; executable form in `contract/` |
+| [CORE_LIFECYCLE.md](CORE_LIFECYCLE.md) | The Python Core's P1 lifecycle boundary: how it is started, locked, unlocked and shut down, and what still goes around the gate |
 | [TESTING.md](TESTING.md) | How to run the regression suites |
 | [KNOWN_ISSUES.md](KNOWN_ISSUES.md) | Open problems and limitations |
 
