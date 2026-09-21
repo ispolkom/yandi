@@ -1,0 +1,189 @@
+{
+  "contract_version": "1.0-rc1",
+  "kind": "scenario-file",
+  "chapter": "p1-lifecycle",
+  "description": "GET /v1/health: open, minimal, the same for everyone (section 5.1, appendix D.1).",
+  "scenarios": [
+    {
+      "id": "health.locked_is_open_and_minimal",
+      "kind": "http",
+      "title": "A fresh core answers health without any secret with exactly {\"state\":\"locked\"}",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.1"
+        },
+        {
+          "invariant": "I8",
+          "section": "D",
+          "clause": "D.1"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/health",
+            "auth": "none"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/health",
+            "body_equals": {
+              "state": "locked"
+            },
+            "must_not_contain": [
+              "@leaks"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "health.answer_does_not_depend_on_the_secret",
+      "kind": "http",
+      "title": "Health says the same with a valid secret as without one",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.1"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "id": "open",
+          "request": {
+            "method": "GET",
+            "path": "/v1/health",
+            "auth": "none"
+          },
+          "expect": {
+            "status": 200,
+            "body_equals": {
+              "state": "locked"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/health"
+          },
+          "expect": {
+            "status": 200,
+            "body_equals": {
+              "state": "locked"
+            },
+            "same_body_as": "open"
+          }
+        }
+      ]
+    },
+    {
+      "id": "health.ready_is_open_and_minimal",
+      "kind": "http",
+      "title": "An unlocked core answers exactly {\"state\":\"ready\"}: no version, implementation, storage or backend",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I8",
+          "section": "5.1"
+        },
+        {
+          "invariant": "I8",
+          "section": "D",
+          "clause": "D.1"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/health",
+            "auth": "none"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/health",
+            "body_equals": {
+              "state": "ready"
+            },
+            "must_not_contain": [
+              "@leaks"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "health.ignores_requests_for_more_detail",
+      "kind": "http",
+      "title": "Asking for verbose or debug output gets the same minimal body",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I8",
+          "section": "5.1"
+        },
+        {
+          "invariant": "I10",
+          "section": "D",
+          "clause": "D.1"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/health?verbose=1&debug=true&detail=full",
+            "auth": "none"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/health",
+            "body_equals": {
+              "state": "locked"
+            },
+            "must_not_contain": [
+              "@leaks"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/health",
+            "auth": "none",
+            "headers": {
+              "X-Debug": "1",
+              "X-Principal": "person_probe01"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_equals": {
+              "state": "locked"
+            },
+            "must_not_contain": [
+              "@leaks"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -28,6 +28,7 @@ The interpreter is `YANDI_PYTHON`, else `./.venv`, else `~/venv`, else `python3`
 | Relationship memory | `agent.message_intensity_regression_test`, `agent.relationship_memory_regression_test`, `agent.relationship_apology_matching_regression_test`, `agent.relationship_healing_clock_regression_test`, `agent.relationship_state_regression_test`, `agent.relationship_commitments_regression_test`, `agent.relationship_direct_fulfilment_regression_test`, `agent.relationship_idempotency_regression_test` |
 | Epistemic / write-back | `agent.epistemic_canonical_trust_shadow_regression_test`, `agent.writeback_episodic_sql_regression_test` |
 | SQL layer | `agent.db_sql_shadow_write_regression_test`, `agent.db_sql_security_injection_regression_test`, `agent.db_sql_test_isolation_regression_test` |
+| Node ⇄ Core contract | `contract.contract_regression_test` — the contract's own files (schemas, fixtures, coverage) and proof that the fixtures bite (needs `jsonschema`, listed in `requirements.txt`); see `contract/README.md` |
 
 ## Tests never touch the live database
 
@@ -139,3 +140,11 @@ security headers, with eight mutants. `python -m pet.web_guard_firefox_e2e` (nee
 in a real headless Firefox and opens a page of another origin: the own page and the extension keep working, the other page can
 read nothing, run no tool, open no WebSocket, and even a "simple" request that needs no preflight has no effect (checked in Redis).
 With the rule switched off the same scenario fails on four points.
+
+## Conformance suite for the Node ⇄ Core contract
+
+`contract/` holds the language-neutral, executable form of `docs/NODE_CORE_CONTRACT.md` (JSON Schemas, scenario fixtures, a runner).
+`python -m contract.runner validate` and `python -m contract.contract_regression_test` are offline and part of the core suite. Running the
+fixtures against a core (`python -m contract.runner run --target-file …`) needs a core started *for the test* with throw-away state; the runner
+refuses the ports of the live system. The recorded baseline of today's Python system is `contract/baseline/red-p1-current-pet.json` (expected: RED,
+the current system implements none of the P1 lifecycle). Details in `contract/README.md`.

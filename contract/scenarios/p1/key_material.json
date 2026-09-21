@@ -1,0 +1,488 @@
+{
+  "contract_version": "1.0-rc1",
+  "kind": "scenario-file",
+  "chapter": "p1-lifecycle",
+  "description": "The derived key lives in memory only and is forgotten on lock (I2, section 5.2). Black-box part first, then the parts that need a hook.",
+  "scenarios": [
+    {
+      "id": "key_material.no_answer_carries_the_key",
+      "kind": "http",
+      "title": "No answer to unlock, capabilities, lock or a refusal contains the key or the launch secret, in body or headers",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.2"
+        },
+        {
+          "invariant": "I8",
+          "section": "D",
+          "clause": "D.7"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.wrong}",
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 403,
+            "error_code": "forbidden",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/unlock.response",
+            "body_pointer": {
+              "/state": "ready"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/capabilities",
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {}
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/lock.response",
+            "body_pointer": {
+              "/state": "locked"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities"
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "key_material.a_failed_unlock_leaves_no_decrypted_state",
+      "kind": "http",
+      "title": "After a wrong key nothing protected works: the core is exactly as locked as before",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.2"
+        },
+        {
+          "invariant": "I2",
+          "section": "D",
+          "clause": "D.3"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.wrong}",
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 403,
+            "error_code": "forbidden",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities"
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {}
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/shutdown",
+            "body": {}
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "assert_health": "locked"
+        }
+      ]
+    },
+    {
+      "id": "key_material.after_lock_protected_requests_are_refused",
+      "kind": "http",
+      "title": "Once locked, the key is gone for every caller: capabilities and lock are 423",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.2"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {}
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/lock.response",
+            "body_pointer": {
+              "/state": "locked"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities"
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {}
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "assert_health": "locked"
+        }
+      ]
+    },
+    {
+      "id": "key_material.key_is_never_written_to_disk",
+      "kind": "http",
+      "title": "After unlock no file in the core's state or runtime directories contains the key or a copy of it",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.2"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "probe": {
+            "name": "storage_scan",
+            "args": {
+              "needles": [
+                "${key.valid}"
+              ],
+              "encodings": [
+                "base64",
+                "raw",
+                "hex"
+              ]
+            },
+            "expect": {
+              "found": false
+            }
+          }
+        }
+      ],
+      "requires": [
+        "storage_probe"
+      ]
+    },
+    {
+      "id": "key_material.no_decrypted_state_exists_while_locked",
+      "kind": "http",
+      "title": "A locked core has produced no decrypted state on disk",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.2"
+        },
+        {
+          "invariant": "I2",
+          "section": "1"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "probe": {
+            "name": "storage_scan",
+            "args": {
+              "scan": "decrypted_state"
+            },
+            "expect": {
+              "present": false
+            }
+          }
+        }
+      ],
+      "requires": [
+        "storage_probe"
+      ]
+    },
+    {
+      "id": "key_material.key_is_forgotten_from_memory_on_lock",
+      "kind": "http",
+      "title": "After lock the process memory no longer holds the key",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.2"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {}
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/lock.response",
+            "body_pointer": {
+              "/state": "locked"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "probe": {
+            "name": "memory_scan",
+            "args": {
+              "needles": [
+                "${key.valid}"
+              ],
+              "encodings": [
+                "base64",
+                "raw",
+                "hex"
+              ]
+            },
+            "expect": {
+              "found": false
+            }
+          }
+        }
+      ],
+      "requires": [
+        "memory_probe"
+      ]
+    },
+    {
+      "id": "key_material.key_is_not_in_the_logs",
+      "kind": "http",
+      "title": "Neither a valid nor a wrong key ever appears in the core's log",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.2"
+        },
+        {
+          "invariant": "I8",
+          "section": "1"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.wrong}",
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 403,
+            "error_code": "forbidden",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/unlock.response",
+            "body_pointer": {
+              "/state": "ready"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "probe": {
+            "name": "log_scan",
+            "args": {
+              "needles": [
+                "${key.valid}",
+                "${key.wrong}",
+                "${secret}"
+              ]
+            },
+            "expect": {
+              "found": false
+            }
+          }
+        }
+      ],
+      "requires": [
+        "log_probe"
+      ]
+    }
+  ]
+}

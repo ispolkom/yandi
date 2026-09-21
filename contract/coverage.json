@@ -1,0 +1,62 @@
+{
+  "contract_version": "1.0-rc1",
+  "description": "What the P1 fixtures prove for each invariant, and what they cannot prove yet. Checked against the fixtures by `python -m contract.runner validate`: a status may not claim more than the fixtures deliver. Only I2 is close to covered; none is declared 'covered' while something remains that needs a hook or a later chapter.",
+  "invariants": {
+    "I1": {
+      "status": "partial",
+      "covers": "A request without the correct bearer secret is refused with 401 in every state, before any other check; X-Principal/X-Actor are not credentials.",
+      "remaining": "Loopback-only listening, the secret not being on the command line, its file mode (0600) and its difference per launch need hooks (socket_probe, process_probe, runtime_file_probe, launch_probe). Constant-time comparison and the separate secret per direction (core API vs node API) are not observable through /v1; the node API arrives with P2."
+    },
+    "I2": {
+      "status": "partial",
+      "covers": "A locked core refuses everything except health and unlock; a wrong key never becomes ready and leaves no protected behaviour; a valid key makes the core ready; lock returns it to locked and the next protected request is refused; the key is never echoed.",
+      "remaining": "'The key exists only in memory' and 'forgotten on lock' need storage_probe, memory_probe and log_probe. 'The master key never leaves the node' is a node-side property with no /v1 surface."
+    },
+    "I3": {
+      "status": "partial",
+      "covers": "capabilities must report an egress_confinement level from the contract's vocabulary; the suite does not require any particular level.",
+      "remaining": "Whether the reported confinement is real (the core cannot open its own connection) needs os_confinement_probe and a supervisor that applies it; egress through the node (classes, outbound log) arrives with P2. Not claimed as covered."
+    },
+    "I4": {
+      "status": "not_yet_testable",
+      "remaining": "Person-to-person chats staying in the node has no /v1 surface in P1; the supervisor fixture that a core crash leaves the node's transport untouched is pending."
+    },
+    "I5": {
+      "status": "not_yet_testable",
+      "remaining": "Trust is never truth concerns conversation turns (P3); P1 has no epistemic field to test."
+    },
+    "I6": {
+      "status": "partial",
+      "covers": "unlock, lock and shutdown honour the idempotency key: same key and body gives the original answer with no second effect, another body is 409, a missing or malformed key is 400, eight simultaneous copies agree.",
+      "remaining": "Lifecycle requests create no history, so 'records live as long as the history' and 'a retry creates no new history' cannot be seen until conversations exist (P3). Shutdown replay needs the drain_hold hook; finish-or-roll-back of an open transaction needs transaction_probe."
+    },
+    "I7": {
+      "status": "not_yet_testable",
+      "remaining": "Models are tools, never YANDI: no P1 request names a model or a backend."
+    },
+    "I8": {
+      "status": "partial",
+      "covers": "Every refusal a P1 request can provoke (wrong or absent secret, wrong key, malformed and hostile bodies, unknown paths) returns the canonical error body with no path, address, socket, backend text, trace, environment name or credential name, and never echoes the secret or the key; health carries nothing but the state.",
+      "remaining": "Errors of endpoints that do not exist yet (egress, conversations, knowledge) and the local log's own content (log_probe)."
+    },
+    "I9": {
+      "status": "partial",
+      "covers": "Requests are strict: an unknown field is 400 on unlock, lock and shutdown, and only 'extensions' is ignored and cannot change what is allowed; answers are additive except the deliberately closed health body; an absent feature is 404, so a node cannot assume it.",
+      "remaining": "The peer edge (fields dropped by the node) and event/answer tolerance of real conversation payloads are P2/P3 chapters."
+    },
+    "I10": {
+      "status": "partial",
+      "covers": "Malformed JSON, wrong types, missing or duplicate fields, invalid UTF-8, deep nesting, oversized bodies, bad identifiers and bad Authorization all fail closed with the canonical code, and nothing is executed.",
+      "remaining": "Ambiguity in requests of later chapters (paths with identifiers, event streams)."
+    },
+    "I11": {
+      "status": "partial",
+      "covers": "X-Principal and X-Actor are optional, independent and opaque on the P1 surface; they grant nothing and change no lifecycle answer.",
+      "remaining": "That memory, trust and mood belong to the principal and that one person on two devices is one subject needs the conversation chapter (P3); it cannot be tested through lifecycle requests."
+    },
+    "I12": {
+      "status": "not_yet_testable",
+      "remaining": "Egress derived only from the present turn needs egress and conversations (P2/P3): a marker seeded into memory must never appear in an egress text."
+    }
+  }
+}

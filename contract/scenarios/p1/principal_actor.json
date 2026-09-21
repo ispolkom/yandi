@@ -1,0 +1,217 @@
+{
+  "contract_version": "1.0-rc1",
+  "kind": "scenario-file",
+  "chapter": "p1-lifecycle",
+  "description": "X-Principal and X-Actor on the P1 surface (I11, appendix D.6). No memory is involved yet.",
+  "scenarios": [
+    {
+      "id": "principal_actor.are_optional_and_independent",
+      "kind": "http",
+      "title": "capabilities is the same with neither header, only the principal, only the actor, or both",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I11",
+          "section": "2"
+        },
+        {
+          "invariant": "I11",
+          "section": "D",
+          "clause": "D.6"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "id": "none",
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/capabilities",
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities",
+            "headers": {
+              "X-Principal": "person_01HZXK3M9Q"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/capabilities",
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ],
+            "same_body_as": "none"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities",
+            "headers": {
+              "X-Actor": "device-abc12345"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/capabilities",
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ],
+            "same_body_as": "none"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities",
+            "headers": {
+              "X-Principal": "person_01HZXK3M9Q",
+              "X-Actor": "device-abc12345"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/capabilities",
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ],
+            "same_body_as": "none"
+          }
+        }
+      ]
+    },
+    {
+      "id": "principal_actor.do_not_change_lifecycle_answers",
+      "kind": "http",
+      "title": "unlock and lock answer the same with either header, both, or neither",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I11",
+          "section": "5.9"
+        },
+        {
+          "invariant": "I11",
+          "section": "D",
+          "clause": "D.6"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            },
+            "headers": {
+              "X-Actor": "device-abc12345"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/unlock.response",
+            "body_pointer": {
+              "/state": "ready"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "headers": {
+              "X-Principal": "person_01HZXK3M9Q"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/lock.response",
+            "body_pointer": {
+              "/state": "locked"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            },
+            "headers": {
+              "X-Principal": "person_01HZXK3M9Q",
+              "X-Actor": "device-abc12345"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/unlock.response",
+            "body_pointer": {
+              "/state": "ready"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "headers": {
+              "X-Principal": "person_other0001",
+              "X-Actor": "device-zzz00001"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/lock.response",
+            "body_pointer": {
+              "/state": "locked"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "assert_health": "locked"
+        }
+      ]
+    }
+  ]
+}

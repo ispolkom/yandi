@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yandi.invalid/contract/1.0-rc1/schemas/common/identifiers.schema.json",
+  "x-contract-version": "1.0-rc1",
+  "title": "Shared value types",
+  "description": "Building blocks referenced by the other schemas (contract section 4 and appendix D).",
+  "$defs": {
+    "idempotency_key": {
+      "description": "Section 4: [A-Za-z0-9_-]{8,64}.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{8,64}$"
+    },
+    "request_id": {
+      "description": "Opaque trace id, echoed back, decides nothing (section 4).",
+      "type": "string",
+      "maxLength": 128
+    },
+    "key_b64_32": {
+      "description": "Appendix D.2: standard base64 (with padding) of exactly 32 bytes.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9+/]{43}=$"
+    },
+    "context": {
+      "description": "Section 5.2: the only key-derivation context of v1.",
+      "const": "yandi/core/v1"
+    },
+    "health_state": {
+      "description": "States a running core can report through health (section 5.1); 'stopped' means the process is gone and nothing answers.",
+      "enum": ["starting", "locked", "ready", "draining", "failed"]
+    },
+    "egress_confinement": {
+      "description": "Section 1.1: how far the operating system confines the core's own sockets.",
+      "enum": ["none", "firewall", "namespace"]
+    },
+    "contract_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+(-rc[0-9]+)?$"
+    },
+    "extensions": {
+      "description": "Section 4 and I9: the one place a request may carry fields the receiver does not know; ignored, never security-relevant.",
+      "type": "object"
+    },
+    "error_code": {
+      "description": "Appendix A.",
+      "enum": ["invalid_payload", "unauthorized", "forbidden", "not_found", "idempotency_conflict", "payload_too_large",
+               "locked", "rate_limited", "backend_error", "unavailable", "internal"]
+    }
+  }
+}

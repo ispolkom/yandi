@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yandi.invalid/contract/1.0-rc1/schemas/lifecycle/health.schema.json",
+  "x-contract-version": "1.0-rc1",
+  "title": "GET /v1/health response",
+  "description": "Section 5.1 and appendix D.1: exactly {\"state\": ...} and nothing else. The one deliberately CLOSED response: an open endpoint must not grow details (no version, implementation, storage, path or backend), so additive growth is refused here on purpose.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state"],
+  "properties": {"state": {"$ref": "../common/identifiers.schema.json#/$defs/health_state"}}
+}

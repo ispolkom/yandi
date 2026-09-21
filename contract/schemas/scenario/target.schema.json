@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yandi.invalid/contract/1.0-rc1/schemas/scenario/target.schema.json",
+  "x-contract-version": "1.0-rc1",
+  "title": "External target description",
+  "description": "A core that is already running and was started for the test: where it listens and the secrets it was given. The runner refuses non-loopback hosts and the ports of the live system.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "base_url", "launch_secret", "unlock_key"],
+  "properties": {
+    "name": {"type": "string", "minLength": 1},
+    "base_url": {"type": "string", "pattern": "^http://(127\\.0\\.0\\.1|localhost|\\[::1\\]):[0-9]{2,5}$"},
+    "launch_secret": {"type": "string", "minLength": 16},
+    "unlock_key": {"$ref": "../common/identifiers.schema.json#/$defs/key_b64_32"},
+    "hooks": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+  }
+}

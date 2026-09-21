@@ -1,0 +1,184 @@
+{
+  "contract_version": "1.0-rc1",
+  "kind": "scenario-file",
+  "chapter": "p1-lifecycle",
+  "description": "GET /v1/capabilities: what this implementation supports (sections 5.1, 1.1; appendix D.1).",
+  "scenarios": [
+    {
+      "id": "capabilities.answer_has_the_contract_shape",
+      "kind": "http",
+      "title": "After unlock, capabilities matches the schema and names the contract version it implements",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I9",
+          "section": "5.1"
+        },
+        {
+          "invariant": "I9",
+          "section": "D",
+          "clause": "D.1"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/capabilities",
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ],
+            "body_pointer": {
+              "/contract": "${contract_version}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "capabilities.reports_the_egress_confinement_level",
+      "kind": "http",
+      "title": "The core reports one of none, firewall or namespace; the suite does not demand a level",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I3",
+          "section": "1.1"
+        },
+        {
+          "invariant": "I3",
+          "section": "5.1"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/capabilities",
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ],
+            "body_pointer_in": {
+              "/egress_confinement": [
+                "none",
+                "firewall",
+                "namespace"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "capabilities.leaks_nothing",
+      "kind": "http",
+      "title": "The capabilities answer holds no path, socket, trace, secret or key",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I8",
+          "section": "5.1"
+        },
+        {
+          "invariant": "I8",
+          "section": "D",
+          "clause": "D.7"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/capabilities",
+            "must_not_contain": [
+              "@leaks:paths",
+              "@leaks:sockets",
+              "@leaks:traces",
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "capabilities.absent_feature_is_not_found",
+      "kind": "http",
+      "title": "A core that does not list 'conversation' answers its endpoints 404 not_found, so a node cannot assume it",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I9",
+          "section": "5.1"
+        },
+        {
+          "invariant": "I9",
+          "section": "D",
+          "clause": "D.3"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/conversations",
+            "body": {}
+          },
+          "expect": {
+            "status": 404,
+            "error_code": "not_found",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/conversations/conv_absent01/turns"
+          },
+          "expect": {
+            "status": 404,
+            "error_code": "not_found",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        }
+      ],
+      "applies_when": {
+        "feature_absent": "conversation"
+      }
+    }
+  ]
+}

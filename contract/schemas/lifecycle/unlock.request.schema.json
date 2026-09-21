@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yandi.invalid/contract/1.0-rc1/schemas/lifecycle/unlock.request.schema.json",
+  "x-contract-version": "1.0-rc1",
+  "title": "POST /v1/unlock request",
+  "description": "Section 5.2, appendix D.2. A request: strict (I9) — a field not listed here is refused, except inside 'extensions'.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["key", "context"],
+  "properties": {
+    "key": {"$ref": "../common/identifiers.schema.json#/$defs/key_b64_32"},
+    "context": {"$ref": "../common/identifiers.schema.json#/$defs/context"},
+    "extensions": {"$ref": "../common/identifiers.schema.json#/$defs/extensions"}
+  }
+}

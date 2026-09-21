@@ -1,0 +1,591 @@
+{
+  "contract_version": "1.0-rc1",
+  "kind": "scenario-file",
+  "chapter": "p1-lifecycle",
+  "description": "Errors never leak internals (I8, appendix D.7): provoke every refusal, then look at what came back.",
+  "scenarios": [
+    {
+      "id": "sanitization.refusals_on_a_ready_core_leak_nothing",
+      "kind": "http",
+      "title": "Path tricks, bad encodings, deep nesting, control characters: every answer is a canonical error without paths, addresses, backends, traces or names",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I8",
+          "section": "4"
+        },
+        {
+          "invariant": "I8",
+          "section": "D",
+          "clause": "D.7"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/../../etc/passwd"
+          },
+          "expect": {
+            "status_in": [
+              400,
+              404
+            ],
+            "error_code_in": [
+              "not_found",
+              "invalid_payload"
+            ],
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/%zz%00"
+          },
+          "expect": {
+            "status_in": [
+              400,
+              404
+            ],
+            "error_code_in": [
+              "not_found",
+              "invalid_payload"
+            ],
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/no-such-endpoint"
+          },
+          "expect": {
+            "status": 404,
+            "error_code": "not_found",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body_generated": {
+              "kind": "nested_arrays",
+              "depth": 30000
+            }
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body_hex": "7b226b6579223a22fffe222c22636f6e74657874223a2279616e64692f636f72652f7631227d"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/shutdown",
+            "body_raw": "{\"deadline_ms\": 1e999}"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body_raw": "{\"extensions\": \"\\u0000\\ud800\"}"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "idempotency_key": "x"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "assert_health": "ready"
+        }
+      ]
+    },
+    {
+      "id": "sanitization.refusals_on_a_locked_core_leak_nothing",
+      "kind": "http",
+      "title": "Wrong key, wrong context, control characters, oversized body, no secret, locked endpoints: no internals in any answer",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I8",
+          "section": "4"
+        },
+        {
+          "invariant": "I8",
+          "section": "D",
+          "clause": "D.7"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.wrong}",
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 403,
+            "error_code": "forbidden",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "nope"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "\u0000\u0001",
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": 1,
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            },
+            "body_pad_to": 70000
+          },
+          "expect": {
+            "status": 413,
+            "error_code": "payload_too_large",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body_hex": "7b226b6579223a22fffe222c22636f6e74657874223a2279616e64692f636f72652f7631227d"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            },
+            "auth": "none"
+          },
+          "expect": {
+            "status": 401,
+            "error_code": "unauthorized",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities"
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {}
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/shutdown",
+            "body": {}
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "assert_health": "locked"
+        }
+      ]
+    },
+    {
+      "id": "sanitization.errors_never_echo_credentials",
+      "kind": "http",
+      "title": "The launch secret and the unlock key never come back in an error, even when the request carried them in the wrong place",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I8",
+          "section": "D",
+          "clause": "D.7"
+        },
+        {
+          "invariant": "I2",
+          "section": "5.2"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "nope"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "Key": "${key.valid}",
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.wrong}",
+              "context": "${context}",
+              "secret": "${secret}"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}",
+              "extra": "${secret}"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities",
+            "auth": {
+              "authorization": "Bearer ${secret}x"
+            }
+          },
+          "expect": {
+            "status": 401,
+            "error_code": "unauthorized",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.wrong}",
+              "context": "${context}"
+            },
+            "headers": {
+              "X-Actor": "${secret}"
+            }
+          },
+          "expect": {
+            "status": 403,
+            "error_code": "forbidden",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "assert_health": "locked"
+        }
+      ]
+    },
+    {
+      "id": "sanitization.unknown_endpoint_is_the_canonical_not_found",
+      "kind": "http",
+      "title": "An unknown path is 404 with the uniform error body",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I8",
+          "section": "4"
+        },
+        {
+          "invariant": "I10",
+          "section": "D",
+          "clause": "D.3"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/no-such-endpoint"
+          },
+          "expect": {
+            "status": 404,
+            "error_code": "not_found",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/no-such-endpoint",
+            "body": {}
+          },
+          "expect": {
+            "status": 404,
+            "error_code": "not_found",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -37,7 +37,7 @@ run_one() {
 }
 export -f run_one
 
-find agent pet llm_gateway -name '*_test.py' | sed 's/\.py$//; s#/#.#g' | sort | xargs -P "$JOBS" -I{} bash -c 'run_one {}'
+find agent pet llm_gateway contract -name '*_test.py' | sed 's/\.py$//; s#/#.#g' | sort | xargs -P "$JOBS" -I{} bash -c 'run_one {}'
 
 total="$(wc -l <"$OUT/results.txt")"
 failed="$(awk '$1!=0 {print $2}' "$OUT/results.txt" | sort)"

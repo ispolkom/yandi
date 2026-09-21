@@ -1,0 +1,181 @@
+{
+  "contract_version": "1.0-rc1",
+  "kind": "scenario-file",
+  "chapter": "p1-lifecycle",
+  "description": "A locked core refuses everything except health and unlock (I2, appendix D.3).",
+  "scenarios": [
+    {
+      "id": "locked.refuses_everything_except_health_and_unlock",
+      "kind": "http",
+      "title": "capabilities, lock and shutdown on a locked core are 423 locked; shutdown does not run",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "1"
+        },
+        {
+          "invariant": "I2",
+          "section": "D",
+          "clause": "D.3"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities"
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {}
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/shutdown",
+            "body": {}
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/shutdown",
+            "body": {
+              "deadline_ms": 1000
+            }
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/health",
+            "auth": "none"
+          },
+          "expect": {
+            "status": 200,
+            "body_equals": {
+              "state": "locked"
+            }
+          }
+        },
+        {
+          "assert_health": "locked"
+        }
+      ]
+    },
+    {
+      "id": "locked.refusals_leave_the_core_usable",
+      "kind": "http",
+      "title": "After being refused, the core still unlocks normally",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.2"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities"
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/unlock.response",
+            "body_pointer": {
+              "/state": "ready"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "assert_health": "ready"
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/capabilities",
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

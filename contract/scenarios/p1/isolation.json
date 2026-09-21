@@ -1,0 +1,47 @@
+{
+  "contract_version": "1.0-rc1",
+  "kind": "scenario-file",
+  "chapter": "p1-lifecycle",
+  "description": "The core's own network access (I3, section 1.1): the reported level is tested, no level is demanded.",
+  "scenarios": [
+    {
+      "id": "isolation.reported_level_is_effective",
+      "kind": "http",
+      "title": "When the core reports 'firewall' or 'namespace', it cannot open a connection of its own to an outside address",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I3",
+          "section": "1.1"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "probe": {
+            "name": "outbound_connect",
+            "args": {
+              "host": "192.0.2.1",
+              "port": 9,
+              "timeout_ms": 1500
+            },
+            "expect": {
+              "connected": false
+            }
+          }
+        }
+      ],
+      "requires": [
+        "os_confinement_probe"
+      ],
+      "applies_when": {
+        "egress_confinement_in": [
+          "firewall",
+          "namespace"
+        ]
+      }
+    }
+  ]
+}

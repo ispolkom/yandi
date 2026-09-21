@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yandi.invalid/contract/1.0-rc1/schemas/lifecycle/capabilities.schema.json",
+  "x-contract-version": "1.0-rc1",
+  "title": "GET /v1/capabilities response",
+  "description": "Section 5.1, section 1.1 and appendix D.1. A response: additive (I9). A caller assumes no feature that is not in 'features'; an empty list is a valid, partial implementation.",
+  "type": "object",
+  "required": ["contract", "implementation", "features", "limits", "storage_schema", "egress_confinement"],
+  "properties": {
+    "contract": {"$ref": "../common/identifiers.schema.json#/$defs/contract_version"},
+    "implementation": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {"name": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}}
+    },
+    "features": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{0,63}$"}
+    },
+    "limits": {"type": "object"},
+    "storage_schema": {"type": "integer", "minimum": 0},
+    "egress_confinement": {"$ref": "../common/identifiers.schema.json#/$defs/egress_confinement"}
+  }
+}

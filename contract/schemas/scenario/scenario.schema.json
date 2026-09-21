@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yandi.invalid/contract/1.0-rc1/schemas/scenario/scenario.schema.json",
+  "x-contract-version": "1.0-rc1",
+  "title": "Scenario file (meta-schema)",
+  "description": "The shape every fixture file under contract/scenarios must have. Closed everywhere (additionalProperties false): a misspelt key such as 'expected_statuz' is rejected before any request is sent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "kind", "chapter", "description", "scenarios"],
+  "properties": {
+    "contract_version": {"$ref": "../common/identifiers.schema.json#/$defs/contract_version"},
+    "kind": {"const": "scenario-file"},
+    "chapter": {"type": "string", "pattern": "^p[0-9]+(-[a-z0-9]+)*$"},
+    "description": {"type": "string", "minLength": 1},
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"oneOf": [{"$ref": "#/$defs/http_scenario"}, {"$ref": "#/$defs/supervisor_scenario"}]}
+    }
+  },
+  "$defs": {
+    "scenario_id": {"type": "string", "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)+$"},
+    "state": {"enum": ["locked", "ready"]},
+    "trace": {
+      "description": "Every fixture says which contract section and which invariant it defends.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invariant", "section"],
+      "properties": {
+        "invariant": {"type": "string", "pattern": "^I([1-9]|1[0-2])$"},
+        "section": {"type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?|[A-D])$"},
+        "clause": {"type": "string", "minLength": 1}
+      }
+    },
+    "hook": {
+      "description": "Something only a target that offers it can provide; a target without it reports 'unsupported', never a false pass.",
+      "enum": ["restart", "drain_hold", "process_probe", "runtime_file_probe", "socket_probe", "storage_probe",
+               "memory_probe", "log_probe", "os_confinement_probe", "transaction_probe", "launch_probe"]
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "path"],
+      "properties": {
+        "method": {"enum": ["GET", "POST", "PUT", "DELETE"]},
+        "path": {"type": "string", "pattern": "^/"},
+        "auth": {
+          "description": "'launch_secret' (default), 'none', or an object with the literal Authorization header value.",
+          "oneOf": [
+            {"enum": ["launch_secret", "none"]},
+            {"type": "object", "additionalProperties": false, "required": ["authorization"],
+             "properties": {"authorization": {"type": "string"}}}
+          ]
+        },
+        "idempotency_key": {"type": "string", "description": "'auto' (a fresh valid key), 'none' (omit), or a literal."},
+        "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+        "body": {"description": "JSON value sent as the body."},
+        "body_raw": {"type": "string", "description": "Sent byte for byte as UTF-8."},
+        "body_hex": {"type": "string", "pattern": "^([0-9a-f]{2})*$", "description": "Sent as these raw bytes."},
+        "body_pad_to": {"type": "integer", "minimum": 1, "maximum": 4194304, "description": "Pads body.extensions.pad so the serialised body is exactly this many bytes."},
+        "body_generated": {
+          "type": "object", "additionalProperties": false, "required": ["kind", "depth"],
+          "properties": {"kind": {"const": "nested_arrays"}, "depth": {"type": "integer", "minimum": 1, "maximum": 32000}}
+        }
+      }
+    },
+    "expect": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {"type": "integer", "minimum": 100, "maximum": 599},
+        "status_in": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"type": "integer", "minimum": 100, "maximum": 599}},
+        "error_code": {"$ref": "../common/identifiers.schema.json#/$defs/error_code"},
+        "error_code_in": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"$ref": "../common/identifiers.schema.json#/$defs/error_code"}},
+        "body_schema": {"type": "string", "pattern": "^(common|lifecycle)/[a-z_.]+$"},
+        "body_equals": {},
+        "body_pointer": {"type": "object", "minProperties": 1},
+        "body_pointer_in": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "array", "minItems": 1}},
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object", "additionalProperties": false, "minProperties": 1,
+            "properties": {"equals": {"type": "string"}, "starts_with": {"type": "string"}, "absent": {"const": true}}
+          }
+        },
+        "must_not_contain": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "same_body_as": {"type": "string", "pattern": "^[a-z0-9_]+$"}
+      }
+    },
+    "step": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["request", "expect"],
+         "properties": {"id": {"type": "string", "pattern": "^[a-z0-9_]+$"}, "request": {"$ref": "#/$defs/request"}, "expect": {"$ref": "#/$defs/expect"}}},
+        {"type": "object", "additionalProperties": false, "required": ["parallel"],
+         "properties": {"id": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+                        "parallel": {"type": "object", "additionalProperties": false, "required": ["count", "request", "expect_all"],
+                                     "properties": {"count": {"type": "integer", "minimum": 2, "maximum": 64},
+                                                    "request": {"$ref": "#/$defs/request"},
+                                                    "expect_all": {"$ref": "#/$defs/expect"},
+                                                    "identical_bodies": {"type": "boolean"}}}}},
+        {"type": "object", "additionalProperties": false, "required": ["assert_health"],
+         "properties": {"id": {"type": "string", "pattern": "^[a-z0-9_]+$"}, "assert_health": {"$ref": "../common/identifiers.schema.json#/$defs/health_state"}}},
+        {"type": "object", "additionalProperties": false, "required": ["wait_stopped"],
+         "properties": {"id": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+                        "wait_stopped": {"type": "object", "additionalProperties": false, "required": ["timeout_ms"],
+                                         "properties": {"timeout_ms": {"type": "integer", "minimum": 100, "maximum": 60000},
+                                                        "allowed_health_states": {"type": "array", "items": {"enum": ["draining"]}}}}}},
+        {"type": "object", "additionalProperties": false, "required": ["probe"],
+         "properties": {"id": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+                        "probe": {"type": "object", "additionalProperties": false, "required": ["name"],
+                                  "properties": {"name": {"enum": ["release_drain", "process_argv", "runtime_file_mode", "listen_addresses",
+                                                                   "storage_scan", "memory_scan", "log_scan", "outbound_connect", "open_transaction",
+                                                                   "launch_twice_secrets"]},
+                                                 "args": {"type": "object"},
+                                                 "expect": {"type": "object"}}}}}
+      ]
+    },
+    "http_scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "title", "status", "traces", "given", "steps"],
+      "properties": {
+        "id": {"$ref": "#/$defs/scenario_id"},
+        "kind": {"const": "http"},
+        "title": {"type": "string", "minLength": 1},
+        "status": {"enum": ["active", "pending"]},
+        "pending_reason": {"type": "string", "minLength": 1},
+        "traces": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/trace"}},
+        "requires": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/hook"}},
+        "destructive": {"type": "boolean", "description": "Ends or breaks the core; needs the 'restart' hook."},
+        "applies_when": {
+          "type": "object", "additionalProperties": false, "minProperties": 1,
+          "properties": {"feature_absent": {"type": "string"}, "egress_confinement_in": {"type": "array", "minItems": 1, "items": {"$ref": "../common/identifiers.schema.json#/$defs/egress_confinement"}}}
+        },
+        "given": {"type": "object", "additionalProperties": false, "required": ["state"], "properties": {"state": {"$ref": "#/$defs/state"}}},
+        "steps": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/step"}}
+      },
+      "if": {"properties": {"status": {"const": "pending"}}},
+      "then": {"required": ["pending_reason"]}
+    },
+    "supervisor_scenario": {
+      "description": "Data only: the runner does not execute these until a supervisor exists (status pending, chapter p1-supervisor).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "title", "status", "pending_reason", "chapter", "traces", "config", "timeline", "expect"],
+      "properties": {
+        "id": {"$ref": "#/$defs/scenario_id"},
+        "kind": {"const": "supervisor"},
+        "title": {"type": "string", "minLength": 1},
+        "status": {"const": "pending"},
+        "chapter": {"const": "p1-supervisor"},
+        "pending_reason": {"type": "string", "minLength": 1},
+        "traces": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/trace"}},
+        "config": {"type": "object", "additionalProperties": false,
+                   "properties": {"restart_limit": {"type": "integer", "minimum": 1}, "window_s": {"type": "integer", "minimum": 1},
+                                  "backoff_min_ms": {"type": "integer", "minimum": 0}, "backoff_max_ms": {"type": "integer", "minimum": 0}}},
+        "timeline": {"type": "array", "minItems": 1, "items": {
+          "type": "object", "additionalProperties": false, "required": ["core"],
+          "properties": {"core": {"enum": ["starts", "answers_locked", "answers_ready", "exits_crash", "exits_clean", "never_answers"]},
+                         "times": {"type": "integer", "minimum": 1}}}},
+        "expect": {"type": "array", "minItems": 1, "items": {
+          "type": "object", "additionalProperties": false, "required": ["node"],
+          "properties": {"node": {"enum": ["starts_core", "polls_health", "unlocks", "restarts_core", "stops_restarting", "reports_failure", "keeps_serving_transport"]},
+                         "until_state": {"$ref": "../common/identifiers.schema.json#/$defs/health_state"},
+                         "attempts": {"type": "integer", "minimum": 1},
+                         "delays_non_decreasing": {"type": "boolean"},
+                         "reason_must_not_contain": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}}}}
+      }
+    }
+  }
+}

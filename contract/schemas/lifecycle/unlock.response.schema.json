@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yandi.invalid/contract/1.0-rc1/schemas/lifecycle/unlock.response.schema.json",
+  "x-contract-version": "1.0-rc1",
+  "title": "POST /v1/unlock response",
+  "description": "Appendix D.1. A response: additive (I9), a consumer ignores fields it does not know.",
+  "type": "object",
+  "required": ["state"],
+  "properties": {"state": {"const": "ready"}}
+}

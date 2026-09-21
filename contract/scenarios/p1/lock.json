@@ -1,0 +1,291 @@
+{
+  "contract_version": "1.0-rc1",
+  "kind": "scenario-file",
+  "chapter": "p1-lifecycle",
+  "description": "POST /v1/lock (section 5.2): the key is forgotten, the core is locked again.",
+  "scenarios": [
+    {
+      "id": "lock.ready_becomes_locked_and_can_unlock_again",
+      "kind": "http",
+      "title": "lock: 200 locked; the next protected request is refused; a new unlock works",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.2"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {}
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/lock.response",
+            "body_pointer": {
+              "/state": "locked"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "assert_health": "locked"
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities"
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/unlock.response",
+            "body_pointer": {
+              "/state": "ready"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "assert_health": "ready"
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/capabilities",
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "lock.unknown_field_is_rejected",
+      "kind": "http",
+      "title": "A field the schema does not list is 400 and the core is not locked",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I9",
+          "section": "4"
+        },
+        {
+          "invariant": "I10",
+          "section": "D",
+          "clause": "D.3"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {
+              "reason": "test"
+            }
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "assert_health": "ready"
+        }
+      ]
+    },
+    {
+      "id": "lock.body_must_be_an_object",
+      "kind": "http",
+      "title": "An array, a string, a number or null is 400 and the core is not locked",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I10",
+          "section": "D",
+          "clause": "D.2"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body_raw": "[]"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body_raw": "\"lock\""
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body_raw": "1"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body_raw": "null"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body_raw": "true"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "assert_health": "ready"
+        }
+      ]
+    },
+    {
+      "id": "lock.extensions_object_is_ignored",
+      "kind": "http",
+      "title": "extensions is accepted and does not disturb the answer",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I9",
+          "section": "4"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {
+              "extensions": {
+                "why": "idle"
+              }
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/lock.response",
+            "body_pointer": {
+              "/state": "locked"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "assert_health": "locked"
+        }
+      ]
+    }
+  ]
+}

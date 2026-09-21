@@ -1,0 +1,251 @@
+{
+  "contract_version": "1.0-rc1",
+  "kind": "scenario-file",
+  "chapter": "p1-lifecycle",
+  "description": "The lifecycle as a whole (section 5.1).",
+  "scenarios": [
+    {
+      "id": "state_machine.full_life_of_a_core",
+      "kind": "http",
+      "title": "locked → unlock → ready → lock → locked → unlock → ready → shutdown → stopped",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.1"
+        },
+        {
+          "invariant": "I2",
+          "section": "5.2"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "assert_health": "locked"
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/unlock.response",
+            "body_pointer": {
+              "/state": "ready"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "assert_health": "ready"
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {}
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/lock.response",
+            "body_pointer": {
+              "/state": "locked"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "assert_health": "locked"
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/unlock.response",
+            "body_pointer": {
+              "/state": "ready"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "assert_health": "ready"
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/shutdown",
+            "body": {
+              "deadline_ms": 5000
+            }
+          },
+          "expect": {
+            "status": 202,
+            "body_schema": "lifecycle/shutdown.response",
+            "body_pointer": {
+              "/state": "draining"
+            }
+          }
+        },
+        {
+          "wait_stopped": {
+            "timeout_ms": 15000,
+            "allowed_health_states": [
+              "draining"
+            ]
+          }
+        }
+      ],
+      "requires": [
+        "restart"
+      ],
+      "destructive": true
+    },
+    {
+      "id": "state_machine.failure_path_stays_locked",
+      "kind": "http",
+      "title": "locked → wrong unlock → locked, and the core can still be unlocked afterwards",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.1"
+        },
+        {
+          "invariant": "I2",
+          "section": "5.2"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "assert_health": "locked"
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.wrong}",
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 403,
+            "error_code": "forbidden",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "assert_health": "locked"
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/capabilities"
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/unlock.response",
+            "body_pointer": {
+              "/state": "ready"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "assert_health": "ready"
+        }
+      ]
+    },
+    {
+      "id": "state_machine.a_core_never_reports_ready_by_itself",
+      "kind": "http",
+      "title": "Left alone, a locked core keeps answering locked",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.1"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "assert_health": "locked"
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/health",
+            "auth": "none"
+          },
+          "expect": {
+            "status": 200,
+            "body_equals": {
+              "state": "locked"
+            }
+          }
+        },
+        {
+          "assert_health": "locked"
+        }
+      ]
+    }
+  ]
+}

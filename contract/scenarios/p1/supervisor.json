@@ -1,0 +1,272 @@
+{
+  "contract_version": "1.0-rc1",
+  "kind": "scenario-file",
+  "chapter": "p1-supervisor",
+  "description": "What the node's supervisor must do around a core (section 5.1 'Supervision'). Pending until a supervisor exists.",
+  "scenarios": [
+    {
+      "id": "supervisor.starts_waits_for_locked_unlocks_and_waits_for_ready",
+      "kind": "supervisor",
+      "title": "Start, wait for locked, unlock, wait for ready",
+      "status": "pending",
+      "chapter": "p1-supervisor",
+      "pending_reason": "No supervisor exists yet (P1 implementation). These are language-neutral data for the node's supervisor; the runner does not execute them.",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.1"
+        },
+        {
+          "invariant": "I2",
+          "section": "5.2"
+        }
+      ],
+      "config": {},
+      "timeline": [
+        {
+          "core": "starts"
+        },
+        {
+          "core": "answers_locked"
+        },
+        {
+          "core": "answers_ready"
+        }
+      ],
+      "expect": [
+        {
+          "node": "starts_core"
+        },
+        {
+          "node": "polls_health",
+          "until_state": "locked"
+        },
+        {
+          "node": "unlocks"
+        },
+        {
+          "node": "polls_health",
+          "until_state": "ready"
+        }
+      ]
+    },
+    {
+      "id": "supervisor.restarts_a_crashed_core_with_backoff",
+      "kind": "supervisor",
+      "title": "A core that exits is restarted, waiting longer each time",
+      "status": "pending",
+      "chapter": "p1-supervisor",
+      "pending_reason": "No supervisor exists yet (P1 implementation). These are language-neutral data for the node's supervisor; the runner does not execute them.",
+      "traces": [
+        {
+          "invariant": "I10",
+          "section": "5.1"
+        }
+      ],
+      "config": {
+        "restart_limit": 5,
+        "window_s": 60,
+        "backoff_min_ms": 100,
+        "backoff_max_ms": 30000
+      },
+      "timeline": [
+        {
+          "core": "starts"
+        },
+        {
+          "core": "exits_crash",
+          "times": 3
+        }
+      ],
+      "expect": [
+        {
+          "node": "restarts_core",
+          "attempts": 3,
+          "delays_non_decreasing": true
+        }
+      ]
+    },
+    {
+      "id": "supervisor.a_restarted_core_is_unlocked_again",
+      "kind": "supervisor",
+      "title": "A restarted core starts locked (the key died with the process) and is unlocked again",
+      "status": "pending",
+      "chapter": "p1-supervisor",
+      "pending_reason": "No supervisor exists yet (P1 implementation). These are language-neutral data for the node's supervisor; the runner does not execute them.",
+      "traces": [
+        {
+          "invariant": "I2",
+          "section": "5.2"
+        },
+        {
+          "invariant": "I2",
+          "section": "5.1"
+        }
+      ],
+      "config": {
+        "restart_limit": 5,
+        "window_s": 60
+      },
+      "timeline": [
+        {
+          "core": "starts"
+        },
+        {
+          "core": "answers_locked"
+        },
+        {
+          "core": "answers_ready"
+        },
+        {
+          "core": "exits_crash"
+        },
+        {
+          "core": "starts"
+        },
+        {
+          "core": "answers_locked"
+        }
+      ],
+      "expect": [
+        {
+          "node": "restarts_core"
+        },
+        {
+          "node": "polls_health",
+          "until_state": "locked"
+        },
+        {
+          "node": "unlocks"
+        }
+      ]
+    },
+    {
+      "id": "supervisor.stops_after_n_failures_in_the_window",
+      "kind": "supervisor",
+      "title": "After N failures inside the window the supervisor stops restarting and reports a safe reason",
+      "status": "pending",
+      "chapter": "p1-supervisor",
+      "pending_reason": "No supervisor exists yet (P1 implementation). These are language-neutral data for the node's supervisor; the runner does not execute them.",
+      "traces": [
+        {
+          "invariant": "I10",
+          "section": "5.1"
+        },
+        {
+          "invariant": "I8",
+          "section": "5.1"
+        }
+      ],
+      "config": {
+        "restart_limit": 3,
+        "window_s": 60
+      },
+      "timeline": [
+        {
+          "core": "starts"
+        },
+        {
+          "core": "exits_crash",
+          "times": 4
+        }
+      ],
+      "expect": [
+        {
+          "node": "restarts_core",
+          "attempts": 3
+        },
+        {
+          "node": "stops_restarting"
+        },
+        {
+          "node": "reports_failure",
+          "reason_must_not_contain": [
+            "@leaks"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "supervisor.a_core_that_never_answers_is_not_waited_for_forever",
+      "kind": "supervisor",
+      "title": "A core that never reports locked is given up on, with a safe reason",
+      "status": "pending",
+      "chapter": "p1-supervisor",
+      "pending_reason": "No supervisor exists yet (P1 implementation). These are language-neutral data for the node's supervisor; the runner does not execute them.",
+      "traces": [
+        {
+          "invariant": "I10",
+          "section": "5.1"
+        },
+        {
+          "invariant": "I8",
+          "section": "5.1"
+        }
+      ],
+      "config": {
+        "restart_limit": 2,
+        "window_s": 60
+      },
+      "timeline": [
+        {
+          "core": "starts"
+        },
+        {
+          "core": "never_answers",
+          "times": 3
+        }
+      ],
+      "expect": [
+        {
+          "node": "polls_health",
+          "until_state": "locked"
+        },
+        {
+          "node": "stops_restarting"
+        },
+        {
+          "node": "reports_failure",
+          "reason_must_not_contain": [
+            "@leaks"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "supervisor.core_crash_does_not_touch_the_node",
+      "kind": "supervisor",
+      "title": "While the core is down or restarting, the node's own transport and chats keep working",
+      "status": "pending",
+      "chapter": "p1-supervisor",
+      "pending_reason": "No supervisor exists yet (P1 implementation). These are language-neutral data for the node's supervisor; the runner does not execute them.",
+      "traces": [
+        {
+          "invariant": "I4",
+          "section": "5.1"
+        },
+        {
+          "invariant": "I1",
+          "section": "3"
+        }
+      ],
+      "config": {
+        "restart_limit": 3,
+        "window_s": 60
+      },
+      "timeline": [
+        {
+          "core": "starts"
+        },
+        {
+          "core": "exits_crash",
+          "times": 2
+        }
+      ],
+      "expect": [
+        {
+          "node": "keeps_serving_transport"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,740 @@
+{
+  "contract_version": "1.0-rc1",
+  "kind": "scenario-file",
+  "chapter": "p1-lifecycle",
+  "description": "Idempotency on lifecycle mutations (I6, section 4, appendix D.4-D.5).",
+  "scenarios": [
+    {
+      "id": "idempotency.unlock_same_key_same_body_gives_the_same_answer",
+      "kind": "http",
+      "title": "A retried unlock is answered from the record: same 200, no second effect",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I6",
+          "section": "4"
+        },
+        {
+          "invariant": "I6",
+          "section": "D",
+          "clause": "D.5"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "id": "first",
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            },
+            "idempotency_key": "idem-a-${run}"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/unlock.response",
+            "body_pointer": {
+              "/state": "ready"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            },
+            "idempotency_key": "idem-a-${run}"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/unlock.response",
+            "body_pointer": {
+              "/state": "ready"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ],
+            "same_body_as": "first"
+          }
+        },
+        {
+          "assert_health": "ready"
+        }
+      ]
+    },
+    {
+      "id": "idempotency.unlock_delivered_eight_times_at_once",
+      "kind": "http",
+      "title": "Eight simultaneous copies of one unlock all get the same 200",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I6",
+          "section": "4"
+        },
+        {
+          "invariant": "I6",
+          "section": "D",
+          "clause": "D.5"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "parallel": {
+            "count": 8,
+            "request": {
+              "method": "POST",
+              "path": "/v1/unlock",
+              "body": {
+                "key": "${key.valid}",
+                "context": "${context}"
+              },
+              "idempotency_key": "idem-a-${run}"
+            },
+            "expect_all": {
+              "status": 200,
+              "body_schema": "lifecycle/unlock.response",
+              "body_pointer": {
+                "/state": "ready"
+              },
+              "must_not_contain": [
+                "${key.valid}",
+                "${secret}"
+              ]
+            },
+            "identical_bodies": true
+          }
+        },
+        {
+          "assert_health": "ready"
+        }
+      ]
+    },
+    {
+      "id": "idempotency.unlock_same_key_different_body_conflicts",
+      "kind": "http",
+      "title": "The same key with another body is 409; the state is not touched",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I6",
+          "section": "4"
+        },
+        {
+          "invariant": "I6",
+          "section": "D",
+          "clause": "D.5"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            },
+            "idempotency_key": "idem-a-${run}"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/unlock.response",
+            "body_pointer": {
+              "/state": "ready"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}",
+              "extensions": {
+                "n": 1
+              }
+            },
+            "idempotency_key": "idem-a-${run}"
+          },
+          "expect": {
+            "status": 409,
+            "error_code": "idempotency_conflict",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.wrong}",
+              "context": "${context}"
+            },
+            "idempotency_key": "idem-a-${run}"
+          },
+          "expect": {
+            "status": 409,
+            "error_code": "idempotency_conflict",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "assert_health": "ready"
+        }
+      ]
+    },
+    {
+      "id": "idempotency.lock_same_key_same_body_gives_the_same_answer",
+      "kind": "http",
+      "title": "A retried lock is answered from the record even though the core is now locked",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I6",
+          "section": "D",
+          "clause": "D.4"
+        },
+        {
+          "invariant": "I6",
+          "section": "D",
+          "clause": "D.5"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "id": "first",
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "idempotency_key": "idem-a-${run}"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/lock.response",
+            "body_pointer": {
+              "/state": "locked"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "idempotency_key": "idem-a-${run}"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/lock.response",
+            "body_pointer": {
+              "/state": "locked"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ],
+            "same_body_as": "first"
+          }
+        },
+        {
+          "assert_health": "locked"
+        }
+      ]
+    },
+    {
+      "id": "idempotency.lock_same_key_different_body_conflicts",
+      "kind": "http",
+      "title": "The same key with another body is 409, before the state is even looked at",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I6",
+          "section": "4"
+        },
+        {
+          "invariant": "I6",
+          "section": "D",
+          "clause": "D.4"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "idempotency_key": "idem-a-${run}"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/lock.response",
+            "body_pointer": {
+              "/state": "locked"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {
+              "extensions": {
+                "n": 1
+              }
+            },
+            "idempotency_key": "idem-a-${run}"
+          },
+          "expect": {
+            "status": 409,
+            "error_code": "idempotency_conflict",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "assert_health": "locked"
+        }
+      ]
+    },
+    {
+      "id": "idempotency.a_replay_has_no_second_effect",
+      "kind": "http",
+      "title": "After lock and unlock, replaying the lock returns its original answer but does NOT lock the core again",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I6",
+          "section": "1"
+        },
+        {
+          "invariant": "I6",
+          "section": "D",
+          "clause": "D.5"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "idempotency_key": "idem-a-${run}"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/lock.response",
+            "body_pointer": {
+              "/state": "locked"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/unlock.response",
+            "body_pointer": {
+              "/state": "ready"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "assert_health": "ready"
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "idempotency_key": "idem-a-${run}"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/lock.response",
+            "body_pointer": {
+              "/state": "locked"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "assert_health": "ready"
+        }
+      ]
+    },
+    {
+      "id": "idempotency.a_new_key_is_a_new_request",
+      "kind": "http",
+      "title": "The key identifies the request: the same words under another key are a new event (here refused by the state)",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I6",
+          "section": "1"
+        },
+        {
+          "invariant": "I6",
+          "section": "4"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "idempotency_key": "idem-1-${run}"
+          },
+          "expect": {
+            "status": 200,
+            "body_schema": "lifecycle/lock.response",
+            "body_pointer": {
+              "/state": "locked"
+            },
+            "must_not_contain": [
+              "${key.valid}",
+              "${secret}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "idempotency_key": "idem-2-${run}"
+          },
+          "expect": {
+            "status": 423,
+            "error_code": "locked",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}"
+            ]
+          }
+        },
+        {
+          "assert_health": "locked"
+        }
+      ]
+    },
+    {
+      "id": "idempotency.key_is_required_on_a_locked_core_mutation",
+      "kind": "http",
+      "title": "unlock without Idempotency-Key is 400 and does not unlock",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I6",
+          "section": "4"
+        },
+        {
+          "invariant": "I10",
+          "section": "D",
+          "clause": "D.3"
+        }
+      ],
+      "given": {
+        "state": "locked"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/unlock",
+            "body": {
+              "key": "${key.valid}",
+              "context": "${context}"
+            },
+            "idempotency_key": "none"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "assert_health": "locked"
+        }
+      ]
+    },
+    {
+      "id": "idempotency.key_is_required_on_a_ready_core_mutation",
+      "kind": "http",
+      "title": "lock and shutdown without Idempotency-Key are 400 and change nothing",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I6",
+          "section": "4"
+        },
+        {
+          "invariant": "I10",
+          "section": "D",
+          "clause": "D.3"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "idempotency_key": "none"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/shutdown",
+            "body": {},
+            "idempotency_key": "none"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "assert_health": "ready"
+        }
+      ]
+    },
+    {
+      "id": "idempotency.malformed_key_is_refused",
+      "kind": "http",
+      "title": "Too short, too long, spaces, dots, plus/equals: 400 and nothing changes",
+      "status": "active",
+      "traces": [
+        {
+          "invariant": "I10",
+          "section": "4"
+        },
+        {
+          "invariant": "I6",
+          "section": "4"
+        }
+      ],
+      "given": {
+        "state": "ready"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "idempotency_key": "short"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "idempotency_key": "1234567"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "idempotency_key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "idempotency_key": "bad key with spaces"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "idempotency_key": "bad.key.dot.12"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/lock",
+            "body": {},
+            "idempotency_key": "bad+key=12345"
+          },
+          "expect": {
+            "status": 400,
+            "error_code": "invalid_payload",
+            "must_not_contain": [
+              "@leaks",
+              "${secret}",
+              "${key.valid}",
+              "${key.wrong}"
+            ]
+          }
+        },
+        {
+          "assert_health": "ready"
+        }
+      ]
+    }
+  ]
+}

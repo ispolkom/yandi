@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yandi.invalid/contract/1.0-rc1/schemas/common/error.schema.json",
+  "x-contract-version": "1.0-rc1",
+  "title": "Canonical error body",
+  "description": "Section 4 'Errors'. A response: consumers ignore fields they do not know (I9).",
+  "type": "object",
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "retryable", "request_id"],
+      "properties": {
+        "code": {"$ref": "identifiers.schema.json#/$defs/error_code"},
+        "message": {"type": "string", "minLength": 1, "maxLength": 500},
+        "retryable": {"type": "boolean"},
+        "request_id": {"$ref": "identifiers.schema.json#/$defs/request_id"}
+      }
+    }
+  }
+}
