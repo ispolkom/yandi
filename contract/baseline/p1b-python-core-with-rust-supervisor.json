@@ -1,0 +1,487 @@
+{
+  "contract_version": "1.0-rc1",
+  "target": "python core (real PET application, separate process)",
+  "mode": "strict",
+  "generated_at": "2026-09-21T16:30:54Z",
+  "counts": {
+    "pass": 72,
+    "unsupported": 6,
+    "pending": 1
+  },
+  "results": [
+    {
+      "id": "auth.missing_secret_is_refused_when_locked",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/auth.json"
+    },
+    {
+      "id": "auth.wrong_secret_is_refused_when_locked",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/auth.json"
+    },
+    {
+      "id": "auth.missing_secret_is_refused_when_ready",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/auth.json"
+    },
+    {
+      "id": "auth.wrong_secret_is_refused_when_ready",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/auth.json"
+    },
+    {
+      "id": "auth.correct_secret_is_allowed",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/auth.json"
+    },
+    {
+      "id": "auth.refusal_comes_before_every_other_check",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/auth.json"
+    },
+    {
+      "id": "auth.principal_and_actor_headers_grant_nothing",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/auth.json"
+    },
+    {
+      "id": "capabilities.answer_has_the_contract_shape",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/capabilities.json"
+    },
+    {
+      "id": "capabilities.reports_the_egress_confinement_level",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/capabilities.json"
+    },
+    {
+      "id": "capabilities.leaks_nothing",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/capabilities.json"
+    },
+    {
+      "id": "capabilities.absent_feature_is_not_found",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/capabilities.json"
+    },
+    {
+      "id": "health.locked_is_open_and_minimal",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/health.json"
+    },
+    {
+      "id": "health.answer_does_not_depend_on_the_secret",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/health.json"
+    },
+    {
+      "id": "health.ready_is_open_and_minimal",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/health.json"
+    },
+    {
+      "id": "health.ignores_requests_for_more_detail",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/health.json"
+    },
+    {
+      "id": "idempotency.unlock_same_key_same_body_gives_the_same_answer",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/idempotency.json"
+    },
+    {
+      "id": "idempotency.unlock_delivered_eight_times_at_once",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/idempotency.json"
+    },
+    {
+      "id": "idempotency.unlock_same_key_different_body_conflicts",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/idempotency.json"
+    },
+    {
+      "id": "idempotency.lock_same_key_same_body_gives_the_same_answer",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/idempotency.json"
+    },
+    {
+      "id": "idempotency.lock_same_key_different_body_conflicts",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/idempotency.json"
+    },
+    {
+      "id": "idempotency.a_replay_has_no_second_effect",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/idempotency.json"
+    },
+    {
+      "id": "idempotency.a_new_key_is_a_new_request",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/idempotency.json"
+    },
+    {
+      "id": "idempotency.key_is_required_on_a_locked_core_mutation",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/idempotency.json"
+    },
+    {
+      "id": "idempotency.key_is_required_on_a_ready_core_mutation",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/idempotency.json"
+    },
+    {
+      "id": "idempotency.malformed_key_is_refused",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/idempotency.json"
+    },
+    {
+      "id": "isolation.reported_level_is_effective",
+      "status": "unsupported",
+      "detail": "target offers no hook ['os_confinement_probe']",
+      "file": "contract/scenarios/p1/isolation.json"
+    },
+    {
+      "id": "key_material.no_answer_carries_the_key",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/key_material.json"
+    },
+    {
+      "id": "key_material.a_failed_unlock_leaves_no_decrypted_state",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/key_material.json"
+    },
+    {
+      "id": "key_material.after_lock_protected_requests_are_refused",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/key_material.json"
+    },
+    {
+      "id": "key_material.key_is_never_written_to_disk",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/key_material.json"
+    },
+    {
+      "id": "key_material.no_decrypted_state_exists_while_locked",
+      "status": "unsupported",
+      "detail": "probe not answerable by this target: a scan for decrypted state needs to know what the application keeps; this harness only sees the core's own files",
+      "file": "contract/scenarios/p1/key_material.json"
+    },
+    {
+      "id": "key_material.key_is_forgotten_from_memory_on_lock",
+      "status": "unsupported",
+      "detail": "target offers no hook ['memory_probe']",
+      "file": "contract/scenarios/p1/key_material.json"
+    },
+    {
+      "id": "key_material.key_is_not_in_the_logs",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/key_material.json"
+    },
+    {
+      "id": "launch_secret.is_not_on_the_command_line",
+      "status": "unsupported",
+      "detail": "target offers no hook ['process_probe']",
+      "file": "contract/scenarios/p1/launch_secret.json"
+    },
+    {
+      "id": "launch_secret.file_is_private",
+      "status": "unsupported",
+      "detail": "target offers no hook ['runtime_file_probe']",
+      "file": "contract/scenarios/p1/launch_secret.json"
+    },
+    {
+      "id": "launch_secret.differs_between_launches",
+      "status": "unsupported",
+      "detail": "target offers no hook ['launch_probe']",
+      "file": "contract/scenarios/p1/launch_secret.json"
+    },
+    {
+      "id": "launch_secret.core_listens_on_loopback_only",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/launch_secret.json"
+    },
+    {
+      "id": "lock.ready_becomes_locked_and_can_unlock_again",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/lock.json"
+    },
+    {
+      "id": "lock.unknown_field_is_rejected",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/lock.json"
+    },
+    {
+      "id": "lock.body_must_be_an_object",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/lock.json"
+    },
+    {
+      "id": "lock.extensions_object_is_ignored",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/lock.json"
+    },
+    {
+      "id": "locked.refuses_everything_except_health_and_unlock",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/locked.json"
+    },
+    {
+      "id": "locked.refusals_leave_the_core_usable",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/locked.json"
+    },
+    {
+      "id": "malformed.invalid_json_is_refused",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/malformed.json"
+    },
+    {
+      "id": "malformed.wrong_top_level_type_is_refused",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/malformed.json"
+    },
+    {
+      "id": "malformed.invalid_utf8_is_refused",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/malformed.json"
+    },
+    {
+      "id": "malformed.oversized_body_is_refused_even_with_a_valid_key",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/malformed.json"
+    },
+    {
+      "id": "malformed.body_exactly_at_the_limit_is_accepted",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/malformed.json"
+    },
+    {
+      "id": "malformed.body_one_byte_over_the_limit_is_refused",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/malformed.json"
+    },
+    {
+      "id": "malformed.deeply_nested_body_is_refused_cleanly",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/malformed.json"
+    },
+    {
+      "id": "principal_actor.are_optional_and_independent",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/principal_actor.json"
+    },
+    {
+      "id": "principal_actor.do_not_change_lifecycle_answers",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/principal_actor.json"
+    },
+    {
+      "id": "sanitization.refusals_on_a_ready_core_leak_nothing",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/sanitization.json"
+    },
+    {
+      "id": "sanitization.refusals_on_a_locked_core_leak_nothing",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/sanitization.json"
+    },
+    {
+      "id": "sanitization.errors_never_echo_credentials",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/sanitization.json"
+    },
+    {
+      "id": "sanitization.unknown_endpoint_is_the_canonical_not_found",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/sanitization.json"
+    },
+    {
+      "id": "shutdown.invalid_requests_are_refused_and_change_nothing",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/shutdown.json"
+    },
+    {
+      "id": "state_machine.failure_path_stays_locked",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/state_machine.json"
+    },
+    {
+      "id": "state_machine.a_core_never_reports_ready_by_itself",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/state_machine.json"
+    },
+    {
+      "id": "supervisor.starts_waits_for_locked_unlocks_and_waits_for_ready",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/supervisor.json"
+    },
+    {
+      "id": "supervisor.restarts_a_crashed_core_with_backoff",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/supervisor.json"
+    },
+    {
+      "id": "supervisor.a_restarted_core_is_unlocked_again",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/supervisor.json"
+    },
+    {
+      "id": "supervisor.stops_after_n_failures_in_the_window",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/supervisor.json"
+    },
+    {
+      "id": "supervisor.a_core_that_never_answers_is_not_waited_for_forever",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/supervisor.json"
+    },
+    {
+      "id": "supervisor.core_crash_does_not_touch_the_node",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/supervisor.json"
+    },
+    {
+      "id": "unlock.valid_key_makes_the_core_ready",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/unlock.json"
+    },
+    {
+      "id": "unlock.wrong_key_never_becomes_ready",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/unlock.json"
+    },
+    {
+      "id": "unlock.malformed_key_is_rejected",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/unlock.json"
+    },
+    {
+      "id": "unlock.wrong_context_is_rejected",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/unlock.json"
+    },
+    {
+      "id": "unlock.missing_fields_are_rejected",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/unlock.json"
+    },
+    {
+      "id": "unlock.unknown_field_is_rejected",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/unlock.json"
+    },
+    {
+      "id": "unlock.extensions_object_is_ignored",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/unlock.json"
+    },
+    {
+      "id": "unlock.extensions_cannot_change_what_is_allowed",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/unlock.json"
+    },
+    {
+      "id": "unlock.duplicate_json_key_is_refused",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/unlock.json"
+    },
+    {
+      "id": "shutdown.goes_through_draining_to_stopped",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/shutdown.json"
+    },
+    {
+      "id": "shutdown.deadline_is_optional",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/shutdown.json"
+    },
+    {
+      "id": "shutdown.replay_while_draining_is_answered_from_the_record",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/shutdown.json"
+    },
+    {
+      "id": "shutdown.open_transaction_completes_or_rolls_back",
+      "status": "pending",
+      "detail": "Needs a way to hold a transaction open inside the core (hook 'transaction_probe'). Section 5.1 promises finish-or-roll-back; no black-box request can prove it, so no guarantee is claimed yet.",
+      "file": "contract/scenarios/p1/shutdown.json"
+    },
+    {
+      "id": "state_machine.full_life_of_a_core",
+      "status": "pass",
+      "detail": "",
+      "file": "contract/scenarios/p1/state_machine.json"
+    }
+  ]
+}
