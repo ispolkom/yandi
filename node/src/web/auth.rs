@@ -303,6 +303,61 @@ pub fn auth_file_path() -> PathBuf {
 
 /// Try to load auth from disk and auto-decrypt master_key.
 /// Returns the loaded AuthState (may be in setup/rebind mode).
+#[cfg(unix)]
+pub fn load_auth_state() -> AuthState {
+    use key_root::{unlock_root, FileDeviceKey, KeyDir, KeyRootError, RootSource, SystemMachine};
+    let state = AuthState::default();
+    let path = auth_file_path();
+
+    if !path.exists() {
+        // First run — needs setup
+        return state;
+    }
+    // An auth.json exists: from here on, "cannot open it" is never treated as "first run" (that would let setup overwrite it).
+    let locked = |state: &AuthState| {
+        state.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
+        state.needs_rebind.store(true, std::sync::atomic::Ordering::Relaxed);
+    };
+    let dir = match path.parent().map(KeyDir::open) {
+        Some(Ok(d)) => d,
+        Some(Err(e)) => {
+            println!("[auth] ❌ key directory is not safe to use ({}); nothing was changed", e.category());
+            locked(&state);
+            return state;
+        }
+        None => {
+            locked(&state);
+            return state;
+        }
+    };
+    let device = FileDeviceKey::new(dir.file("device.key"));
+    match unlock_root(&dir, &SystemMachine, &device) {
+        Ok((root, source)) => {
+            match source {
+                RootSource::LegacyMachineId => {
+                    println!("[auth] ✅ Master key loaded (machine verified)");
+                    println!("[auth] ⚠️  legacy key format: the master key is protected only by the public machine id. Run `yandi-keys migrate` (see docs/KEY_RECOVERY.md)");
+                }
+                RootSource::Device => println!("[auth] ✅ Master key loaded (device key)"),
+            }
+            state.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Ok(mut mk) = state.master_key.lock() {
+                *mk = Some(*root);
+            }
+        }
+        Err(KeyRootError::RecoveryRequired) => {
+            println!("[auth] ⚠️ this device cannot open the key by itself — recovery is required: `yandi-keys recover` (nothing was changed)");
+            locked(&state);
+        }
+        Err(e) => {
+            println!("[auth] ❌ the key file cannot be used ({}); nothing was changed", e.category());
+            locked(&state);
+        }
+    }
+    state
+}
+
+#[cfg(not(unix))]
 pub fn load_auth_state() -> AuthState {
     let state = AuthState::default();
     let path = auth_file_path();
@@ -346,6 +401,20 @@ pub fn load_auth_state() -> AuthState {
     state
 }
 
+/// Never overwrite existing key material: an auth.json that exists (even one this build cannot open) is somebody's master key.
+fn ensure_no_existing_auth(path: &std::path::Path) -> Result<(), String> {
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err("Auth is already set up; refusing to overwrite the existing key file".to_string());
+    }
+    Ok(())
+}
+
+/// The web login hash of either auth.json format (1: machine-wrapped key, 2: device + recovery wrappers).
+fn login_hash_of(json: &str) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("Failed to parse auth.json: {}", e))?;
+    value.get("login_hash").and_then(|v| v.as_str()).map(str::to_owned).ok_or_else(|| "auth.json has no login hash".to_string())
+}
+
 /// Perform first-time setup: hash login password, derive master_key, store both.
 pub fn setup_auth(
     state: &AuthState,
@@ -358,6 +427,8 @@ pub fn setup_auth(
     if master_password.len() < 8 {
         return Err("Master password must be at least 8 characters".to_string());
     }
+
+    ensure_no_existing_auth(&auth_file_path())?;
 
     // Derive master_key from master_password
     let mut master_salt = [0u8; 32];
@@ -416,49 +487,20 @@ pub fn verify_login(login_password: &str) -> Result<bool, String> {
     }
     let json = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read auth.json: {}", e))?;
-    let stored: StoredAuth = serde_json::from_str(&json)
-        .map_err(|e| format!("Failed to parse auth.json: {}", e))?;
-    Ok(verify_login_password(login_password, &stored.login_hash))
+    let login_hash = login_hash_of(&json)?;
+    Ok(verify_login_password(login_password, &login_hash))
 }
 
 /// Re-bind master_key to a new machine (hardware migration).
 /// User must provide master_password to prove ownership.
 pub fn rebind_to_machine(
-    state: &AuthState,
-    master_password: &str,
+    _state: &AuthState,
+    _master_password: &str,
 ) -> Result<(), String> {
-    // We need to verify master_password is correct by trying to decrypt the identity
-    // For now: derive master_key and re-store it under new machine-id
-    // The caller must verify the password was correct (identity decryption success)
-
-    let path = auth_file_path();
-    let json = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read auth.json: {}", e))?;
-    let mut stored: StoredAuth = serde_json::from_str(&json)
-        .map_err(|e| format!("Failed to parse auth.json: {}", e))?;
-
-    // Derive master_key from provided master_password
-    // We can't verify it without the old machine-id, so we trust the user
-    // (they will know if identity decryption fails)
-    let mut master_salt = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut master_salt);
-    let master_key = derive_key(master_password.as_bytes(), &master_salt)?;
-
-    // Re-encrypt master_key with new machine-id
-    stored.master_key_encrypted = encrypt_master_key(&master_key)?;
-
-    let new_json = serde_json::to_string_pretty(&stored)
-        .map_err(|e| format!("Serialization failed: {}", e))?;
-    std::fs::write(&path, &new_json)
-        .map_err(|e| format!("Failed to write auth.json: {}", e))?;
-
-    state.needs_rebind.store(false, std::sync::atomic::Ordering::Relaxed);
-    if let Ok(mut mk) = state.master_key.lock() {
-        *mk = Some(master_key);
-    }
-
-    println!("[auth] ✅ Master key rebound to new machine");
-    Ok(())
+    // The former implementation derived a NEW random master key from the password (its salt was never stored), which is not the old
+    // key: everything encrypted under the old one became unreadable, and the password proved nothing. Recovery is now done by
+    // `yandi-keys recover` with the recovery password of a migrated key directory (docs/KEY_RECOVERY.md); nothing is changed here.
+    Err("Recovery is done on the command line: run `yandi-keys recover` (see docs/KEY_RECOVERY.md). Nothing was changed.".to_string())
 }
 
 /// Extract session token from Cookie header value.
@@ -560,5 +602,44 @@ mod login_throttle_tests {
         assert!(state.login_backoff_remaining().is_some());
         std::thread::sleep(Duration::from_secs(2) + Duration::from_millis(100));
         assert!(state.login_backoff_remaining().is_none(), "backoff must actually expire, not block forever");
+    }
+}
+
+#[cfg(test)]
+mod key_root_integration_tests {
+    use super::*;
+
+    #[test]
+    fn setup_never_overwrites_an_existing_auth_file() {
+        let tmp = std::env::temp_dir().join(format!("yandi-auth-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let existing = tmp.join("auth.json");
+        std::fs::write(&existing, "anything, even something unreadable").unwrap();
+        assert!(ensure_no_existing_auth(&existing).is_err());
+        assert!(ensure_no_existing_auth(&tmp.join("absent.json")).is_ok());
+        let link = tmp.join("link.json");
+        let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(tmp.join("nowhere"), &link).unwrap();
+            assert!(ensure_no_existing_auth(&link).is_err(), "a dangling link is not 'absent'");
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn rebind_no_longer_makes_a_different_master_key() {
+        let state = AuthState::default();
+        assert!(rebind_to_machine(&state, "any password at all").is_err());
+        assert!(state.get_master_key().is_none(), "rebind must not install a key");
+        assert!(!state.is_setup.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn the_login_hash_is_read_from_both_auth_formats() {
+        assert_eq!(login_hash_of(r#"{"version":1,"login_hash":"h1","master_key_encrypted":{}}"#).unwrap(), "h1");
+        assert_eq!(login_hash_of(r#"{"version":2,"login_hash":"h2","root_id":"x"}"#).unwrap(), "h2");
+        assert!(login_hash_of(r#"{"version":2}"#).is_err());
+        assert!(login_hash_of("not json").is_err());
     }
 }

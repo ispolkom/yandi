@@ -200,20 +200,35 @@ async fn main() -> anyhow::Result<()> {
         if !auth_state.is_setup.load(Ordering::Relaxed) {
             println!("🔐 Auth: первый запуск — откройте Web UI для первичной настройки");
         } else if auth_state.needs_rebind.load(Ordering::Relaxed) {
-            println!("🔐 Auth: обнаружено новое устройство — войдите и введите мастер-пароль");
+            println!("🔐 Auth: ключ не открыт на этом устройстве — нужно восстановление (yandi-keys recover), ничего не изменено");
         } else {
             println!("🔐 Auth: мастер-ключ загружен");
         }
     }
 
-    // 6b. Node-managed Core (P1b, opt-in with YANDI_MANAGED_CORE=1): the node spawns, unlocks, watches and stops the Python Core.
-    #[cfg(unix)]
-    let managed_core = yandi::managed_core::start_from_env(&auth_state);
-
     // 7. Load or create identity (используем discovery порт из конфига)
     let config = get_config();
     let discovery_port = config.ports.discovery;
+    // A failure to open an EXISTING identity is an error and stops the node here; it never creates a new identity or touches the file.
+    #[cfg(unix)]
+    let identity = {
+        let root = auth_state.get_master_key();
+        match NodeIdentity::load_or_create_with_root(discovery_port, root.as_ref()) {
+            Ok(identity) => identity,
+            Err(e) => {
+                eprintln!("🔐 Identity: {} — {}", e.category(), e);
+                eprintln!("   Nothing was created or changed. See docs/KEY_RECOVERY.md (yandi-keys status / recover).");
+                std::process::exit(2);
+            }
+        }
+    };
+    #[cfg(not(unix))]
     let identity = NodeIdentity::load_or_create(discovery_port);
+
+    // 7b. Node-managed Core (P1b, opt-in with YANDI_MANAGED_CORE=1): the node spawns, unlocks, watches and stops the Python Core.
+    #[cfg(unix)]
+    let managed_core = yandi::managed_core::start_from_env(&auth_state);
+
     let identity_for_transport = identity.clone(); // Клон для транспортов
     let identity_for_web = identity.clone(); // Clone for Web UI/mDNS
     let identity_for_socks5 = identity.clone(); // Clone for SOCKS5 auto-start

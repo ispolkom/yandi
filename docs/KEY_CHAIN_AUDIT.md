@@ -146,3 +146,14 @@ Also: is there any backup of `~/.yandi_keys`, `~/.local/share/yandi` and the MyS
   application-encrypted at all**; the automatic KEK belongs to the node's configuration store (F6, F7).
 * "The master password is the recovery path" (design intent) → in the code it is not (F1).
 * "The node's master key is machine-bound so an attacker needs the machine" → the binding is to a public identifier; it is obfuscation, not protection (F2).
+
+## Status after P1c-1 (2026-09-22)
+
+| Finding | Now |
+|---|---|
+| F1 master password cannot recover the key | **Fixed for a migrated directory**: the existing master key is the ROOT, wrapped by a device key and by an Argon2id recovery password; `rebind` no longer makes a different key (it now refuses and points to `yandi-keys recover`) |
+| F2 master key protected by a public value | Migrated: protected by a random device key (a private file — see the honest limit in `docs/KEY_RECOVERY.md`) and by the recovery password; the machine id is only a label. **Not migrated yet on the owner's machine** until `yandi-keys migrate` is run |
+| F3 identity does not use the master key | Migrated: identity format 3 under `HKDF(root, "yandi/identity/v1")` |
+| F11 a failed load replaces the identity | **Fixed** (also for legacy directories): fail closed, nothing written; `setup_auth` no longer overwrites an existing `auth.json` |
+| F4 chat store as weak as F2 | Same root as before, so as strong as the device key / recovery password after migration |
+| F6, F7, F8, F10 | **Unchanged**: SQL memory still not encrypted, no backup pipeline for it, legacy plaintext stores (P1c-2 and later) |
