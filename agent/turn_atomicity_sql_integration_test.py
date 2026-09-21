@@ -45,7 +45,7 @@ def main() -> int:
     if not (socket and admin and admin_pw):
         print("SKIP: set YANDI_TEST_SQL_SOCKET / _ADMIN / _ADMIN_PW (see scripts/test-sql-temp.sh)")
         return 0
-    from agent.db.sql.connection import LiveDatabaseRefused, assert_connection_allowed
+    from agent.db.sql.connection import LiveDatabaseRefused, assert_connection_allowed, pymysql_target
     try:
         assert_connection_allowed(socket)   # the ONE isolation check (realpath, temp dir, declared marker)
     except LiveDatabaseRefused as e:
@@ -69,7 +69,7 @@ def main() -> int:
 
     def connect(user, password, autocommit=False):
         assert_connection_allowed(socket)
-        return pymysql.connect(unix_socket=socket, user=user, password=password, database="yandi_epistemic",
+        return pymysql.connect(**pymysql_target(socket), user=user, password=password, database="yandi_epistemic",
                                cursorclass=pymysql.cursors.DictCursor, autocommit=autocommit, charset="utf8mb4")
 
     root = connect(admin, admin_pw, autocommit=True)
@@ -333,16 +333,25 @@ def main() -> int:
     logging.getLogger("yandi.turn").addHandler(handler)
     replies, errors = [], []
 
+    # Patches are applied ONCE around all the threads (a patch entered and left by several threads restores in the wrong
+    # order, and a thread could then reach the real gateway: a flake, not a finding).
+    shared_extractor = scripted_llm(AI_EVENTS)
+
+    def shared_semantic(**kwargs):
+        return SemanticCompletionResult(reply="Хорошо.", state=None, reply_ok=True, state_ok=False, parse_ok=True, error=None, metadata={})
+
     def deliver():
         try:
-            replies.append(turn(APOLOGY_INSULT, "turn-atom-ref-00001", AI_EVENTS))
+            replies.append(chat_local._respond_with_character("heretic:q8", [{"role": "user", "content": APOLOGY_INSULT}], 0.7, "turn-atom-ref-00001"))
         except Exception as e:  # noqa: BLE001
             errors.append(e)
-    threads = [threading.Thread(target=deliver) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    with patch.object(sw, "get_connection", spying_get_connection), patch.object(chat_local, "_self_knowledge_message", lambda: None), \
+         patch.object(chat_local, "_extraction_llm", lambda model: shared_extractor), patch.object(llm_gateway, "complete_semantic", shared_semantic):
+        threads = [threading.Thread(target=deliver) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
     logging.getLogger("yandi.turn").removeHandler(handler)
     final = snapshot()
     check("concurrency: 8 concurrent deliveries of ONE turn -> 1 interaction, 1 application of each event, the same final state as a single delivery",

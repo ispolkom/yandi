@@ -46,7 +46,7 @@ DESIGN NOTES (read before changing a table):
    no HTTP retry chatter. RUN_ERROR is 5 columns, not a log warehouse.
 """
 
-SCHEMA_VERSION = 17  # v17: personal_fact + personal_fact_event (provenance-backed, append-only ledger of what the person reported about themselves). v16: interaction_turn (immutable per-person source record of each chat turn, keyed by the client-minted turn id). v15: commitment + commitment_event + causal_event (immutable promise ledger and the causal-event idempotency ledger for the relationship state). v14: knowledge_query_archive ("точка ноль" — agent/db/manager.py's sqlite KnowledgeDB query-log + moderation-queue system retired from registry/index.db + registry/knowledge/*.db)
+SCHEMA_VERSION = 18  # v18: commitment.source_turn_id + commitment_event.source_turn_id/span_start/span_end (provenance of a promise and of its fulfilment evidence). v17: personal_fact + personal_fact_event (provenance-backed, append-only ledger of what the person reported about themselves). v16: interaction_turn (immutable per-person source record of each chat turn, keyed by the client-minted turn id). v15: commitment + commitment_event + causal_event (immutable promise ledger and the causal-event idempotency ledger for the relationship state). v14: knowledge_query_archive ("точка ноль" — agent/db/manager.py's sqlite KnowledgeDB query-log + moderation-queue system retired from registry/index.db + registry/knowledge/*.db)
 
 SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1779,10 +1779,27 @@ ALL_TABLES_IN_ORDER = [
     ("instance_identity", INSTANCE_IDENTITY),
 ]
 
+
+# v18: PROVENANCE of the promise ledger. A verified fulfilment must know the turn whose
+# exact evidence established it, and a promise the turn it was made in (so a promise can
+# never be "fulfilled" by the very message that made it). Additive, nullable (rows written
+# before v18 keep NULL), one statement per column so migrate.py's per-statement idempotency
+# skips exactly the ones already present. No foreign key: the fulfilment-claim path and its
+# tests record events under turn ids that need not have an interaction_turn row; the chat
+# path writes the interaction_turn first, in the same transaction.
+COMMITMENT_V18_ALTERS = [
+    ("commitment.source_turn_id column",
+     "ALTER TABLE commitment ADD COLUMN source_turn_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL;"),
+    ("commitment_event.source_turn_id column",
+     "ALTER TABLE commitment_event ADD COLUMN source_turn_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL;"),
+    ("commitment_event.span_start column", "ALTER TABLE commitment_event ADD COLUMN span_start INT NULL;"),
+    ("commitment_event.span_end column", "ALTER TABLE commitment_event ADD COLUMN span_end INT NULL;"),
+]
+
 # Deferred ALTER (needs answer_version to already exist).
 ALTER_STATEMENTS_IN_ORDER = [
     ("verification_run.final_answer_id FK", VERIFICATION_RUN_FINAL_ANSWER_FK),
-] + SOURCE_OBSERVATION_V13_ALTERS
+] + SOURCE_OBSERVATION_V13_ALTERS + COMMITMENT_V18_ALTERS
 
 # Truth-claiming vocabulary is explicitly BANNED from this schema
 # (mandate §1/§14) — a regression test greps every DDL string above for

@@ -2242,20 +2242,24 @@ _INNER_STATE_FIELDS = (
 )
 
 
-def get_inner_state(conn, user_id: str) -> Optional[Dict[str, Any]]:
+def get_inner_state(conn, user_id: str, for_update: bool = False) -> Optional[Dict[str, Any]]:
+    """`for_update` takes the row lock and reads the LATEST committed value (not the transaction's snapshot): a
+    read-modify-write of the coordinates that must not lose a concurrent transition reads it this way."""
+    sql = ("SELECT * FROM inner_state WHERE user_id=%s FOR UPDATE" if for_update
+           else "SELECT * FROM inner_state WHERE user_id=%s")
     with conn.cursor() as cur:
-        cur.execute("SELECT * FROM inner_state WHERE user_id=%s", (user_id,))
+        cur.execute(sql, (user_id,))
         return cur.fetchone()
 
 
-def get_or_create_inner_state(conn, user_id: str, updated_at=None) -> Dict[str, Any]:
+def get_or_create_inner_state(conn, user_id: str, updated_at=None, for_update: bool = False) -> Dict[str, Any]:
     updated_at = _coerce_datetime(updated_at) or _now()
     with conn.cursor() as cur:
         cur.execute(
             "INSERT IGNORE INTO inner_state (user_id, updated_at) VALUES (%s,%s)",
             (user_id, updated_at),
         )
-    return get_inner_state(conn, user_id)
+    return get_inner_state(conn, user_id, for_update=for_update)
 
 
 def update_inner_state(conn, user_id: str, updated_at=None, **fields) -> None:
@@ -2328,17 +2332,30 @@ def list_inner_state_events_in_order(conn, user_id: str) -> List[Dict[str, Any]]
 # (class B; agent/relationship_commitments.py is the only intended caller)
 # ============================================================
 
+def _is_unknown_column(exc: BaseException) -> bool:
+    args = getattr(exc, "args", ())
+    return bool((args and args[0] == 1054) or "unknown column" in str(exc).lower())
+
+
 def record_commitment(
     conn, commitment_id: str, user_id: str, kind: str, text: str, evidence: str,
-    due_at=None, created_at=None,
+    due_at=None, created_at=None, source_turn_id: Optional[str] = None,
 ) -> None:
+    """Append a promise. With the v18 provenance column it records the turn the promise was made in; on a database that
+    has not applied v18 it writes the promise without it (the promise itself must not depend on a migration)."""
     created_at = _coerce_datetime(created_at) or _now()
+    base = (commitment_id, user_id, kind, text[:500], evidence[:500], _coerce_datetime(due_at), created_at)
     with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO commitment (commitment_id, user_id, kind, text, evidence, due_at, created_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
-            (commitment_id, user_id, kind, text[:500], evidence[:500], _coerce_datetime(due_at), created_at),
-        )
+        try:
+            cur.execute(
+                "INSERT INTO commitment (commitment_id, user_id, kind, text, evidence, due_at, created_at, source_turn_id) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", base + (source_turn_id,))
+        except Exception as exc:  # noqa: BLE001
+            if not _is_unknown_column(exc):
+                raise
+            cur.execute(
+                "INSERT INTO commitment (commitment_id, user_id, kind, text, evidence, due_at, created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s)", base)
 
 
 def get_commitment(conn, commitment_id: str) -> Optional[Dict[str, Any]]:
@@ -2355,18 +2372,29 @@ def list_commitments(conn, user_id: str) -> List[Dict[str, Any]]:
 
 def record_commitment_event(
     conn, commitment_id: str, user_id: str, event_type: str, source: str,
-    evidence: Optional[str] = None, created_at=None,
+    evidence: Optional[str] = None, created_at=None, source_turn_id: Optional[str] = None,
+    span_start: Optional[int] = None, span_end: Optional[int] = None, require_provenance: bool = False,
 ) -> bool:
     """Append one outcome. UNIQUE (commitment_id, event_type) + INSERT IGNORE:
     returns True only if this call created the row, so a caller can apply the
-    state transition exactly once per causal event."""
+    state transition exactly once per causal event. With a source turn the row
+    carries its provenance (the turn whose exact evidence span this is). On a database
+    without the v18 columns a plain report is still written without it, but an event that
+    REQUIRES provenance (a verification) is refused: the error propagates."""
     created_at = _coerce_datetime(created_at) or _now()
+    base = (commitment_id, user_id, event_type, source, (evidence or "")[:500] or None, created_at)
     with conn.cursor() as cur:
-        cur.execute(
-            "INSERT IGNORE INTO commitment_event (commitment_id, user_id, event_type, source, evidence, created_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s)",
-            (commitment_id, user_id, event_type, source, (evidence or "")[:500] or None, created_at),
-        )
+        try:
+            cur.execute(
+                "INSERT IGNORE INTO commitment_event (commitment_id, user_id, event_type, source, evidence, created_at, "
+                "source_turn_id, span_start, span_end) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                base + (source_turn_id, span_start, span_end))
+        except Exception as exc:  # noqa: BLE001
+            if require_provenance or not _is_unknown_column(exc):
+                raise
+            cur.execute(
+                "INSERT IGNORE INTO commitment_event (commitment_id, user_id, event_type, source, evidence, created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s)", base)
         return cur.rowcount == 1
 
 
@@ -2374,6 +2402,18 @@ def list_commitment_events(conn, user_id: str) -> List[Dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM commitment_event WHERE user_id=%s ORDER BY event_id ASC", (user_id,))
         return cur.fetchall()
+
+
+def count_commitment_events(conn, user_id: str, event_type: str, source: str) -> int:
+    """How many outcomes of this type from this source the person already has (a plain read: commitment_event is an
+    append-only ledger and the runtime role holds no UPDATE on it, which a locking read requires). Freshness is the
+    CALLER's job: it holds the person's state row lock before this transaction reads anything (see
+    relationship_commitments.record_direct_fulfilment)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM commitment_event WHERE user_id=%s AND event_type=%s AND source=%s",
+            (user_id, event_type, source))
+        return int(cur.fetchone()["n"])
 
 
 # ============================================================
@@ -2429,6 +2469,14 @@ def record_interaction_turn(
             ),
         )
         return cur.rowcount == 1
+
+
+def get_interaction_turn_text(conn, user_id: str, source_turn_id: str) -> Optional[str]:
+    """The immutable user text of one recorded turn, or None when the turn has no source record."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT user_text FROM interaction_turn WHERE user_id=%s AND source_turn_id=%s", (user_id, source_turn_id))
+        row = cur.fetchone()
+        return None if not row else row["user_text"]
 
 
 def list_recent_interaction_turns(conn, user_id: str, limit: int = 300) -> List[Dict[str, Any]]:

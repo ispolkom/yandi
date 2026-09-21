@@ -43,7 +43,7 @@ def main() -> int:
     if not (socket and admin and admin_pw):
         print("SKIP: set YANDI_TEST_SQL_SOCKET / _ADMIN / _ADMIN_PW (see scripts/test-sql-temp.sh)")
         return 0
-    from agent.db.sql.connection import LiveDatabaseRefused, assert_connection_allowed
+    from agent.db.sql.connection import LiveDatabaseRefused, assert_connection_allowed, pymysql_target
     try:
         assert_connection_allowed(socket)
     except LiveDatabaseRefused as e:
@@ -67,7 +67,7 @@ def main() -> int:
 
     def connect(user, password, autocommit=False):
         assert_connection_allowed(socket)
-        return pymysql.connect(unix_socket=socket, user=user, password=password, database="yandi_epistemic",
+        return pymysql.connect(**pymysql_target(socket), user=user, password=password, database="yandi_epistemic",
                                cursorclass=pymysql.cursors.DictCursor, autocommit=autocommit, charset="utf8mb4")
 
     root = connect(admin, admin_pw, autocommit=True)
@@ -80,7 +80,7 @@ def main() -> int:
     # ── v16 -> v17 upgrade is additive ──
     with root.cursor() as cur:
         cur.execute("DROP TABLE IF EXISTS personal_fact_event"); cur.execute("DROP TABLE IF EXISTS personal_fact")
-        cur.execute("DELETE FROM schema_migrations WHERE version=17")
+        cur.execute("DELETE FROM schema_migrations WHERE version IN (17, 18)")
         cur.execute("INSERT IGNORE INTO schema_migrations (version, description) VALUES (16, 'simulated v16')")
         cur.execute("INSERT IGNORE INTO interaction_turn (user_id, source_turn_id, turn_id_origin, user_text, created_at) "
                     "VALUES ('v16_owner', 'turn-v16-0001', 'client', 'row that existed at schema v16', NOW())")
@@ -88,7 +88,7 @@ def main() -> int:
     with contextlib.redirect_stdout(io.StringIO()):
         upgraded = migrate.apply()
     check("U: the migration upgrades v16 -> v17: the two fact tables added, version 17 recorded, the v16 row untouched",
-          upgraded and scalar("SELECT MAX(version) FROM schema_migrations") == 17
+          upgraded and scalar("SELECT MAX(version) FROM schema_migrations") == schema.SCHEMA_VERSION
           and scalar("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='yandi_epistemic' AND table_name IN ('personal_fact','personal_fact_event')") == 2
           and scalar("SELECT user_text FROM interaction_turn WHERE source_turn_id='turn-v16-0001'") == "row that existed at schema v16")
     check("S: both fact tables are classified append-only (class B)",
@@ -153,7 +153,7 @@ def main() -> int:
 
     def snapshot():
         with root.cursor() as cur:
-            cur.execute("SELECT fact_id, statement, polarity, temporality, evidence, source_turn_id FROM personal_fact ORDER BY created_at, fact_id")
+            cur.execute("SELECT fact_id, statement, polarity, temporality, evidence, source_turn_id FROM personal_fact ORDER BY source_turn_id, fact_id")   # not created_at: it has one-second resolution, two facts of one second tie
             facts = [tuple(r.values()) for r in cur.fetchall()]
             cur.execute("SELECT fact_id, event_type, by_fact_id, source_turn_id FROM personal_fact_event ORDER BY event_id")
             events = [tuple(r.values()) for r in cur.fetchall()]
@@ -273,16 +273,25 @@ def main() -> int:
     reset()
     errors: list = []
 
+    # The patches are applied ONCE around all the threads: a patch entered and left by several threads restores in the wrong
+    # order, and a thread could then reach the real model gateway (a flake, not a finding).
+    shared_router = scripted_router(scripted_llm([]), scripted_fact_llm([DOG]))
+
+    def shared_semantic(**kwargs):
+        return SemanticCompletionResult(reply="Хорошо.", state=None, reply_ok=True, state_ok=False, parse_ok=True, error=None, metadata={})
+
     def deliver():
         try:
-            turn(MSG, "turn-pf-cc-000001", [DOG])
+            chat_local._respond_with_character("heretic:q8", [{"role": "user", "content": MSG}], 0.7, "turn-pf-cc-000001")
         except Exception as e:  # noqa: BLE001
             errors.append(e)
-    threads = [threading.Thread(target=deliver) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    with patch.object(sw, "get_connection", spying), patch.object(chat_local, "_self_knowledge_message", lambda: None), \
+         patch.object(chat_local, "_extraction_llm", lambda model: shared_router), patch.object(llm_gateway, "complete_semantic", shared_semantic):
+        threads = [threading.Thread(target=deliver) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
     s = snapshot()
     check("K: 8 concurrent deliveries of ONE turn -> 1 interaction, 1 fact, 1 claim, no events, no unhandled error",
           s["interaction"] == 1 and len(s["facts"]) == 1 and s["claims"] == 1 and s["events"] == [] and not errors, repr((s, errors)))

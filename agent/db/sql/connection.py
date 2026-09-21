@@ -177,6 +177,32 @@ def _under_temp_dir(path: str) -> bool:
     return real == tmp or real.startswith(tmp + os.sep)
 
 
+# A test environment that cannot create unix sockets at all (a sandbox) can still run the throw-away instance on a
+# loopback TCP port. That is declared exactly like the socket: the harness names the target "tcp:127.0.0.1:<port>" in
+# YANDI_TEST_ISOLATED_SOCKET, and a test process may then connect to that one target and nothing else. It is a TEST-ONLY
+# spelling: a process that is not a test refuses it, so no production configuration can ever use it, and the guard
+# refuses the live database's own TCP port (3306) and everything that is not loopback.
+_TCP_TARGET_RE = re.compile(r"tcp:(127\.0\.0\.1):([0-9]{1,5})")
+_LIVE_TCP_PORT = 3306
+
+
+def tcp_test_target(target: str):
+    """(host, port) of a "tcp:127.0.0.1:<port>" isolated-instance spelling, or None for anything else."""
+    match = _TCP_TARGET_RE.fullmatch(target or "")
+    if not match:
+        return None
+    port = int(match.group(2))
+    return (match.group(1), port) if 1024 <= port <= 65535 and port != _LIVE_TCP_PORT else None
+
+
+def pymysql_target(target: str) -> dict:
+    """The pymysql.connect keyword arguments that reach an isolated test instance named by `target` (a unix socket
+    path, or the "tcp:127.0.0.1:<port>" spelling). For tests that open their own connection to the throw-away
+    instance; they still call assert_connection_allowed(target) first."""
+    tcp = tcp_test_target(target)
+    return {"host": tcp[0], "port": tcp[1]} if tcp else {"unix_socket": target}
+
+
 def assert_connection_allowed(socket_path: str) -> None:
     """Raise LiveDatabaseRefused if this is a test process and `socket_path`
     is not the declared throw-away test database. Called immediately before a
@@ -191,7 +217,9 @@ def assert_connection_allowed(socket_path: str) -> None:
     if not is_test_process():
         return
     isolated = os.environ.get(_ISOLATED_SOCKET_ENV, "")
-    if (isolated and socket_path and not _same_path(isolated, _DEFAULT_SOCKET)
+    if isolated and socket_path and tcp_test_target(isolated) and isolated == socket_path:
+        return          # the declared loopback-TCP throw-away instance (never port 3306, never a non-loopback host)
+    if (isolated and socket_path and not isolated.startswith("tcp:") and not _same_path(isolated, _DEFAULT_SOCKET)
             and _same_path(isolated, socket_path) and _under_temp_dir(isolated)):
         return
     # Visible even when a fail-open caller swallows the exception: a test that
@@ -322,7 +350,17 @@ def get_connection(autocommit: bool = False):
         autocommit=autocommit,
         cursorclass=pymysql.cursors.DictCursor,
     )
-    if cfg["socket"]:
+    if cfg["socket"].startswith("tcp:"):
+        # The test-only loopback spelling (see tcp_test_target): refused outside a test process and for anything the
+        # guard does not accept, so it can never become a production or live-database transport.
+        tcp = tcp_test_target(cfg["socket"])
+        if not is_test_process():
+            raise SqlUnavailable("the 'tcp:' database target is a test-only spelling for the isolated throw-away instance")
+        if tcp is None:
+            assert_connection_allowed(cfg["socket"])        # a malformed / privileged / non-loopback / live-port spelling: always refused
+            raise LiveDatabaseRefused(f"{cfg['socket']!r} is not a valid isolated test target (tcp:127.0.0.1:<port>, port 1024-65535, not 3306)")
+        connect_kwargs["host"], connect_kwargs["port"] = tcp
+    elif cfg["socket"]:
         # Unix socket mode (mandate §10/§26): host/port are NEVER also
         # passed here — pymysql would otherwise accept both and there
         # would be a live ambiguity about which transport actually won.

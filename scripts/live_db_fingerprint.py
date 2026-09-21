@@ -39,17 +39,21 @@ def fingerprint() -> dict:
             cur.execute("SET SESSION TRANSACTION READ ONLY")
             cur.execute("SET SESSION information_schema_stats_expiry = 0")
             cur.execute(
+                "SELECT table_name AS t FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' ORDER BY table_name"
+            )
+            names = [str(_val(r, "t", 0)) for r in cur.fetchall()]
+            counts = {}
+            for name in names:               # count FIRST: opening a table is what makes its auto-increment readable
+                cur.execute(f"SELECT COUNT(*) AS n FROM `{name}`")
+                counts[name] = int(_val(cur.fetchone(), "n", 0))
+            cur.execute(
                 "SELECT table_name AS t, auto_increment AS a FROM information_schema.tables "
                 "WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' ORDER BY table_name"
             )
             meta = {str(_val(r, "t", 0)): _val(r, "a", 1) for r in cur.fetchall()}
-            out = {}
-            for name, auto in meta.items():
-                cur.execute(f"SELECT COUNT(*) AS n FROM `{name}`")
-                out[name] = {
-                    "rows": int(_val(cur.fetchone(), "n", 0)),
-                    "auto_increment": None if auto is None else int(auto),
-                }
+            out = {name: {"rows": counts[name], "auto_increment": None if meta.get(name) is None else int(meta[name])}
+                   for name in names}
             return out
 
 

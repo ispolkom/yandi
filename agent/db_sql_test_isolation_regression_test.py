@@ -138,6 +138,37 @@ def main() -> int:
     refused, calls, _ = probe({"YANDI_TEST_MODE": "0"})
     check("2: ... and YANDI_TEST_MODE=0 does not unlock the live database", refused and calls == 0)
 
+    # ── 2b. the loopback-TCP spelling of the throw-away instance (for environments with no unix sockets) ──
+    tcp = "tcp:127.0.0.1:41733"
+    refused, calls, _ = probe({"YANDI_SQL_SOCKET": tcp, conn_mod._ISOLATED_SOCKET_ENV: tcp})
+    check("2b: the declared loopback-TCP throw-away instance is allowed through", not refused and calls == 1)
+    refused, calls, _ = probe({"YANDI_SQL_SOCKET": tcp})
+    check("2b: the TCP spelling WITHOUT a declaration is refused", refused and calls == 0)
+    refused, calls, _ = probe({"YANDI_SQL_SOCKET": "tcp:127.0.0.1:41734", conn_mod._ISOLATED_SOCKET_ENV: tcp})
+    check("2b: a different port than the declared one is refused", refused and calls == 0)
+    refused, calls, _ = probe({"YANDI_SQL_SOCKET": "tcp:127.0.0.1:3306", conn_mod._ISOLATED_SOCKET_ENV: "tcp:127.0.0.1:3306"})
+    check("2b: declaring the database's own port 3306 as 'isolated' does not open it", refused and calls == 0)
+    for bad in ("tcp:10.0.0.5:41733", "tcp:localhost:41733", "tcp:127.0.0.1:80", "tcp:127.0.0.1:70000", "tcp:127.0.0.1:41733x", "tcp:"):
+        refused, calls, _ = probe({"YANDI_SQL_SOCKET": bad, conn_mod._ISOLATED_SOCKET_ENV: bad})
+        check(f"2b: {bad!r} (not loopback, a privileged/invalid port or malformed) is refused", refused and calls == 0)
+    refused, calls, _ = probe({"YANDI_SQL_SOCKET": isolated_sock, conn_mod._ISOLATED_SOCKET_ENV: tcp})
+    check("2b: a unix socket path is not allowed just because a TCP target is declared", refused and calls == 0)
+    check("2b: pymysql_target maps each spelling to the right pymysql arguments",
+          conn_mod.pymysql_target(tcp) == {"host": "127.0.0.1", "port": 41733} and conn_mod.pymysql_target("/x/y.sock") == {"unix_socket": "/x/y.sock"})
+    rec = _Recorder()
+    err = io.StringIO()
+    base = {k: v for k, v in os.environ.items() if not k.startswith("YANDI_SQL_") and k != conn_mod._ISOLATED_SOCKET_ENV and k != "YANDI_TEST_MODE"}
+    with patch.dict(os.environ, {**base, "YANDI_SQL_SOCKET": tcp, "YANDI_SQL_AUTH_MODE": "password", "YANDI_SQL_PASSWORD": "x"}, clear=True), \
+         patch.object(conn_mod, "is_test_process", lambda: False), patch.object(pymysql, "connect", rec):
+        try:
+            with conn_mod.get_connection():
+                pass
+            outside_test = "connected"
+        except conn_mod.SqlUnavailable as exc:
+            outside_test = "refused" if "test-only" in str(exc) else f"other: {exc}"
+    check("2b: the TCP spelling is a TEST-ONLY target: a process that is not a test refuses it (no production transport)",
+          outside_test == "refused" and not rec.calls, outside_test)
+
     # ── 3. refusal is loud and is a SqlUnavailable ──
     existing_err = probe({"YANDI_SQL_SOCKET": other_sock})[2]
     check("3: a refusal that could have reached a real database is announced on stderr",

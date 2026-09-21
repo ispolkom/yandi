@@ -39,7 +39,7 @@ def main() -> int:
     if not (socket and admin and admin_pw):
         print("SKIP: set YANDI_TEST_SQL_SOCKET / _ADMIN / _ADMIN_PW (see scripts/test-sql-temp.sh)")
         return 0
-    from agent.db.sql.connection import LiveDatabaseRefused, assert_connection_allowed
+    from agent.db.sql.connection import LiveDatabaseRefused, assert_connection_allowed, pymysql_target
     try:
         assert_connection_allowed(socket)   # the ONE isolation check (realpath, temp dir, declared marker)
     except LiveDatabaseRefused as e:
@@ -57,7 +57,7 @@ def main() -> int:
 
     def connect(user, password, autocommit=False):
         assert_connection_allowed(socket)
-        return pymysql.connect(unix_socket=socket, user=user, password=password, database="yandi_epistemic",
+        return pymysql.connect(**pymysql_target(socket), user=user, password=password, database="yandi_epistemic",
                                cursorclass=pymysql.cursors.DictCursor, autocommit=autocommit, charset="utf8mb4")
 
     def scalar(conn, sql, params=()):
@@ -68,7 +68,7 @@ def main() -> int:
     root = connect(admin, admin_pw, autocommit=True)
 
     # ── schema (v15 added these tables; v16 added interaction_turn on top) ──
-    check("S: the current schema version is recorded", scalar(root, "SELECT MAX(version) FROM schema_migrations") == schema.SCHEMA_VERSION == 17)
+    check("S: the current schema version is recorded", scalar(root, "SELECT MAX(version) FROM schema_migrations") == schema.SCHEMA_VERSION == 18)
     for table in ("causal_event", "commitment", "commitment_event"):
         check(f"S: table {table} exists", scalar(root, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='yandi_epistemic' AND table_name=%s", (table,)) == 1)
     with root.cursor() as cur:
@@ -82,7 +82,7 @@ def main() -> int:
                     "VALUES ('g_v14_row', 'v14_owner', 'insult', 'row that existed at schema v14', 0.5, 'registered', NOW(), NOW())")
         cur.execute("DROP TABLE personal_fact_event"); cur.execute("DROP TABLE personal_fact"); cur.execute("DROP TABLE interaction_turn")
         cur.execute("DROP TABLE causal_event"); cur.execute("DROP TABLE commitment_event"); cur.execute("DROP TABLE commitment")
-        cur.execute("DELETE FROM schema_migrations WHERE version IN (15, 16, 17)")
+        cur.execute("DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18)")
         cur.execute("INSERT IGNORE INTO schema_migrations (version, description) VALUES (14, 'simulated v14')")
     check("U: the simulated v14 database has schema version 14 and no v15 tables",
           scalar(root, "SELECT MAX(version) FROM schema_migrations") == 14

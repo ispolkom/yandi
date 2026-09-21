@@ -110,10 +110,10 @@ class FakeCursor:
         elif upper.startswith("SELECT * FROM INNER_STATE_EVENT WHERE") and "ORDER BY EVENT_ID ASC" in upper:
             self._all = [dict(e) for e in self.conn.inner_state_events if e["user_id"] == params[0]]
         elif upper.startswith("INSERT INTO COMMITMENT ("):
-            commitment_id, user_id, kind, text, evidence, due_at, created_at = params
+            commitment_id, user_id, kind, text, evidence, due_at, created_at, source_turn_id = params
             self.conn.commitments[commitment_id] = {
                 "commitment_id": commitment_id, "user_id": user_id, "kind": kind, "text": text,
-                "evidence": evidence, "due_at": due_at, "created_at": created_at}
+                "evidence": evidence, "due_at": due_at, "created_at": created_at, "source_turn_id": source_turn_id}
         elif upper.startswith("SELECT * FROM COMMITMENT WHERE COMMITMENT_ID"):
             row = self.conn.commitments.get(params[0])
             self._one = dict(row) if row else None
@@ -121,14 +121,14 @@ class FakeCursor:
             rows = [c for c in self.conn.commitments.values() if c["user_id"] == params[0]]
             self._all = [dict(c) for c in sorted(rows, key=lambda c: (c["created_at"], c["commitment_id"]))]
         elif upper.startswith("INSERT IGNORE INTO COMMITMENT_EVENT"):
-            commitment_id, user_id, event_type, source, evidence, created_at = params
+            commitment_id, user_id, event_type, source, evidence, created_at, source_turn_id, span_start, span_end = params
             self.rowcount = 0
             if not any(e["commitment_id"] == commitment_id and e["event_type"] == event_type
                        for e in self.conn.commitment_events):
                 self.conn.commitment_events.append({
                     "event_id": len(self.conn.commitment_events) + 1, "commitment_id": commitment_id,
                     "user_id": user_id, "event_type": event_type, "source": source, "evidence": evidence,
-                    "created_at": created_at})
+                    "created_at": created_at, "source_turn_id": source_turn_id, "span_start": span_start, "span_end": span_end})
                 self.rowcount = 1
         elif upper.startswith("INSERT IGNORE INTO CAUSAL_EVENT"):
             user_id, source_turn_id, event_type, span_start, span_end, created_at = params
@@ -185,6 +185,14 @@ class FakeCursor:
                          for t in rows]
         elif upper.startswith("SELECT * FROM COMMITMENT_EVENT WHERE USER_ID"):
             self._all = [dict(e) for e in self.conn.commitment_events if e["user_id"] == params[0]]
+        elif upper.startswith("SELECT COUNT(*) AS N FROM COMMITMENT_EVENT"):
+            user_id, event_type, source = params
+            self._one = {"n": sum(1 for e in self.conn.commitment_events
+                                  if e["user_id"] == user_id and e["event_type"] == event_type and e["source"] == source)}
+        elif upper.startswith("SELECT USER_TEXT FROM INTERACTION_TURN"):
+            user_id, source_turn_id = params
+            rows = [t for t in self.conn.interaction_turns if t["user_id"] == user_id and t["source_turn_id"] == source_turn_id]
+            self._one = {"user_text": rows[0]["user_text"]} if rows else None
         elif upper.startswith("SELECT * FROM FORGIVENESS_CAPACITY"):
             self._one = dict(self.conn.capacities[params[0]]) if params[0] in self.conn.capacities else None
         elif upper.startswith("INSERT INTO FORGIVENESS_CAPACITY"):
