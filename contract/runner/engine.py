@@ -133,23 +133,28 @@ def _order(scenarios: list[Scenario]) -> list[Scenario]:
     return sorted(scenarios, key=lambda s: bool(s.data.get("destructive")))
 
 
-def run_suite(suite: Suite, target, only: list[str] | None = None, lenient: bool = False, on_result=None) -> list[Result]:
+def run_suite(suite: Suite, target, only: list[str] | None = None, lenient: bool = False, on_result=None, supervisor=None) -> list[Result]:
     results: list[Result] = []
     for sc in _order(suite.scenarios):
         if only and not any(sc.id.startswith(p) for p in only):
             continue
-        res = run_scenario(suite, target, sc, lenient)
+        res = run_scenario(suite, target, sc, lenient, supervisor)
         results.append(res)
         if on_result:
             on_result(res)
     return results
 
 
-def run_scenario(suite: Suite, target, sc: Scenario, lenient: bool = False) -> Result:
+def run_scenario(suite: Suite, target, sc: Scenario, lenient: bool = False, supervisor=None) -> Result:
     res = Result(id=sc.id, status="pass", file=sc.file)
-    if sc.status == "pending" or sc.kind == "supervisor":
+    if sc.status == "pending":
         res.status, res.detail = "pending", sc.data.get("pending_reason", "")
         return res
+    if sc.kind == "supervisor":
+        if supervisor is None:
+            res.status, res.detail = "unsupported", "no supervisor harness was given (--supervisor-harness)"
+            return res
+        return supervisor.run(sc, suite.leaks)
     missing = [h for h in sc.requires if h not in target.hooks]
     if missing:
         res.status, res.detail = "unsupported", f"target offers no hook {missing}"

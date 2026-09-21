@@ -8,6 +8,7 @@
   run --target current-pet      run against a TEMPORARY copy of today's Python system (never the live one)
   run --target python-core-shell   the Python Core's lifecycle boundary, started as a separate process (fast)
   run --target python-core         the same boundary in front of the real PET application
+  run --target none --only supervisor. --supervisor-harness CMD   the supervisor scenarios against a supervisor's harness
 """
 from __future__ import annotations
 
@@ -57,6 +58,21 @@ def cmd_list(_args) -> int:
     return 0
 
 
+class _NoTarget:
+    """No core to talk to: only for runs that use nothing but a supervisor harness (--only supervisor.)."""
+    name = "no HTTP target"
+    hooks: set = set()
+    launch_secret = "0" * 64
+    unlock_key = "A" * 43 + "="
+    base_url = "http://127.0.0.1:1"
+
+    def reset(self):
+        raise RuntimeError("this run has no HTTP target")
+
+    def close(self):
+        pass
+
+
 def cmd_run(args) -> int:
     suite = _suite()
     closer = None
@@ -68,6 +84,8 @@ def cmd_run(args) -> int:
         elif args.target in ("python-core-shell", "python-core"):
             from contract.targets.python_core import PythonCoreTarget
             target = PythonCoreTarget("real" if args.target == "python-core" else "shell")
+        elif args.target == "none":
+            target = _NoTarget()
         elif args.target == "current-pet":
             from contract.selftest.current_pet import CurrentPetTarget
             target = CurrentPetTarget()
@@ -83,7 +101,11 @@ def cmd_run(args) -> int:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
     try:
-        results = run_suite(suite, target, only=args.only, lenient=args.lenient, on_result=lambda r: print(line(r), flush=True))
+        harness = None
+        if args.supervisor_harness:
+            from .supervisor import SupervisorHarness
+            harness = SupervisorHarness(args.supervisor_harness)
+        results = run_suite(suite, target, only=args.only, lenient=args.lenient, on_result=lambda r: print(line(r), flush=True), supervisor=harness)
     finally:
         if closer:
             closer()
@@ -105,7 +127,8 @@ def main(argv=None) -> int:
     sub.add_parser("list")
     r = sub.add_parser("run")
     r.add_argument("--target-file")
-    r.add_argument("--target", choices=["reference", "current-pet", "python-core-shell", "python-core"])
+    r.add_argument("--target", choices=["reference", "current-pet", "python-core-shell", "python-core", "none"])
+    r.add_argument("--supervisor-harness", help="command of a supervisor implementation's harness; runs the supervisor scenarios")
     r.add_argument("--only", action="append", help="run only fixtures whose id starts with this (repeatable)")
     r.add_argument("--lenient", action="store_true", help="skip the given-state checks so every fixture's own assertions run (used for the RED baseline)")
     r.add_argument("--json", help="write a JSON report here")

@@ -102,6 +102,17 @@ Exit code: `0` = no failure, `1` = a fixture failed or the runner could not work
 things about the fixtures — they can all be satisfied by an implementation that follows the contract, and each of 38 deliberately broken variants
 ("faults": accepts a wrong key, leaks a traceback, ignores an unknown field, applies the state before the idempotency record, …) makes a *named* fixture fail.
 
+## Supervisor scenarios (harness protocol)
+
+`scenarios/p1/supervisor.json` says what the node's supervisor must do around a core. A supervisor is not an HTTP server, so the runner reaches it through a
+**harness**: a program the implementation provides, which runs its supervisor against a stand-in core and prints a trace. The runner compiles each scenario's
+`timeline` into per-launch behaviours (`normal`, `crash_at_start`, `crash_after_ready`, `never_answers`), sends `{"config", "launches", "startup_timeout_ms"}` on
+stdin, reads JSON lines (`core_spawned`, `awaiting_state`, `unlock_sent`, `ready`, `core_exited`, `restart_scheduled{delay_ms}`, `restart_ceiling_reached`,
+`failure_reported{category,message}`, `transport_tick`, `shutdown_done`, `harness_done`) and checks them, in order, against the scenario's `expect`. It also fails
+a run that leaves a core process alive. `python -m contract.runner run --target none --only supervisor. --supervisor-harness <cmd>`; without a harness they are
+`unsupported`. The expectations are the ones frozen in `eba1165` (a test compares their hashes); only their status changed from `pending` to `active`.
+The Rust supervisor's harness is `node/core_supervisor/examples/conformance_harness.rs`.
+
 ## RED baseline (recorded 2026-09-21)
 
 Today's Python system (a temporary PET instance) against the P1 fixtures: **59 fail, 0 pass, 13 unsupported (hooks it cannot offer), 7 pending** —

@@ -21,7 +21,9 @@ from __future__ import annotations
 import copy
 import http.server
 import json
+import os
 import re
+import shutil
 import sys
 import threading
 from pathlib import Path
@@ -204,7 +206,8 @@ def double_section(suite) -> None:
     check("4.2 most of the suite really ran (not skipped)", len(passed) >= 55, f"{len(passed)} passed")
     check("4.3 fixtures needing a missing hook are reported 'unsupported', never 'pass'",
           all(r.status == "unsupported" for r in results if r.id.startswith(("launch_secret.", "key_material.key_is", "key_material.no_decrypted", "isolation."))))
-    check("4.4 supervisor fixtures are reported 'pending', never 'pass'", all(r.status == "pending" for r in results if r.id.startswith("supervisor.")))
+    check("4.4 without a supervisor harness the supervisor fixtures are 'unsupported', never 'pass'",
+          all(r.status == "unsupported" for r in results if r.id.startswith("supervisor.")))
     dump = json.dumps([r.steps + [r.detail] for r in results])
     check("4.5 no report carries the launch secret or an unlock key", target.launch_secret not in dump and target.unlock_key not in dump)
     # no destructive scenario without the restart hook
@@ -374,6 +377,122 @@ def safety_section() -> None:
         check("7.7 a target nobody listens on gives 'error', never 'pass'", res and all(r.status == "error" for r in res))
 
 
+# ── 8. supervisor scenarios: frozen expectations, the timeline compiler, the trace evaluator ─────────────────────
+FROZEN_SUPERVISOR = {   # sha256 of (config, timeline, expect) as frozen in eba1165, before any supervisor existed
+    "supervisor.starts_waits_for_locked_unlocks_and_waits_for_ready": "7051a91ec63f4f3f87b44d08a784752cd3a2bde4b8ed91ba756b4e1cadc01fbb",
+    "supervisor.restarts_a_crashed_core_with_backoff": "8c19f1e5c892049d6315c98c255429bc3574bb1d422dd16897cf9bfbcc446d78",
+    "supervisor.a_restarted_core_is_unlocked_again": "1104a317196aedc91c2db77aae3ed69b9c1a56ba5e4260cc9bc929422e063581",
+    "supervisor.stops_after_n_failures_in_the_window": "2154071418a34cc9e577052e67e8033fa6413cf81f3a0481c72bf249de9936bb",
+    "supervisor.a_core_that_never_answers_is_not_waited_for_forever": "820f4cc41cfd7cb5043e92edcd2bf8b21cfdcc8c64edc3ecddfeb74f37ea5ac9",
+    "supervisor.core_crash_does_not_touch_the_node": "e2da910c0243439e3cb30c834a98875526e65e4f10ae6f02c856f3b4fceef8cb",
+}
+
+
+def _t(events):
+    """A trace from (t_ms, event, extra) triples, ending the way a harness ends."""
+    out = [{"t_ms": t, "event": e, **x} for t, e, x in events]
+    last = out[-1]["t_ms"] if out else 0
+    return out + [{"t_ms": last + 1, "event": "shutdown_done", "graceful": True, "terminated": False, "killed": False}, {"t_ms": last + 2, "event": "harness_done"}]
+
+
+def supervisor_section(suite) -> None:
+    import hashlib
+    from contract.runner import supervisor as sup
+    by_id = {s.id: s for s in suite.scenarios if s.kind == "supervisor"}
+    check("8.1 the six supervisor fixtures are there and now executable (active, need the supervisor_harness hook)",
+          set(by_id) == set(FROZEN_SUPERVISOR) and all(s.status == "active" and s.requires == ["supervisor_harness"] for s in by_id.values()))
+    drift = []
+    for sid, want in FROZEN_SUPERVISOR.items():
+        d = by_id[sid].data
+        blob = json.dumps({"config": d["config"], "timeline": d["timeline"], "expect": d["expect"]}, sort_keys=True, separators=(",", ":"))
+        if hashlib.sha256(blob.encode()).hexdigest() != want:
+            drift.append(sid)
+    check("8.2 what the supervisor must do (config, timeline, expectations) is byte-for-byte what was frozen before any supervisor existed", drift == [], str(drift))
+    want_launches = {
+        "supervisor.starts_waits_for_locked_unlocks_and_waits_for_ready": ["normal"],
+        "supervisor.restarts_a_crashed_core_with_backoff": ["crash_at_start"] * 3,
+        "supervisor.a_restarted_core_is_unlocked_again": ["crash_after_ready", "normal"],
+        "supervisor.stops_after_n_failures_in_the_window": ["crash_at_start"] * 4,
+        "supervisor.a_core_that_never_answers_is_not_waited_for_forever": ["never_answers"] * 3,
+        "supervisor.core_crash_does_not_touch_the_node": ["crash_at_start"] * 2,
+    }
+    check("8.3 timelines compile to the intended launch behaviours", all(sup.compile_launches(by_id[i].data["timeline"]) == w for i, w in want_launches.items()))
+    try:
+        sup.compile_launches([{"core": "exits_crash"}])
+        check("8.4 a timeline that starts with a crash is refused", False)
+    except sup.TimelineError:
+        check("8.4 a timeline that starts with a crash is refused", True)
+
+    spawn = lambda n, t: (t, "core_spawned", {"launch": n, "pid": 4_100_000 + n})     # pids that cannot exist
+    good_backoff = _t([spawn(1, 10), (11, "awaiting_state", {"state": "locked"}), (60, "core_exited", {"launch": 1, "code": 3}),
+                       (60, "restart_scheduled", {"attempt": 1, "delay_ms": 100}), spawn(2, 170), (230, "core_exited", {"launch": 2, "code": 3}),
+                       (230, "restart_scheduled", {"attempt": 2, "delay_ms": 200}), spawn(3, 440), (500, "core_exited", {"launch": 3, "code": 3}),
+                       (500, "restart_scheduled", {"attempt": 3, "delay_ms": 400}), spawn(4, 920)])
+    exp = by_id["supervisor.restarts_a_crashed_core_with_backoff"].data["expect"]
+    check("8.5 evaluator: a trace that backs off 100/200/400 ms satisfies the backoff scenario", sup.evaluate(exp, good_backoff, suite.leaks) == [])
+
+    def broken(mut):
+        events = [dict(e) for e in good_backoff]
+        mut(events)
+        return sup.evaluate(exp, events, suite.leaks)
+    for label, mut in {
+        "waits that shrink": lambda ev: ev[9].update(delay_ms=50),
+        "no wait at all": lambda ev: [e.update(delay_ms=0) for e in ev if e["event"] == "restart_scheduled"],
+        "one restart too many": lambda ev: ev.insert(11, {"t_ms": 500, "event": "restart_scheduled", "attempt": 4, "delay_ms": 800}),
+        "no restart": lambda ev: [ev.remove(e) for e in list(ev) if e["event"] == "restart_scheduled"],
+        "respawned before the wait was over": lambda ev: ev[4].update(t_ms=61),
+        "the harness never finished": lambda ev: ev.pop(),
+        "the shutdown was never reported": lambda ev: ev.pop(-2),
+    }.items():
+        check(f"8.6 evaluator refuses: {label}", broken(mut) != [])
+    alive_trace = _t([(10, "core_spawned", {"launch": 1, "pid": os.getpid()})])
+    check("8.7 evaluator refuses a core process left running after the supervisor stopped", sup.evaluate([{"node": "starts_core"}], alive_trace, suite.leaks) != [])
+
+    stop_exp = by_id["supervisor.stops_after_n_failures_in_the_window"].data["expect"]
+    give_up = [spawn(1, 10), (50, "core_exited", {"launch": 1, "code": 3}), (50, "restart_scheduled", {"attempt": 1, "delay_ms": 50}), spawn(2, 120),
+               (160, "core_exited", {"launch": 2, "code": 3}), (160, "restart_scheduled", {"attempt": 2, "delay_ms": 100}), spawn(3, 280),
+               (320, "core_exited", {"launch": 3, "code": 3}), (320, "restart_scheduled", {"attempt": 3, "delay_ms": 200}), spawn(4, 540),
+               (580, "core_exited", {"launch": 4, "code": 3}), (580, "restart_ceiling_reached", {}),
+               (580, "failure_reported", {"category": "core_restart_exhausted", "message": "The core failed repeatedly; automatic restarts have stopped."})]
+    check("8.8 evaluator: three restarts, the ceiling, and a safe failure reason satisfy the ceiling scenario", sup.evaluate(stop_exp, _t(give_up), suite.leaks) == [])
+    for label, mut in {
+        "the ceiling is never reached": lambda ev: [ev.remove(e) for e in list(ev) if e["event"] == "restart_ceiling_reached"],
+        "it spawns again after giving up": lambda ev: ev.insert(-3, {"t_ms": 700, "event": "core_spawned", "launch": 5, "pid": 4_100_005}),
+        "no failure reported": lambda ev: [ev.remove(e) for e in list(ev) if e["event"] == "failure_reported"],
+        "the reason names a path": lambda ev: [e.update(message="failed at /home/iam/yandi/pet/core_main.py") for e in ev if e["event"] == "failure_reported"],
+        "the reason is a Python traceback": lambda ev: [e.update(message="Traceback (most recent call last): File \"x.py\", line 3") for e in ev if e["event"] == "failure_reported"],
+        "an unknown failure category": lambda ev: [e.update(category="something_else") for e in ev if e["event"] == "failure_reported"],
+        "three restarts became two": lambda ev: [ev.remove(e) for e in list(ev) if e["event"] == "restart_scheduled" and e["attempt"] == 3],
+    }.items():
+        events = [dict(e) for e in _t(give_up)]
+        mut(events)
+        check(f"8.9 evaluator refuses: {label}", sup.evaluate(stop_exp, events, suite.leaks) != [])
+
+    tick_exp = by_id["supervisor.core_crash_does_not_touch_the_node"].data["expect"]
+    ticks = [spawn(1, 10), (50, "core_exited", {"launch": 1, "code": 3})] + [(50 + 50 * i, "transport_tick", {}) for i in range(1, 8)]
+    check("8.10 evaluator: a transport that keeps ticking after the crash satisfies 'the node is untouched'", sup.evaluate(tick_exp, _t(ticks), suite.leaks) == [])
+    check("8.11 evaluator refuses a transport that stopped ticking when the core died", sup.evaluate(tick_exp, _t(ticks[:2] + ticks[2:3]), suite.leaks) != [])
+    check("8.12 evaluator refuses a crash test in which the core never crashed", sup.evaluate(tick_exp, _t([spawn(1, 10)] + ticks[2:]), suite.leaks) != [])
+
+    # the harness wrapper: a program that follows the protocol, right and wrong
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="yandi-contract-harness-"))
+    good = tmp / "good.py"
+    good.write_text("import json,sys\nreq=json.load(sys.stdin)\nfor e in json.loads(%r): print(json.dumps(e))\n" % json.dumps(good_backoff))
+    bad_exit = tmp / "bad_exit.py"
+    bad_exit.write_text("import json,sys\nreq=json.load(sys.stdin)\nfor e in json.loads(%r): print(json.dumps(e))\nsys.exit(9)\n" % json.dumps(good_backoff))
+    sc = by_id["supervisor.restarts_a_crashed_core_with_backoff"]
+    try:
+        r = sup.SupervisorHarness(f"{sys.executable} {good}").run(sc, suite.leaks)
+        r_bad = sup.SupervisorHarness(f"{sys.executable} {bad_exit}").run(sc, suite.leaks)
+        r_missing = sup.SupervisorHarness(str(tmp / "no-such-harness")).run(sc, suite.leaks)
+        check("8.13 a harness that follows the protocol and behaves is 'pass'", r.status == "pass", r.detail)
+        check("8.14 a harness whose host process died (exit status) is 'fail'", r_bad.status == "fail")
+        check("8.15 a harness that cannot be run is 'error', never 'pass'", r_missing.status == "error")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     for title, fn in (("SCHEMAS", schemas_section),):
         print(f"\n── {title}")
@@ -390,6 +509,8 @@ def main() -> int:
     stub_section(suite)
     print("\n── RUNNER SAFETY")
     safety_section()
+    print("\n── SUPERVISOR SCENARIOS")
+    supervisor_section(suite)
     print("\n" + "=" * 72)
     if FAILURES:
         print(f"RESULT: {len(FAILURES)} failure(s): {FAILURES}")

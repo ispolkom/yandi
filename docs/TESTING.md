@@ -149,3 +149,11 @@ With the rule switched off the same scenario fails on four points.
 fixtures against a core (`python -m contract.runner run --target-file …`) needs a core started *for the test* with throw-away state; the runner
 refuses the ports of the live system. The recorded baseline of today's Python system is `contract/baseline/red-p1-current-pet.json` (expected: RED,
 the current system implements none of the P1 lifecycle). Details in `contract/README.md`.
+
+## Node core supervisor (Rust, P1b)
+
+`scripts/test-node-supervisor.sh` runs, offline: `cargo fmt --check` and `cargo test` for `node/core_supervisor` (unit tests and supervision tests against a stand-in
+core, `tests/support/fake_core.py`, needing only `python3`), the tests against the **real** Python core (`--ignored`, need `YANDI_TEST_PYTHON` = a python with the
+core's requirements), the six supervisor scenarios of the contract through the Rust harness (`python -m contract.runner run --target none --only supervisor.
+--supervisor-harness …`), and the mutation check (`scripts/supervisor_mutants.py`: 14 deliberate defects, each must fail a named test). None of it touches the live
+system: temporary directories, loopback ports chosen by the system, processes it spawned itself.

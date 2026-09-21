@@ -216,6 +216,8 @@ def _semantic_lint(sc: dict, where: str, sections: set[str], invariants: set[str
     if unknown:
         problems.append(f"{where}: unknown placeholder(s) {sorted(unknown)}")
     if sc["kind"] == "supervisor":
+        if sc["status"] == "active" and "pending_reason" in sc:
+            problems.append(f"{where}: an active fixture must not carry pending_reason")
         return problems
     if sc["status"] == "active" and "pending_reason" in sc:
         problems.append(f"{where}: an active fixture must not carry pending_reason")

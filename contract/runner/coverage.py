@@ -19,7 +19,7 @@ def compute(suite: Suite) -> dict:
     _, invariants = doc_anchors()
     table = {i: {"now": [], "hook": [], "pending": []} for i in sorted(invariants, key=lambda x: int(x[1:]))}
     for sc in suite.scenarios:
-        bucket = "pending" if (sc.status == "pending" or sc.kind == "supervisor") else ("hook" if sc.requires else "now")
+        bucket = "pending" if sc.status == "pending" else ("hook" if sc.requires else "now")
         for t in sc.traces:
             if sc.id not in table[t["invariant"]][bucket]:
                 table[t["invariant"]][bucket].append(sc.id)
