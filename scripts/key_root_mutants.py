@@ -8,7 +8,8 @@
   K5  a corrupt identity creates a new one             K10 recovery returns a different node identity
   K6  the machine id is used as key material           K11 recovery on a new machine needs the old machine id
                                                        K12 setting YANDI_KEY_PASSWORD overwrites a legacy identity
-  and: K13 loose file permissions accepted, K14 KDF floor removed, K15 atomic write skips its verification, K16 public identity fields unauthenticated
+  and: K13 loose file permissions accepted, K14 KDF floor removed, K15 atomic write skips its verification, K16 public identity fields unauthenticated,
+  K17 a typo in a recovery code accepted, K18 a new code committed unconfirmed, K19 the old recovery secret still works, K20 a new code without the device
 
 Run: python scripts/key_root_mutants.py [--only K1,K6]   (needs cargo; offline)
 """
@@ -29,6 +30,7 @@ LOCK = ROOT / "node" / "Cargo.lock"
 TARGET_DIR = ROOT / "node" / "target-mutants"   # its OWN build directory: mutant builds must never overwrite the real binaries and libraries
 
 IDS = "src/identity_store.rs"
+RC = "src/recovery_code.rs"
 MIG = "src/migrate.rs"
 RT = "src/root.rs"
 WR = "src/wrap.rs"
@@ -60,7 +62,7 @@ MUTANTS = [
     ("K5", "a corrupt identity file yields a NEW identity", {IDS: [(OPEN_STRICT, "            let identity = match open_identity(&bytes, ctx) {\n                Ok(i) => i,\n                Err(KeyRootError::Corrupt) => return Ok(Loaded { identity: make(), created: true }),\n                Err(e) => return Err(e),\n            };\n")]}, [T + ("f11_a_damaged_identity_is_never_replaced",)]),
     ("K6", "the machine id is the key material of the device wrapper", {RT: [("        let (dn, dc) = seal(device_key, &device_aad(&id, &machine.id()), root);", "        let mk: [u8; 32] = { use sha2::{Digest, Sha256}; Sha256::digest(machine.id().as_bytes()).into() };\n        let (dn, dc) = seal(&mk, &device_aad(&id, &machine.id()), root);"), ("        match open(\n            device_key,\n            &device_aad(&self.root_id, &machine.id()),", "        let mk: [u8; 32] = { use sha2::{Digest, Sha256}; Sha256::digest(machine.id().as_bytes()).into() };\n        match open(\n            &mk,\n            &device_aad(&self.root_id, &machine.id()),")]}, [T + ("the_device_key_is_the_secret_and_the_machine_id_is_not",)]),
     ("K7", "the recovery password is hashed with a plain SHA-256", {WR: [("    Argon2::new(Algorithm::Argon2id, Version::V0x13, p)\n        .hash_password_into(password, salt, out.as_mut_slice())\n        .map_err(|_| KeyRootError::WeakParameters)?;", "    {\n        use sha2::{Digest, Sha256};\n        let mut h = Sha256::new();\n        h.update(password);\n        h.update(salt);\n        out.copy_from_slice(&h.finalize());\n        let _ = (&p, Algorithm::Argon2id, Version::V0x13, Argon2::default());\n    }")]}, [T + ("the_password_goes_through_argon2id_and_stored_parameters_below_the_policy_are_refused",)]),
-    ("K8", "the password is printed to the log", {CLI: [('            let again = read_password("Repeat it: ", args.password_stdin)?;\n', '            let again = read_password("Repeat it: ", args.password_stdin)?;\n            eprintln!("debug: password {}", &*pw);\n')]}, [T + ("the_tool_migrates_and_recovers_and_never_prints_a_secret",)]),
+    ("K8", "the password is printed to the log", {CLI: [('                let again = ask("Repeat it: ", args.stdin, true)?;\n', '                let again = ask("Repeat it: ", args.stdin, true)?;\n                eprintln!("debug: password {}", &*pw);\n')]}, [T + ("the_tool_migrates_and_recovers_and_never_prints_a_secret",)]),
     ("K9", "a failed migration does not restore the originals", {MIG: [("            let _ = write_atomic(&auth_path, &auth_bytes, |_| true);\n            if !already_v3 {\n                let _ = write_atomic(&identity_path, &identity_bytes, |_| true);\n            }\n            return Err(e);", "            return Err(e);")]}, [T + ("a_migration_that_fails_verification_restores_the_originals_and_keeps_the_backups",)]),
     ("K9b", "a migration keeps no backup of the originals", {MIG: [('        let mut backups = vec![backup_copy(&auth_path, "legacy")?];\n        if !already_v3 {\n            backups.push(backup_copy(&identity_path, "legacy")?);\n        }', "        let backups: Vec<PathBuf> = Vec::new();")]}, [T + ("migration_keeps_the_same_root_the_same_identity_and_every_original", "a_migration_that_fails_verification_restores_the_originals_and_keeps_the_backups")]),
     ("K10", "recovery leaves a DIFFERENT node identity behind", {MIG: [('        let mut backups = vec![backup_copy(&auth_path, "before-recovery")?];\n', '        let mut backups = vec![backup_copy(&auth_path, "before-recovery")?];\n        let sub = IdentityMaterial { address: [0xAB; 32], public_key: material.public_key, signing_public_key: material.signing_public_key, created_at: material.created_at.clone(), private_key: Zeroizing::new(*material.private_key), signing_private_key: Zeroizing::new(*material.signing_private_key) };\n        write_atomic(&self.dir.identity_file(self.port), &seal_identity_v3(&root, &sub), |_| true)?;\n')]}, [T + ("losing_the_device_is_not_losing_the_identity",)]),
@@ -70,6 +72,10 @@ MUTANTS = [
     ("K14", "the KDF cost floor is not enforced", {WR: [("    if params.memory_kib < policy.min_memory_kib\n        || params.iterations < policy.min_iterations\n        || params.parallelism == 0", "    if params.parallelism == 0")]}, [T + ("the_password_goes_through_argon2id_and_stored_parameters_below_the_policy_are_refused",)]),
     ("K15", "an atomic write skips its read-back verification", {AT: [("        if back != bytes || !verify(&back) {", "        if false {")]}, [T + ("a_failed_verification_leaves_the_original_untouched_and_no_temporary_file",)]),
     ("K16", "the public fields of the identity file are not authenticated", {IDS: [('    format!(\n        "yandi/identity-file/v3|{}|{}|{}|{}",\n        s.address, s.public_key, s.signing_public_key, s.root_id\n    )\n    .into_bytes()', '    format!("yandi/identity-file/v3|{}", s.root_id).into_bytes()')]}, [T + ("identity_v3_opens_only_with_its_root_and_authenticates_its_public_fields",)]),
+    ("K17", "a recovery code with a typo (bad check) is accepted", {RC: [("        if check_group(payload) != check {", "        if false {")]}, [T + ("a_typed_code_is_read_forgivingly_but_a_typo_is_named_as_a_typo",)]),
+    ("K18", "a new recovery code is committed without the owner typing it back correctly", {MIG: [("        if !typed.same_as(&pending.code) {", "        if false {")]}, [T + ("replacing_the_recovery_secret_by_a_code_needs_the_device_and_the_typed_confirmation",)]),
+    ("K19", "the OLD recovery secret still works after a new code is set", {RT: [("        next.recovery = RecoveryWrapper {", "        let _dead = RecoveryWrapper {")]}, [T + ("replacing_the_recovery_secret_by_a_code_needs_the_device_and_the_typed_confirmation", "the_new_code_recovers_the_same_identity_on_another_machine_and_the_old_password_does_not")]),
+    ("K20", "a new recovery code can be set without the device opening the key", {MIG: [("        doc.unlock_with_device(&key, self.machine)?; // only the device may replace the recovery secret\n", "")]}, [T + ("replacing_the_recovery_secret_by_a_code_needs_the_device_and_the_typed_confirmation",)]),
 ]
 
 

@@ -6,6 +6,7 @@ use key_root::identity_store::{
     legacy_passphrase, seal_identity_legacy, seal_identity_v3, IdentityFormat,
 };
 use key_root::legacy::seal_legacy_auth;
+use key_root::recovery_code::{looks_like_code, recovery_secret, RecoveryCode};
 use key_root::wrap::{derive_kek, KdfParams, KdfPolicy};
 use key_root::*;
 use std::cell::Cell;
@@ -1164,6 +1165,7 @@ fn the_tool_migrates_and_recovers_and_never_prints_a_secret() {
     let (code, out, err) = run_tool(
         &[
             "migrate",
+            "--own-password",
             "--dir",
             &dir_a,
             "--port",
@@ -1198,6 +1200,7 @@ fn the_tool_migrates_and_recovers_and_never_prints_a_secret() {
     let (code, _out, err) = run_tool(
         &[
             "migrate",
+            "--own-password",
             "--dir",
             &dir_b,
             "--machine-id",
@@ -1254,4 +1257,432 @@ fn the_tool_migrates_and_recovers_and_never_prints_a_secret() {
         out.contains("RootV2") && out.contains("RootV3") && out.contains("present"),
         "{out}"
     );
+}
+
+// ── the recovery code (what the owner writes down) ───────────────────────────────────────────────────────────────
+
+#[test]
+fn recovery_codes_are_well_formed_random_and_carry_their_own_check() {
+    let a = RecoveryCode::generate();
+    let b = RecoveryCode::generate();
+    assert_ne!(a.secret(), b.secret());
+    let shown = a.display();
+    assert_eq!(
+        shown.len(),
+        28 + 6,
+        "seven groups of four with six dashes: {shown}"
+    );
+    assert!(shown.split('-').all(|g| g.len() == 4));
+    assert!(
+        shown
+            .chars()
+            .all(|c| c == '-' || "0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(c)),
+        "look-alike characters in {shown}"
+    );
+    assert_eq!(RecoveryCode::parse(&shown).unwrap().secret(), a.secret());
+}
+
+#[test]
+fn a_typed_code_is_read_forgivingly_but_a_typo_is_named_as_a_typo() {
+    let code = RecoveryCode::generate();
+    let shown = code.display();
+    // case, spaces, missing dashes, underscores: all the same code
+    for variant in [
+        shown.to_lowercase(),
+        shown.replace('-', " "),
+        shown.replace('-', ""),
+        format!("  {shown}\n"),
+        shown.replace('-', "_").to_lowercase(),
+    ] {
+        assert_eq!(
+            RecoveryCode::parse(&variant).unwrap().secret(),
+            code.secret(),
+            "{variant:?}"
+        );
+    }
+    // O / I / L read as 0 / 1 / 1 (the alphabet has no O, I or L)
+    let with_zero = RecoveryCode::parse("0000-0000-0000-0000-0000-0000-0000");
+    let with_o = RecoveryCode::parse("OOOO-oooo-0000-0000-0000-0000-0000");
+    assert_eq!(with_zero.is_ok(), with_o.is_ok());
+    // every single wrong character, at every position, is refused as a typo (never silently accepted)
+    let chars: Vec<char> = code.secret().chars().collect();
+    for i in 0..chars.len() {
+        let mut t = chars.clone();
+        t[i] = if chars[i] == 'A' { 'B' } else { 'A' };
+        let typo: String = t.into_iter().collect();
+        assert!(
+            RecoveryCode::parse(&typo).is_err(),
+            "a typo at position {i} was accepted"
+        );
+    }
+    // two neighbouring characters swapped
+    let mut swapped = chars.clone();
+    let j = (0..chars.len() - 1)
+        .find(|&j| chars[j] != chars[j + 1])
+        .unwrap();
+    swapped.swap(j, j + 1);
+    assert!(RecoveryCode::parse(&swapped.into_iter().collect::<String>()).is_err());
+    assert!(
+        matches!(RecoveryCode::parse(&shown[..20]), Err(KeyRootError::Invalid(m)) if m.contains("incomplete"))
+    );
+    assert!(
+        matches!(RecoveryCode::parse(&format!("{shown}-AAAA")), Err(KeyRootError::Invalid(m)) if m.contains("too long"))
+    );
+    assert!(
+        matches!(RecoveryCode::parse(&format!("{}U", &shown[..shown.len() - 1])), Err(KeyRootError::Invalid(m)) if m.contains("cannot be part"))
+    );
+    assert!(matches!(
+        RecoveryCode::parse(&shown.replace("-", "-")).map(|_| ()),
+        Ok(())
+    ));
+    // a code is keyed in its canonical form; anything else is a password, exactly as typed
+    assert_eq!(
+        recovery_secret(&shown.to_lowercase()).as_str(),
+        code.secret()
+    );
+    assert_eq!(
+        recovery_secret("an old chosen password").as_str(),
+        "an old chosen password"
+    );
+    assert!(looks_like_code(&shown) && !looks_like_code("correct horse battery staple"));
+}
+
+fn migrated_store(machine: &str) -> (Store, IdentityMaterial) {
+    let (s, id) = legacy_store(machine, [7u8; 32], None, 5);
+    migrate(
+        &s,
+        machine,
+        None,
+        &FileDeviceKey::new(s.dir.file("device.key")),
+    )
+    .unwrap();
+    (s, id)
+}
+
+fn new_code_op<'a>(
+    s: &'a Store,
+    machine: &'a FixedMachine,
+    device: &'a FileDeviceKey,
+    pol: &'a KdfPolicy,
+) -> NewRecoveryCode<'a> {
+    NewRecoveryCode {
+        dir: &s.dir,
+        machine,
+        device,
+        params: FAST,
+        policy: pol,
+    }
+}
+
+#[test]
+fn replacing_the_recovery_secret_by_a_code_needs_the_device_and_the_typed_confirmation() {
+    let (s, id) = migrated_store("machine-A");
+    let m = FixedMachine("machine-A".into());
+    let device = FileDeviceKey::new(s.dir.file("device.key"));
+    let pol = policy();
+    let op = new_code_op(&s, &m, &device, &pol);
+    let before = s.snapshot();
+
+    // only the device may do it: another machine (the wrapper is bound to it) or a missing device key is "recovery required"
+    let other = FixedMachine("machine-B".into());
+    assert_eq!(
+        new_code_op(&s, &other, &device, &pol)
+            .prepare()
+            .err()
+            .unwrap(),
+        KeyRootError::RecoveryRequired
+    );
+    let no_device = FileDeviceKey::new(s.dir.file("no-such-device.key"));
+    assert_eq!(
+        new_code_op(&s, &m, &no_device, &pol)
+            .prepare()
+            .err()
+            .unwrap(),
+        KeyRootError::RecoveryRequired
+    );
+    assert_eq!(s.snapshot(), before);
+
+    let pending = op.prepare().unwrap();
+    assert_eq!(
+        s.snapshot(),
+        before,
+        "preparing a code must not change anything"
+    );
+    // a different valid code, a typo, and garbage are all refused, and nothing changes
+    assert!(matches!(
+        op.commit(&pending, &RecoveryCode::generate().display()),
+        Err(KeyRootError::Invalid(_))
+    ));
+    let mut typo = pending.code().display();
+    typo.replace_range(0..1, if typo.starts_with('A') { "B" } else { "A" });
+    assert!(matches!(
+        op.commit(&pending, &typo),
+        Err(KeyRootError::Invalid(_))
+    ));
+    assert!(op.commit(&pending, "").is_err());
+    assert_eq!(
+        s.snapshot(),
+        before,
+        "an unconfirmed code changed the key directory"
+    );
+
+    // typed back correctly (any case, spaces instead of dashes): committed
+    let typed = pending.code().display().to_lowercase().replace('-', " ");
+    let backup = op.commit(&pending, &typed).unwrap();
+    assert!(backup.to_string_lossy().contains("before-new-code") && backup.exists());
+    // the OLD password is dead; the code works; the device still works; same root, same identity, same login hash
+    let doc = RootDocument::parse(&fs::read(s.dir.auth_file()).unwrap()).unwrap();
+    assert_eq!(
+        doc.unlock_with_password(PASSWORD, &pol).unwrap_err(),
+        KeyRootError::RecoveryFailed
+    );
+    let by_code = doc
+        .unlock_with_password(pending.code().secret(), &pol)
+        .unwrap();
+    let (by_device, _) = unlock_root(&s.dir, &m, &device).unwrap();
+    assert_eq!((*by_code, *by_device), ([7u8; 32], [7u8; 32]));
+    assert_eq!(doc.login_hash, "$argon2id$login-hash");
+    assert!(open_identity_with(&s, "machine-A", Some(&by_device), None)
+        .unwrap()
+        .same_identity(&id));
+}
+
+#[test]
+fn the_new_code_recovers_the_same_identity_on_another_machine_and_the_old_password_does_not() {
+    let (a, id) = migrated_store("machine-A");
+    let m = FixedMachine("machine-A".into());
+    let device = FileDeviceKey::new(a.dir.file("device.key"));
+    let pol = policy();
+    let op = new_code_op(&a, &m, &device, &pol);
+    let pending = op.prepare().unwrap();
+    op.commit(&pending, &pending.code().display()).unwrap();
+    let b = copy_dir(
+        &a.dir,
+        &[
+            "device.key",
+            ".before-new-code-",
+            "auth.json.legacy",
+            "node_identity_9000.json.legacy",
+        ],
+    );
+    let before = b.snapshot();
+    assert_eq!(
+        recover(&b, "machine-B", PASSWORD).err().unwrap(),
+        KeyRootError::RecoveryFailed
+    );
+    assert_eq!(b.snapshot(), before);
+    recover(
+        &b,
+        "machine-B",
+        &recovery_secret(&pending.code().display().to_lowercase()),
+    )
+    .unwrap();
+    let mb = FixedMachine("machine-B".into());
+    let (root, _) =
+        unlock_root(&b.dir, &mb, &FileDeviceKey::new(b.dir.file("device.key"))).unwrap();
+    assert!(open_identity_with(&b, "machine-B", Some(&root), None)
+        .unwrap()
+        .same_identity(&id));
+}
+
+#[test]
+fn a_login_password_reset_changes_only_the_login_hash() {
+    let doc = document([7u8; 32], [9u8; 32], "machine-A");
+    let next = doc.with_login_hash("$new-hash");
+    assert_eq!(next.login_hash, "$new-hash");
+    let parsed = RootDocument::parse(&next.to_json()).unwrap();
+    assert_eq!(
+        *parsed.unlock_with_password(PASSWORD, &policy()).unwrap(),
+        [7u8; 32]
+    );
+    assert_eq!(
+        *parsed
+            .unlock_with_device(&[9u8; 32], &FixedMachine("machine-A".into()))
+            .unwrap(),
+        [7u8; 32]
+    );
+    assert_eq!(
+        (
+            next.root_id.clone(),
+            next.device.ciphertext.clone(),
+            next.recovery.ciphertext.clone()
+        ),
+        (
+            doc.root_id.clone(),
+            doc.device.ciphertext.clone(),
+            doc.recovery.ciphertext.clone()
+        )
+    );
+}
+
+/// Run the tool with a piped stdin and answer the confirmation with whatever `answer` makes of the code it printed.
+fn run_tool_with_code(
+    args: &[&str],
+    answer: impl Fn(&str) -> String,
+) -> (i32, String, String, String) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_yandi-keys"))
+        .args(args)
+        .env_remove("YANDI_KEY_PASSWORD")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut err = child.stderr.take().unwrap();
+    let err_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        err.read_to_string(&mut s).ok();
+        s
+    });
+    let mut out = String::new();
+    let mut shown = String::new();
+    for line in BufReader::new(child.stdout.take().unwrap()).lines() {
+        let line = line.unwrap();
+        if let Some(rest) = line.split("RECOVERY CODE:").nth(1) {
+            shown = rest.replace('│', "").trim().to_owned();
+            stdin
+                .write_all(format!("{0}\n{0}\n{0}\n", answer(&shown)) /* the tool asks up to three times */.as_bytes())
+                .unwrap();
+            stdin.flush().unwrap();
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    drop(stdin);
+    let status = child.wait().unwrap();
+    (
+        status.code().unwrap_or(-1),
+        out,
+        err_thread.join().unwrap(),
+        shown,
+    )
+}
+
+#[test]
+fn the_tool_makes_shows_and_confirms_a_recovery_code_and_it_restores_the_identity() {
+    let (a, id) = legacy_store("machine-A", [0x5A; 32], None, 5);
+    let dir_a = a.path().to_str().unwrap().to_owned();
+    // the owner mistypes the confirmation first: nothing is written
+    let before = a.snapshot();
+    let (code, _out, err, _shown) = run_tool_with_code(
+        &[
+            "migrate",
+            "--dir",
+            &dir_a,
+            "--machine-id",
+            "machine-A",
+            "--stdin",
+        ],
+        |c| c.replacen('-', "", 1).chars().rev().collect::<String>(),
+    );
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("not confirmed") || err.contains("(3/3)"),
+        "{err}"
+    );
+    assert_eq!(
+        a.snapshot(),
+        before,
+        "an unconfirmed code changed the key directory"
+    );
+    // typed back in lower case with spaces: accepted
+    let (code, out, err, shown) = run_tool_with_code(
+        &[
+            "migrate",
+            "--dir",
+            &dir_a,
+            "--machine-id",
+            "machine-A",
+            "--stdin",
+        ],
+        |c| c.to_lowercase().replace('-', " "),
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains(&hex::encode(&id.address[..8])) && RecoveryCode::parse(&shown).is_ok());
+    let device_hex = hex::encode(fs::read(a.dir.file("device.key")).unwrap());
+    for secret in [hex::encode([0x5Au8; 32]), device_hex] {
+        assert!(
+            !out.contains(&secret) && !err.contains(&secret),
+            "the tool printed a key"
+        );
+    }
+    // recovery on another machine with the code, typed sloppily; and a typo is reported as a typo
+    let c = copy_dir(&a.dir, &["device.key", ".legacy-"]);
+    let dir_c = c.path().to_str().unwrap().to_owned();
+    let before = c.snapshot();
+    let mut typo = shown.clone();
+    typo.replace_range(0..1, if typo.starts_with('A') { "B" } else { "A" });
+    let (code, _out, err) = run_tool(
+        &[
+            "recover",
+            "--dir",
+            &dir_c,
+            "--machine-id",
+            "machine-C",
+            "--stdin",
+        ],
+        &format!("{typo}\n"),
+    );
+    assert_eq!(code, 2);
+    assert!(
+        err.contains("typo"),
+        "a typo must be named as a typo: {err}"
+    );
+    assert_eq!(c.snapshot(), before);
+    let (code, out, err) = run_tool(
+        &[
+            "recover",
+            "--dir",
+            &dir_c,
+            "--machine-id",
+            "machine-C",
+            "--stdin",
+        ],
+        &format!("{}\n", shown.to_lowercase().replace('-', " ")),
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains(&hex::encode(&id.address[..8])));
+    // replace the code again with the tool (the device opens the key), and the previous code is dead
+    let (code, out, err, shown2) = run_tool_with_code(
+        &[
+            "new-recovery-code",
+            "--dir",
+            &dir_a,
+            "--machine-id",
+            "machine-A",
+            "--stdin",
+        ],
+        |c| c.to_owned(),
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    assert_ne!(shown, shown2);
+    let d = copy_dir(&a.dir, &["device.key", ".legacy-", ".before-new-code-"]);
+    let dir_d = d.path().to_str().unwrap().to_owned();
+    let (code, _out, err) = run_tool(
+        &[
+            "recover",
+            "--dir",
+            &dir_d,
+            "--machine-id",
+            "machine-D",
+            "--stdin",
+        ],
+        &format!("{shown}\n"),
+    );
+    assert_eq!(code, 2, "the previous code still worked");
+    assert!(err.contains("identity_recovery_failed"), "{err}");
+    let (code, out, err) = run_tool(
+        &[
+            "recover",
+            "--dir",
+            &dir_d,
+            "--machine-id",
+            "machine-D",
+            "--stdin",
+        ],
+        &format!("{shown2}\n"),
+    );
+    assert_eq!(code, 0, "{out}{err}");
 }

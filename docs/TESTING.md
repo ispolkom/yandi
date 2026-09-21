@@ -162,6 +162,6 @@ system: temporary directories, loopback ports chosen by the system, processes it
 
 `scripts/test-key-root.sh` runs, offline: `cargo fmt --check` and `cargo test` for `node/key_root` (the root document with its device and recovery wrappers, the identity formats and
 the load policy, atomic writes, migration with rollback, recovery on a "new machine", and the `yandi-keys` tool run as a subprocess whose output is scanned for secrets), a check of the whole
-node, and the mutation check (`scripts/key_root_mutants.py`, 17 deliberate defects: a failed decrypt that creates or overwrites an identity, a wrong password that leaves a trace, the machine id
+node, and the mutation check (`scripts/key_root_mutants.py`, 21 deliberate defects: a failed decrypt that creates or overwrites an identity, a wrong password that leaves a trace, the machine id
 used as a key, a weak hash for the recovery password, a printed password, a migration that cannot restore or keep backups, recovery that returns another identity, …). Everything uses temporary
 directories and a fake machine id: **the owner's real `~/.yandi_keys` is never touched.**
