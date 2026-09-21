@@ -1,0 +1,26 @@
+[package]
+name = "yandi-core-supervisor"
+version = "0.1.0"
+edition = "2021"
+description = "Owns the lifecycle of the YANDI Core process: spawn, unlock, monitor, restart with backoff, shut down (contract 1.0-rc1, P1b)"
+license = "MIT"
+
+[lib]
+name = "core_supervisor"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+base64 = "0.22.1"
+zeroize = "1"
+libc = "0.2.180"
+
+[dev-dependencies]
+tempfile = "3"

@@ -206,6 +206,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // 6b. Node-managed Core (P1b, opt-in with YANDI_MANAGED_CORE=1): the node spawns, unlocks, watches and stops the Python Core.
+    #[cfg(unix)]
+    let managed_core = yandi::managed_core::start_from_env(&auth_state);
+
     // 7. Load or create identity (используем discovery порт из конфига)
     let config = get_config();
     let discovery_port = config.ports.discovery;
@@ -1254,6 +1258,13 @@ async fn main() -> anyhow::Result<()> {
     // Keep the application running
     tokio::signal::ctrl_c().await?;
     println!("\n👋 Shutting down...");
+
+    // The Core stops first: ask it, wait, TERM, KILL only as a last resort; only the child this node spawned.
+    #[cfg(unix)]
+    if let Some(core) = managed_core {
+        let report = core.shutdown().await;
+        println!("🧠 Core stopped (graceful: {}, terminated: {}, killed: {})", report.graceful, report.terminated, report.killed);
+    }
 
     // Очистка TUN устройств
     if let Some(ref manager) = tun_manager {

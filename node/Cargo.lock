@@ -4988,6 +4988,25 @@ dependencies = [
  "webrtc-srtp",
  "webrtc-util 0.8.1",
  "x25519-dalek",
+ "yandi-core-supervisor",
+]
+
+[[package]]
+name = "yandi-core-supervisor"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hex",
+ "hkdf",
+ "libc",
+ "rand 0.8.6",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]

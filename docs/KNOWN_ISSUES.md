@@ -213,3 +213,15 @@ identity or per-user relationship state yet.
 - `node/mobile/` contains a Flutter client whose local build caches are no longer tracked.
 - No top-level `LICENSE` file exists. `node/Cargo.toml` declares MIT for the Rust crate only; the
   license of the rest of the project is undecided (see the README).
+
+## Node ⇄ Core: the legacy entrance and the unbound storage key (P1a/P1b)
+
+* The node can now own a Core process (`YANDI_MANAGED_CORE=1`, `docs/CORE_SUPERVISION.md`), and a Core in core mode is locked until the node unlocks it
+  (`docs/CORE_LIFECYCLE.md`). But **the legacy PET (`./start.sh`, :9010) is still started separately and reaches the same cognition and data without any lock**,
+  and so do the council scripts/daemons that talk to Redis or the database directly. System-wide "the Core has exactly one caller: the node" is **not enforced**
+  until the web UI moves onto `/v1` (P3/P4). Treat `start.sh` as the legacy/development path.
+* **The Node-derived key does not encrypt the SQL/personal storage yet** (P1c): the SQL layer still uses its own automatic key in `~/.local/share/yandi/keys`.
+  "Locked" therefore gates execution of the Core process, not decryption of the data. Do not describe the memory as protected by the master password.
+* The node's master key is decrypted automatically at start on the same machine (machine-id-bound, `node/src/web/auth.rs`); the web password protects the web
+  UI. Anyone who can read `~/.yandi_keys/auth.json` and the machine id can recover it.
+* Supervision is Linux/Unix only (process groups, `/proc`, `PR_SET_PDEATHSIG`); Windows and macOS need their own launcher.

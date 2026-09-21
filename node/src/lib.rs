@@ -51,6 +51,7 @@ pub mod web;
 pub mod communication;
 pub mod p2p_tunnel;
 pub mod p2p;
+pub mod managed_core;
 
 // Re-exports for convenience
 pub use core::{NodeIdentity, NetConfig, YandiConfig, PortsConfig, ClientConfig, WsConfig, init_config, get_config, update_config, set_ws_bind_override, effective_ws_bind};

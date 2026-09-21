@@ -8,6 +8,9 @@ description = "Clean P2P network refactored from NET"
 # license yet; do not read this line as the license of agent/, llm_gateway/, pet/ or docs.
 license = "MIT"
 
+[workspace]
+members = ["core_supervisor"]
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
@@ -109,6 +112,10 @@ rustls-pemfile = "2.2"
 rcgen = "0.13"
 webpki-roots = "0.26"
 time = "0.3"
+
+[target.'cfg(unix)'.dependencies]
+# Owns the lifecycle of the Python Core process (P1b). Unix only for now.
+yandi-core-supervisor = { path = "core_supervisor" }
 
 [dev-dependencies]
 tempfile = "3"
