@@ -9,7 +9,7 @@ is described in `docs/CORE_LIFECYCLE.md`. Proof: `scripts/test-node-supervisor.s
 **P1b — the node's supervisor — is implemented and tested for Linux/Unix.** It is **off by default** (`YANDI_MANAGED_CORE=1` turns it on) because nothing
 consumes the Core over `/v1` yet; the web UI moves onto it in P3/P4. What is still true: **the legacy PET (`./start.sh`, :9010) is still a second way in to
 the same data and is not gated by the node**, so the system-wide "the Core has exactly one caller: the node" is **not enforced**. The Node-derived key
-still does not encrypt the SQL/personal storage (P1c). See *What still goes around the node*.
+still does not encrypt anything of the personal memory, which is not encrypted at all today, and its root (the node's master key) is recoverable from disk files without any user secret (`docs/KEY_CHAIN_AUDIT.md`). See *What still goes around the node*.
 
 ## What the node does
 
@@ -57,7 +57,7 @@ YANDI_MANAGED_CORE=1 YANDI_CORE_PYTHON=~/venv/bin/python YANDI_CORE_ROOT=~/yandi
 
 1. The legacy PET on :9010 (and the council scripts/daemons that talk to Redis or the database directly) reach the same cognition and data without the node.
    **System-wide one-caller enforcement: NO** until P3/P4 retire them.
-2. Storage encryption is not bound to the Node-derived key (P1c): `lock` is an execution gate for this Core process, not yet a data decryption boundary.
+2. Storage encryption is not bound to the Node-derived key, and the personal memory is not encrypted at all (P1c, `docs/KEY_CHAIN_AUDIT.md`): `lock` is an execution gate for this Core process, not yet a data decryption boundary.
 3. The node's master key is decrypted automatically on this machine (machine-bound), so an attacker who is already the same user on the same machine
    can obtain it; the Core's lock protects against a Core process that is not running, not against that.
 4. Egress confinement is `none`; all outbound traffic through the node is P2.

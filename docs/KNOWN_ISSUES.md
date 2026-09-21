@@ -220,8 +220,10 @@ identity or per-user relationship state yet.
   (`docs/CORE_LIFECYCLE.md`). But **the legacy PET (`./start.sh`, :9010) is still started separately and reaches the same cognition and data without any lock**,
   and so do the council scripts/daemons that talk to Redis or the database directly. System-wide "the Core has exactly one caller: the node" is **not enforced**
   until the web UI moves onto `/v1` (P3/P4). Treat `start.sh` as the legacy/development path.
-* **The Node-derived key does not encrypt the SQL/personal storage yet** (P1c): the SQL layer still uses its own automatic key in `~/.local/share/yandi/keys`.
+* **The Node-derived key does not encrypt any personal storage yet, and the personal/epistemic memory is not encrypted at all** (P1c; see `docs/KEY_CHAIN_AUDIT.md`): the
+  SQL crypto primitives exist but are not wired; the automatic key in `~/.local/share/yandi/keys` protects only the node's model configuration store.
   "Locked" therefore gates execution of the Core process, not decryption of the data. Do not describe the memory as protected by the master password.
-* The node's master key is decrypted automatically at start on the same machine (machine-id-bound, `node/src/web/auth.rs`); the web password protects the web
-  UI. Anyone who can read `~/.yandi_keys/auth.json` and the machine id can recover it.
+* The node's master key is decrypted automatically at start on the same machine, but the key that protects it is derived from `/etc/machine-id`, which is not a secret:
+  anyone who can read `~/.yandi_keys/auth.json` recovers it, with no password. **The master password cannot re-derive the master key** (its salt is never stored), so it is
+  not a recovery path, and a rebind produces a different key. See `docs/KEY_CHAIN_AUDIT.md` (F1, F2).
 * Supervision is Linux/Unix only (process groups, `/proc`, `PR_SET_PDEATHSIG`); Windows and macOS need their own launcher.

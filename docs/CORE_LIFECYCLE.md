@@ -8,7 +8,8 @@ Tests: `pet/pet_core_lifecycle_regression_test.py` and `python -m contract.runne
 
 **Lifecycle unlock is implemented. Storage encryption is NOT yet bound to the Node-derived key.** The core, started in *core mode*, is a separate
 process on `127.0.0.1`, locked until `POST /v1/unlock`; while locked it serves nothing of the real application (HTTP and WebSocket). What is
-still true of today's system: the SQL/personal storage is encrypted with the old automatic key in `~/.local/share/yandi/keys`, so "the memory is
+still true of today's system: the SQL/personal memory is **not application-encrypted at all** (plain text at rest, protected only by the dedicated database instance, its unix socket, a
+least-privilege role and file permissions; the automatic key in `~/.local/share/yandi/keys` belongs to the node's model configuration store), so "the memory is
 protected by the master password" must not be said yet; and the gate covers this process only (see *What still goes around the gate*).
 Classification: **PARTIAL** — a real, tested boundary in front of the real application, with the storage binding and the other entrances open.
 
@@ -65,7 +66,7 @@ version of the database layer.
 1. **Other entrances to the same data.** The ordinary PET (`start.sh`, port 9010) is not in core mode and serves as before; scripts and daemons that talk to
    Redis or the database directly (`pet/council_chat_listen.py`, `pet/council_gpt_auto.py`, `pet/council_claude_auto.py`, `agent/council_*`) are separate
    processes the lifecycle knows nothing about.
-2. **Storage keys.** The Node-derived key is proven and held, but nothing encrypts with it yet: the SQL layer still uses its own automatic key. Binding
+2. **Storage keys.** The Node-derived key is proven and held, but nothing encrypts with it yet, and there is no SQL storage key to bind it to: the personal memory is not encrypted (`docs/KEY_CHAIN_AUDIT.md`). Binding
    storage to the derived key is a migration of its own, before the web UI moves onto `/v1` (P3/P4).
 3. **Work started before a lock.** A request that started a background thread or task (for example the validation log writer in the council server) is not
    stopped by `lock`.
