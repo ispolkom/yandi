@@ -4,17 +4,20 @@
 //!   yandi-keys migrate           legacy → recoverable root; YOU choose the master password (typed twice); --generate-code makes a recovery code instead
 //!   yandi-keys new-recovery-code replace the recovery secret by a fresh recovery code (the device opens the key; identity and chats untouched)
 //!   yandi-keys recover           new machine / lost device key: type the recovery code
+//!   yandi-keys core-key          print the key the Core is given (base64), for `python -m agent.db.sql.protect`; only into a pipe, never a terminal
 //!
 //!   options: --dir D (default ~/.yandi_keys)  --port N (9000)  --machine-id ID
 //!            --generate-code  (migrate: make and show a recovery code instead of choosing a password)
 //!            --show           (show what you type; by default a secret is typed with no echo)
 //!            --password-stdin (read every answer as a line from standard input; for scripts and tests)
 //!
-//! It never prints a key. The recovery code is printed once, on purpose, by `migrate` and `new-recovery-code`; it is never stored.
+//! It prints no key, with one exception: `core-key` writes the derived Core key to a pipe, for the tool that seals the personal memory.
+//! The recovery code is printed once, on purpose, by `migrate` and `new-recovery-code`; it is never stored.
+use base64::Engine;
 use key_root::{
-    recovery_code::looks_like_code, status, DeviceKeyProvider, FileDeviceKey, FixedMachine,
-    KdfParams, KdfPolicy, KeyDir, KeyRootError, MachineContext, Migration, NewRecoveryCode,
-    Recovery, RecoveryCode, SystemMachine,
+    derive_domain, recovery_code::looks_like_code, status, unlock_root, DeviceKeyProvider,
+    FileDeviceKey, FixedMachine, KdfParams, KdfPolicy, KeyDir, KeyRootError, MachineContext,
+    Migration, NewRecoveryCode, Recovery, RecoveryCode, SystemMachine, DOMAIN_CORE,
 };
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -312,6 +315,24 @@ fn run() -> Result<i32, String> {
                     for b in &r.backups {
                         println!("backup kept: {}", b.display());
                     }
+                    Ok(0)
+                }
+                Err(e) => Ok(fail(&e)),
+            }
+        }
+        "core-key" => {
+            // The key itself goes out here, so only into a pipe: a terminal keeps scrollback, screen recordings and shoulders.
+            if unsafe { libc::isatty(1) } == 1 {
+                eprintln!("yandi-keys: core-key prints a secret; pipe it to the program that needs it, never to a terminal");
+                return Ok(2);
+            }
+            match unlock_root(&dir, machine.as_ref(), &device) {
+                Ok((root, _)) => {
+                    let key = derive_domain(&root, DOMAIN_CORE);
+                    let text = Zeroizing::new(
+                        base64::engine::general_purpose::STANDARD.encode(key.as_slice()),
+                    );
+                    println!("{}", text.as_str());
                     Ok(0)
                 }
                 Err(e) => Ok(fail(&e)),

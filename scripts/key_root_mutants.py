@@ -9,7 +9,8 @@
   K6  the machine id is used as key material           K11 recovery on a new machine needs the old machine id
                                                        K12 setting YANDI_KEY_PASSWORD overwrites a legacy identity
   and: K13 loose file permissions accepted, K14 KDF floor removed, K15 atomic write skips its verification, K16 public identity fields unauthenticated,
-  K17 a typo in a recovery code accepted, K18 a new code committed unconfirmed, K19 the old recovery secret still works, K20 a new code without the device
+  K17 a typo in a recovery code accepted, K18 a new code committed unconfirmed, K19 the old recovery secret still works, K20 a new code without the device,
+  K21 core-key prints the root instead of the derived key, K22 core-key prints into a terminal
 
 Run: python scripts/key_root_mutants.py [--only K1,K6]   (needs cargo; offline)
 """
@@ -76,6 +77,8 @@ MUTANTS = [
     ("K18", "a new recovery code is committed without the owner typing it back correctly", {MIG: [("        if !typed.same_as(&pending.code) {", "        if false {")]}, [T + ("replacing_the_recovery_secret_by_a_code_needs_the_device_and_the_typed_confirmation",)]),
     ("K19", "the OLD recovery secret still works after a new code is set", {RT: [("        next.recovery = RecoveryWrapper {", "        let _dead = RecoveryWrapper {")]}, [T + ("replacing_the_recovery_secret_by_a_code_needs_the_device_and_the_typed_confirmation", "the_new_code_recovers_the_same_identity_on_another_machine_and_the_old_password_does_not")]),
     ("K20", "a new recovery code can be set without the device opening the key", {MIG: [("        doc.unlock_with_device(&key, self.machine)?; // only the device may replace the recovery secret\n", "")]}, [T + ("replacing_the_recovery_secret_by_a_code_needs_the_device_and_the_typed_confirmation",)]),
+    ("K21", "core-key prints the ROOT key instead of the derived Core key", {CLI: [("                    let key = derive_domain(&root, DOMAIN_CORE);\n", "                    let key = root;\n")]}, [T + ("core_key_prints_exactly_the_key_the_node_gives_the_core_and_nothing_else",)]),
+    ("K22", "core-key prints into a terminal", {CLI: [("            if unsafe { libc::isatty(1) } == 1 {\n", "            if false {\n")]}, [T + ("core_key_never_prints_into_a_terminal",)]),
 ]
 
 

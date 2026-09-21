@@ -1688,3 +1688,101 @@ fn the_tool_makes_shows_and_confirms_a_recovery_code_and_it_restores_the_identit
     );
     assert_eq!(code, 0, "{out}{err}");
 }
+
+#[test]
+fn core_key_prints_exactly_the_key_the_node_gives_the_core_and_nothing_else() {
+    use base64::Engine;
+    let (s, _id) = migrated_store("machine-A");
+    let dir = s.path().to_str().unwrap().to_owned();
+    let (code, out, err) = run_tool(
+        &[
+            "core-key",
+            "--dir",
+            &dir,
+            "--port",
+            "9000",
+            "--machine-id",
+            "machine-A",
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "{err}");
+    let (root, _) = unlock_root(
+        &s.dir,
+        &FixedMachine("machine-A".into()),
+        &FileDeviceKey::new(s.dir.file("device.key")),
+    )
+    .unwrap();
+    let expected = base64::engine::general_purpose::STANDARD
+        .encode(derive_domain(&root, DOMAIN_CORE).as_slice());
+    assert_eq!(out.trim_end(), expected, "it prints the derived Core key");
+    assert_eq!(out.lines().count(), 1, "one line, nothing else on stdout");
+    assert!(err.is_empty(), "nothing on stderr: {err}");
+    assert!(
+        !out.contains(&base64::engine::general_purpose::STANDARD.encode(root.as_slice())),
+        "never the root itself"
+    );
+    // the same directory read on another machine has no way to open it without recovery: no key, a category, no output
+    let (code, out, err) = run_tool(
+        &[
+            "core-key",
+            "--dir",
+            &dir,
+            "--port",
+            "9000",
+            "--machine-id",
+            "machine-B",
+        ],
+        "",
+    );
+    assert_ne!(code, 0);
+    assert!(out.is_empty(), "no key on stdout: {out}");
+    assert!(err.contains("yandi-keys:"), "{err}");
+}
+
+#[test]
+fn core_key_never_prints_into_a_terminal() {
+    use std::os::fd::FromRawFd;
+    use std::process::{Command, Stdio};
+    let (s, _id) = migrated_store("machine-A");
+    let dir = s.path().to_str().unwrap().to_owned();
+    let (mut master, mut slave) = (0i32, 0i32);
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    assert_eq!(rc, 0, "a pseudo-terminal is needed for this test");
+    let out = Command::new(env!("CARGO_BIN_EXE_yandi-keys"))
+        .args([
+            "core-key",
+            "--dir",
+            &dir,
+            "--port",
+            "9000",
+            "--machine-id",
+            "machine-A",
+        ])
+        .stdin(Stdio::null())
+        .stdout(unsafe { Stdio::from_raw_fd(slave) }) // the child's stdout IS a terminal
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert_ne!(out.status.code(), Some(0), "it must refuse");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("never to a terminal"), "{err}");
+    // nothing that could be a key reached the terminal
+    unsafe {
+        libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
+    }
+    let mut buf = [0u8; 256];
+    let n = unsafe { libc::read(master, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+    assert!(n <= 0, "something was written to the terminal: {n} bytes");
+    unsafe {
+        libc::close(master);
+    }
+}
