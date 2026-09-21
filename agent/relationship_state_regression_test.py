@@ -118,6 +118,54 @@ def main() -> int:
           list(inspect.signature(rs.record_insult).parameters) == ["conn", "user_id", "severity"]
           and list(inspect.signature(rs.record_accepted_apology).parameters) == ["conn", "user_id", "offense_severity", "sincerity"])
 
+    # ── 9. trust from a directly OBSERVED delivery: bounded, shrinking, ceilinged, code-owned, strict ──
+    rewards = [rs.observed_trust_reward(k) for k in range(20)]
+    check("9: the reward starts at the base, shrinks with every earlier proof, and is zero once negligible",
+          rewards[0] == rs.OBSERVED_TRUST_BASE and all(rewards[i] >= rewards[i + 1] for i in range(19)) and rewards[-1] == 0.0
+          and all(r >= 0 for r in rewards), repr(rewards))
+    check("9: the whole lifetime total is bounded (a geometric series: base / (1 - decay)) and far below a single verified-kept promise's worth of 8 plus",
+          sum(rewards) < rs.OBSERVED_TRUST_BASE / (1 - rs.OBSERVED_TRUST_DECAY) and sum(rewards) < 5.0)
+    check("9: a serious harm costs more than the first reward and more than all later ones together",
+          rs.INSULT_TRUST_PER_SEVERITY > rs.OBSERVED_TRUST_BASE and rs.INSULT_TRUST_PER_SEVERITY > sum(rewards[1:]))
+    check("9: a negative or absurd count cannot enlarge the reward", rs.observed_trust_reward(-5) == rs.OBSERVED_TRUST_BASE and rs.observed_trust_reward(10**6) == 0.0)
+    c = FakeConnection()
+    got = rs.record_observed_commitment(c, P, 0)
+    s = rs.get_state(c, P)
+    check("9: one observed delivery moves TRUST only (respect and affection untouched), by the reward",
+          got == rs.OBSERVED_TRUST_BASE and close(s["trust"], 50.0 + rs.OBSERVED_TRUST_BASE) and s["respect"] == 50.0 and s["affection"] == 30.0, repr(s))
+    check("9: the audit row carries the magnitude and replay rebuilds the state from the trail alone",
+          [(e["event_type"], e["weight"]) for e in c.inner_state_events] == [("commitment_observed", rs.OBSERVED_TRUST_BASE)]
+          and all(close(rs.replay(c, P)[k], s[k]) for k in rs.COORDINATES))
+    high = FakeConnection()
+    high.inner_state[P] = {"user_id": P, "trust": 90.0, "respect": 50.0, "affection": 30.0}
+    rs.record_observed_commitment(high, P, 0)
+    check("9: ABOVE the ceiling an observed delivery adds nothing and never subtracts", rs.get_state(high, P)["trust"] == 90.0)
+    near = FakeConnection()
+    near.inner_state[P] = {"user_id": P, "trust": rs.OBSERVED_TRUST_CEILING - 0.5, "respect": 50.0, "affection": 30.0}
+    rs.record_observed_commitment(near, P, 0)
+    check("9: near the ceiling the reward is cut so trust lands on it exactly", close(rs.get_state(near, P)["trust"], rs.OBSERVED_TRUST_CEILING))
+    check("9: replay of a trail with observed rewards clamps at the ceiling exactly like the live path",
+          all(close(rs.replay(near, P)[k], rs.get_state(near, P)[k]) for k in ("respect", "affection")))
+    check("9: the write API takes the count of earlier proofs, never a coordinate or a reward",
+          list(inspect.signature(rs.record_observed_commitment).parameters) == ["conn", "user_id", "prior_observed"])
+    broken = FakeConnection()
+    try:
+        with patch.object(repo, "update_inner_state", side_effect=RuntimeError("no grant")), patch.object(rs.log, "warning"):
+            rs.record_observed_commitment(broken, P, 0)
+        strict = False
+    except RuntimeError:
+        strict = True
+    check("9: unlike the older events, this transition NEVER swallows a failed write: the caller's transaction must roll the proof back", strict)
+    lenient = FakeConnection()
+    with patch.object(repo, "update_inner_state", side_effect=RuntimeError("no grant")), patch.object(rs.log, "warning"):
+        rs.record_insult(lenient, P, 0.6)
+    check("9: (the older events keep their documented fail-open behaviour)", lenient.inner_state_events == [])
+    healed = FakeConnection()
+    rs.record_insult(healed, P, 1.0)
+    trust_lost = rs.get_state(healed, P)["trust"]
+    rs.record_accepted_apology(healed, P, 1.0, 1.0)
+    check("9: APOLOGY != TRUST RESTORATION — an accepted apology never gives trust back", rs.get_state(healed, P)["trust"] == trust_lost)
+
     print()
     print("=" * 72)
     if FAILURES:

@@ -27,7 +27,8 @@ the model never supplies a coordinate.
 APOLOGY != TRUST RESTORED: an accepted apology opens healing and gives back a
 bounded part of the RESPECT that the offense cost; it never restores trust or
 affection. Trust is restored by BEHAVIOUR: a promise whose fulfilment was
-VERIFIED (agent/relationship_commitments.py). A person's own report of having
+VERIFIED (agent/relationship_commitments.py): today only a delivery observed directly in the chat, worth
+a small, shrinking, ceilinged amount of trust. A person's own report of having
 kept a promise is recorded but moves nothing (TRUST != TRUTH).
 
 ONE CAUSAL EVENT -> ONE STATE TRANSITION: every write below is called exactly
@@ -61,6 +62,15 @@ INSULT_RESPECT_PER_SEVERITY = 20.0
 INSULT_TRUST_PER_SEVERITY = 8.0
 INSULT_AFFECTION_PER_SEVERITY = 3.0
 APOLOGY_RESPECT_RECOVERY_SHARE = 0.3  # of the respect the offense cost, scaled by sincerity
+# A promise whose fulfilment YANDI OBSERVED DIRECTLY IN THE CHAT (the deliverable itself is in a later message)
+# proves only trivial reliability: giving a word or a number when you said you would costs nothing. It moves TRUST
+# only, by a small amount that shrinks with every earlier such proof and can never lift trust above a ceiling, so
+# many trivial promises cannot buy a relationship (TRIVIAL PROMISE FARMING MUST NOT DOMINATE TRUST). Serious harm
+# (an insult costs up to 8 trust, a verified broken promise 15) stays far larger than one such reward.
+OBSERVED_TRUST_BASE = 2.0
+OBSERVED_TRUST_DECAY = 0.6       # reward for the k-th earlier proof: BASE * DECAY**k (the total is bounded: BASE / (1 - DECAY) = 5)
+OBSERVED_TRUST_MIN_REWARD = 0.05  # below this a further proof changes nothing
+OBSERVED_TRUST_CEILING = 60.0
 KEPT_TRUST, KEPT_RESPECT, KEPT_AFFECTION = 8.0, 3.0, 0.0        # a verified kept promise proves reliability
 BROKEN_TRUST, BROKEN_RESPECT, BROKEN_AFFECTION = -15.0, -5.0, -1.0  # a verified broken one hurts trust most
 
@@ -103,10 +113,27 @@ def _commitment_deltas(kept: bool) -> Dict[str, float]:
     return {"trust": BROKEN_TRUST, "respect": BROKEN_RESPECT, "affection": BROKEN_AFFECTION}
 
 
-def _apply(conn, user_id: str, event_type: str, deltas: Dict[str, float], sincerity: float, weight: float) -> None:
+def observed_trust_reward(prior_observed: int) -> float:
+    """The trust a directly observed in-chat delivery is worth, given how many such proofs the person already
+    gave: bounded, geometrically shrinking, zero once negligible. Pure."""
+    reward = OBSERVED_TRUST_BASE * OBSERVED_TRUST_DECAY ** max(0, int(prior_observed))
+    return round(reward, 4) if reward >= OBSERVED_TRUST_MIN_REWARD else 0.0
+
+
+def _observed_deltas(reward: float, trust_before: float) -> Dict[str, float]:
+    """Trust only (no respect, no affection), and never above the ceiling."""
+    return {"trust": max(0.0, min(reward, OBSERVED_TRUST_CEILING - trust_before))}
+
+
+def _apply(
+    conn, user_id: str, event_type: str, deltas: Dict[str, float], sincerity: float, weight: float, strict: bool = False,
+) -> None:
     """Move the coordinates by `deltas` and append the audit event. A failure
     here must not break the grievance lifecycle it is attached to, but it is
-    logged, never swallowed silently."""
+    logged, never swallowed silently. `strict` is for a transition that is the
+    PROOF of another write (a verified fulfilment): its failure must reach the
+    caller's transaction so that the proof is rolled back with it, never kept
+    without its consequence."""
     try:
         row = repo.get_or_create_inner_state(conn, user_id)
         before = _current(row)
@@ -115,6 +142,8 @@ def _apply(conn, user_id: str, event_type: str, deltas: Dict[str, float], sincer
         note = " ".join(f"{c}{after[c] - before[c]:+.1f}" for c in COORDINATES if after[c] != before[c])
         repo.record_inner_state_event(conn, user_id, event_type, note[:255], sincerity=sincerity, weight=weight)
     except Exception:
+        if strict:
+            raise
         log.warning("relationship_state: could not apply %s for %s", event_type, user_id, exc_info=True)
 
 
@@ -148,6 +177,17 @@ def record_verified_commitment(conn, user_id: str, kept: bool) -> None:
     )
 
 
+def record_observed_commitment(conn, user_id: str, prior_observed: int) -> float:
+    """A commitment whose fulfilment was observed DIRECTLY in the chat (verified by
+    relationship_commitments.record_direct_fulfilment, exactly once per commitment). Returns the reward
+    (before the ceiling). The audit row's weight is that reward, which is all replay needs."""
+    reward = observed_trust_reward(prior_observed)
+    row = repo.get_or_create_inner_state(conn, user_id, for_update=True)
+    _apply(conn, user_id, "commitment_observed", _observed_deltas(reward, _current(row)["trust"]), sincerity=1.0, weight=reward,
+           strict=True)
+    return reward
+
+
 def replay_from_events(events) -> Dict[str, float]:
     """Rebuild trust/respect/affection from the audit trail alone (oldest
     first), from the defaults, with the same pure delta rules and clamping as
@@ -161,6 +201,8 @@ def replay_from_events(events) -> Dict[str, float]:
             deltas = _apology_deltas(weight, sincerity)
         elif kind in ("commitment_kept", "commitment_broken"):
             deltas = _commitment_deltas(kind == "commitment_kept")
+        elif kind == "commitment_observed":
+            deltas = _observed_deltas(weight, state["trust"])
         else:
             continue
         state = {c: _clamp(state[c] + deltas.get(c, 0.0)) for c in COORDINATES}
