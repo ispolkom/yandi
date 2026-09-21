@@ -9,7 +9,7 @@ description = "Clean P2P network refactored from NET"
 license = "MIT"
 
 [workspace]
-members = ["core_supervisor"]
+members = ["core_supervisor", "key_root"]
 
 [dependencies]
 # Async runtime
@@ -116,6 +116,8 @@ time = "0.3"
 [target.'cfg(unix)'.dependencies]
 # Owns the lifecycle of the Python Core process (P1b). Unix only for now.
 yandi-core-supervisor = { path = "core_supervisor" }
+# The root of the key chain: device / recovery wrappers, identity formats, the loading policy that never replaces an identity (P1c-1). Unix only for now.
+yandi-key-root = { path = "key_root" }
 
 [dev-dependencies]
 tempfile = "3"

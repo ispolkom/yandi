@@ -4989,6 +4989,7 @@ dependencies = [
  "webrtc-util 0.8.1",
  "x25519-dalek",
  "yandi-core-supervisor",
+ "yandi-key-root",
 ]
 
 [[package]]
@@ -5006,6 +5007,23 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "yandi-key-root"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "hex",
+ "hkdf",
+ "libc",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
  "zeroize",
 ]
 

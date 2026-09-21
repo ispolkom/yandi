@@ -26,3 +26,4 @@ configs/supernodes.json
 !examples/*.json
 .data/
 data/.yandi_cache/
+/target-mutants/
