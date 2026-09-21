@@ -1460,7 +1460,8 @@ async function sendToLocal(text){
     document.getElementById(thinkId)?.remove();
     renderLocalChat();
     await _saveLocalMsg(aiMsg);
-    sbTurn.textContent="✅ Готово";
+    // какая модель ответила (Голос из вкладки «YANDI» — «yandi-voice»): видно, действует ли выбор
+    sbTurn.textContent=d.model_used?("✅ Готово · отвечает: "+(d.model_used==="yandi-voice"?"выбранный Голос (yandi-voice)":d.model_used)):"✅ Готово";
   }catch(e){
     document.getElementById(thinkId)?.remove();
     const errMsg={role:"assistant",content:"❌ Ошибка: "+e.message,ts:now()};
