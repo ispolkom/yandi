@@ -6,6 +6,8 @@
   run --target-file F.json      run the fixtures against an already running test core described in F.json
   run --target reference        run against the in-repo test double (proves the fixtures can be satisfied)
   run --target current-pet      run against a TEMPORARY copy of today's Python system (never the live one)
+  run --target python-core-shell   the Python Core's lifecycle boundary, started as a separate process (fast)
+  run --target python-core         the same boundary in front of the real PET application
 """
 from __future__ import annotations
 
@@ -63,6 +65,9 @@ def cmd_run(args) -> int:
         if args.target == "reference":
             from contract.selftest.reference_double import ReferenceTarget
             target = ReferenceTarget()
+        elif args.target in ("python-core-shell", "python-core"):
+            from contract.targets.python_core import PythonCoreTarget
+            target = PythonCoreTarget("real" if args.target == "python-core" else "shell")
         elif args.target == "current-pet":
             from contract.selftest.current_pet import CurrentPetTarget
             target = CurrentPetTarget()
@@ -100,7 +105,7 @@ def main(argv=None) -> int:
     sub.add_parser("list")
     r = sub.add_parser("run")
     r.add_argument("--target-file")
-    r.add_argument("--target", choices=["reference", "current-pet"])
+    r.add_argument("--target", choices=["reference", "current-pet", "python-core-shell", "python-core"])
     r.add_argument("--only", action="append", help="run only fixtures whose id starts with this (repeatable)")
     r.add_argument("--lenient", action="store_true", help="skip the given-state checks so every fixture's own assertions run (used for the RED baseline)")
     r.add_argument("--json", help="write a JSON report here")

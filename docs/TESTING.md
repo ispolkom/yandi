@@ -28,6 +28,7 @@ The interpreter is `YANDI_PYTHON`, else `./.venv`, else `~/venv`, else `python3`
 | Relationship memory | `agent.message_intensity_regression_test`, `agent.relationship_memory_regression_test`, `agent.relationship_apology_matching_regression_test`, `agent.relationship_healing_clock_regression_test`, `agent.relationship_state_regression_test`, `agent.relationship_commitments_regression_test`, `agent.relationship_direct_fulfilment_regression_test`, `agent.relationship_idempotency_regression_test` |
 | Epistemic / write-back | `agent.epistemic_canonical_trust_shadow_regression_test`, `agent.writeback_episodic_sql_regression_test` |
 | SQL layer | `agent.db_sql_shadow_write_regression_test`, `agent.db_sql_security_injection_regression_test`, `agent.db_sql_test_isolation_regression_test` |
+| Core lifecycle (P1a) | `pet.pet_core_lifecycle_regression_test` — launch secret file, check value, lifecycle, concurrency, gate in front of the real application, contract fixtures against the Core as a separate process, mutants M1–M13; see `docs/CORE_LIFECYCLE.md` |
 | Node ⇄ Core contract | `contract.contract_regression_test` — the contract's own files (schemas, fixtures, coverage) and proof that the fixtures bite (needs `jsonschema`, listed in `requirements.txt`); see `contract/README.md` |
 
 ## Tests never touch the live database

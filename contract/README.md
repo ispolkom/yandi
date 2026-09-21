@@ -78,6 +78,8 @@ python -m contract.runner run --target-file my-core.json
 # {"name": "rust-core dev", "base_url": "http://127.0.0.1:41235", "launch_secret": "<the secret it was launched with>",
 #  "unlock_key": "<base64 of the 32-byte key that unlocks its throw-away state>", "hooks": []}
 
+python -m contract.runner run --target python-core    # the Python Core as a separate process, real PET behind the boundary (P1a)
+python -m contract.runner run --target python-core-shell   # same boundary, tiny stand-in application (fast)
 python -m contract.runner run --target reference      # the in-repo test double: proves the fixtures can be satisfied
 python -m contract.runner run --target current-pet --lenient --json contract/baseline/red-p1-current-pet.lenient.json   # the RED baseline
 ```
@@ -89,7 +91,7 @@ Exit code: `0` = no failure, `1` = a fixture failed or the runner could not work
 
 * the runner **refuses** the ports of the live system (PET `9010`, node `9999`, AI-RPC `18082`, bridge `18083`, Redis, MySQL, Ollama …) and any
   non-loopback address, whatever a fixture or an operator says (`runner/wire.py`);
-* the only target that starts anything (`selftest/current_pet.py`) runs a **temporary** copy with a scrubbed environment, a throw-away home,
+* the targets that start anything (`selftest/current_pet.py`, `targets/python_core.py`) run a **temporary** copy with a scrubbed environment, a throw-away home,
   `YANDI_TEST_MODE=1` (the database layer refuses real connections) and its Redis address redirected to a port where nothing listens;
 * with no test core, the offline checks (`validate`, the regression test) need nothing at all;
 * reports never contain the launch secret or a key (they are replaced by `<secret>`, `<key.valid>`, `<key.wrong>`).

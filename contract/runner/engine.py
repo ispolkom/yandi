@@ -27,6 +27,11 @@ class TargetUnavailable(Exception):
     """The target cannot be brought to a fresh state (infrastructure problem, not a contract failure)."""
 
 
+class ProbeUnsupported(Exception):
+    """A target offers a hook in general but cannot honestly answer this particular probe: the scenario is 'unsupported', never
+    a pass (a probe that could only ever say what the fixture hopes to hear proves nothing)."""
+
+
 @dataclass
 class Result:
     id: str
@@ -149,7 +154,6 @@ def run_scenario(suite: Suite, target, sc: Scenario, lenient: bool = False) -> R
     if missing:
         res.status, res.detail = "unsupported", f"target offers no hook {missing}"
         return res
-    run = Run(suite, target, sc)
     try:
         try:
             if not lenient:                    # lenient = no preparation at all: the requests go out exactly as the fixture says
@@ -159,6 +163,7 @@ def run_scenario(suite: Suite, target, sc: Scenario, lenient: bool = False) -> R
         except TargetUnavailable as exc:
             res.status, res.detail = "error", f"target could not be reset: {exc}"
             return res
+        run = Run(suite, target, sc)                # after reset: a target that restarts gets a new launch secret and key each time
         problem = _prepare_given(run, lenient)
         if problem:
             res.status, res.detail = "fail", problem
@@ -172,9 +177,11 @@ def run_scenario(suite: Suite, target, sc: Scenario, lenient: bool = False) -> R
             if problem:
                 res.status, res.detail = "fail", f"step {i}: {problem}"
                 break
+    except ProbeUnsupported as exc:
+        res.status, res.detail = "unsupported", f"probe not answerable by this target: {exc}"
     except Exception as exc:  # a bug in the runner or a broken fixture must not look like a pass
         res.status, res.detail = "error", f"runner error: {type(exc).__name__}: {exc}"
-    res.steps = run.log
+    res.steps = getattr(locals().get("run"), "log", [])
     return res
 
 

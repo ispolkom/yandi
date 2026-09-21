@@ -61,6 +61,7 @@ SUITES=(
   agent.db_sql_shadow_write_regression_test
   agent.db_sql_security_injection_regression_test
   agent.db_sql_test_isolation_regression_test
+  pet.pet_core_lifecycle_regression_test
   contract.contract_regression_test
 )
 
