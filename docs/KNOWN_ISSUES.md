@@ -186,6 +186,14 @@ Beliefs, reflection, the scalar "inner state" and character engine, and the lega
 model are not all connected to the personal chat path. `relationship_memory` (event-based) is the
 one used by PET.
 
+## The web UI server is open to any website
+
+The server on `127.0.0.1:9010` has no authentication and answers CORS for every origin, so any website open in the same
+browser can call its endpoints. The settings tab and the disk browser are protected (`pet/local_guard.py`: they accept only
+requests from the server's own page or from programs on this computer), the older endpoints are not. In particular
+`/api/tools/run` runs the agent's tools from a web page, and `shell.run` allows `python3` with any arguments, which is code
+execution on this computer. The Firefox extension currently depends on the CORS wildcard, so it cannot simply be removed.
+
 ## Single-owner personal chat
 
 `pet/chat_local.py` treats whoever is in the chat as the single owner. There is no per-visitor

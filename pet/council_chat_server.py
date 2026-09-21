@@ -101,6 +101,8 @@ from pet.chat_local     import router as _local_router
 from pet.chat_translate import router as _translate_router
 from pet.chat_orch      import router as _orch_router
 from pet.chat_agent     import router as _agent_router
+from pet.chat_models    import router as _models_router
+from pet.settings_api   import router as _settings_router
 
 # PET_AGENT_BOUNDARY_AUDIT.md Phase 2: this file used to define its own
 # byte-for-byte-identical copy of chat_translate.py's raw Ollama call
@@ -112,6 +114,8 @@ app.include_router(_local_router)
 app.include_router(_translate_router)
 app.include_router(_orch_router)
 app.include_router(_agent_router)
+app.include_router(_models_router)
+app.include_router(_settings_router)
 
 
 @app.on_event("startup")
@@ -575,6 +579,7 @@ body{font-family:var(--font);background:var(--icq-bg);color:var(--icq-text);
 
 a.cl{color:#2244aa;text-decoration:underline}
 </style>
+<link rel="stylesheet" href="/media/settings_tab.css">
 </head>
 <body>
 
@@ -584,6 +589,7 @@ a.cl{color:#2244aa;text-decoration:underline}
     <img src="/media/logo.png" style="height:28px;width:28px;object-fit:contain;margin-right:4px" alt="Y">
     <span class="logo">YANDI Council</span>
     <div class="nav">
+      <button class="nav-btn" id="tab-settings" onclick="switchMode('settings')">⚙ YANDI</button>
       <button class="nav-btn" id="tab-orch"  onclick="switchMode('orch')">🤖 Оркестратор</button>
       <button class="nav-btn"        id="tab-inet"  onclick="switchMode('inet')">🌐 Интернет чат</button>
       <button class="nav-btn"        id="tab-local" onclick="switchMode('local')">🟣 YANDI Помощник</button>
@@ -685,6 +691,7 @@ a.cl{color:#2244aa;text-decoration:underline}
     <div id="msgs-local" class="msgs-panel" style="display:none"></div>
     <div id="msgs-agent" class="msgs-panel" style="display:none;font-family:monospace;font-size:12px"></div>
     <div id="msgs-review" class="msgs-panel" style="display:none"></div>
+    <div id="msgs-settings" class="msgs-panel" style="display:none"></div>
     <div id="copy-chat-bar" style="display:none;padding:4px 10px;text-align:right">
       <button class="act-btn" onclick="copyFullChat()" style="font-size:13px">📋 Копировать весь чат</button>
     </div>
@@ -1163,6 +1170,8 @@ async function switchMode(mode){
   document.getElementById("tab-local").classList.toggle("active",mode==="local");
   document.getElementById("tab-agent").classList.toggle("active",mode==="agent");
   document.getElementById("tab-review").classList.toggle("active",mode==="review");
+  document.getElementById("tab-settings").classList.toggle("active",mode==="settings");
+  document.body.classList.toggle("mode-settings",mode==="settings");
   document.getElementById("tools-orch").style.display=mode==="orch"?"":"none";
   document.getElementById("tools-inet").style.display=mode==="inet"?"":"none";
   document.getElementById("tools-local").style.display=mode==="local"?"":"none";
@@ -1171,7 +1180,7 @@ async function switchMode(mode){
   const reviewInput = document.getElementById("input-area-review");
   if (reviewInput) reviewInput.style.display = mode === "review" ? "flex" : "none";
   // Показываем нужную панель сообщений
-  ["orch","inet","local","agent"].forEach(t=>{
+  ["orch","inet","local","agent","settings"].forEach(t=>{
     const el=document.getElementById("msgs-"+t);
     if(el)el.style.display=mode===t?"":"none";
   });
@@ -1180,6 +1189,7 @@ async function switchMode(mode){
   if(mode==="inet") _loadTabHistory("inet");
   if(mode==="local"){_loadLocalHistory();_loadLocalModels();}
   if(mode==="agent"){_loadAgentState();}
+  if(mode==="settings"&&window.SettingsTab){SettingsTab.onEnter();}
   applyI18n();
 }
 
@@ -2157,6 +2167,7 @@ switchMode(localStorage.getItem("activeTab")||"orch");
 (()=>{const s=document.getElementById("lang-sel");if(s)s.value=userLang})();
 applyI18n();
 </script>
+<script src="/media/settings_tab.js"></script>
 </body>
 </html>
 """
