@@ -45,6 +45,7 @@ SUITES=(
   pet.pet_personal_facts_regression_test
   pet.pet_commitment_verification_regression_test
   pet.pet_commitment_trust_regression_test
+  pet.pet_extension_regression_test
   agent.message_intensity_regression_test
   agent.relationship_memory_regression_test
   agent.relationship_apology_matching_regression_test

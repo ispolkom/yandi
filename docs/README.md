@@ -6,6 +6,7 @@
 | [INFERENCE_GATEWAY.md](INFERENCE_GATEWAY.md) | Target resolution, adapters, fallback, output contracts |
 | [MEMORY_AND_IDENTITY.md](MEMORY_AND_IDENTITY.md) | Self model, relationship memory, provenance guard, apology matching |
 | [EPISTEMIC_CORE.md](EPISTEMIC_CORE.md) | Claims, evidence, trust labels, beliefs, reflection |
+| [EXTENSION.md](EXTENSION.md) | Firefox extension: what it does, build, install, tests, limits |
 | [TESTING.md](TESTING.md) | How to run the regression suites |
 | [KNOWN_ISSUES.md](KNOWN_ISSUES.md) | Open problems and limitations |
 

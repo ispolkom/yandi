@@ -1,20 +1,5 @@
-#!/bin/bash
-cat > /usr/lib/firefox-esr/distribution/policies.json << 'POLICIES'
-{
-  "policies": {
-    "Preferences": {
-      "xpinstall.signatures.required": {
-        "Value": false,
-        "Status": "locked"
-      }
-    },
-    "ExtensionSettings": {
-      "council-bridge@yandi.local": {
-        "installation_mode": "force_installed",
-        "install_url": "file:///media/iam/DATASET/claude/yandi/pet/council_bridge.xpi"
-      }
-    }
-  }
-}
-POLICIES
-echo "OK: $(cat /usr/lib/firefox-esr/distribution/policies.json)"
+#!/usr/bin/env bash
+# Installs the YANDI Council Bridge into Firefox ESR (enterprise policy, merged into any existing policies.json).
+# Usage:  sudo pet/install_extension.sh [--dry-run | --uninstall]      (see: python3 scripts/install_extension.py --help)
+set -euo pipefail
+exec python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/install_extension.py" "$@"

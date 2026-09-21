@@ -1,17 +1,43 @@
 /**
- * background.js — YANDI Council Bridge v6.0
+ * background.js — YANDI Council Bridge v3.1
  *
- * Три канала:
- *   1. Council-чат  → /api/ext/poll    (групповой чат, все модели)
+ * Каналы:
+ *   1. Council-чат  → /api/ext/poll      (групповой чат, все модели)
  *   2. Orch AI      → /api/ext/orch/poll (валидация оркестратора, только deepseek)
- *   3. Verify       → правый клик на тексте → YANDI Verify overlay
+ *   3. Verify       → правый клик на тексте / Alt+Shift+Y → оверлей YANDI Verify
+ *
+ * Оверлей внедряется в страницу ТОЛЬКО по действию пользователя (activeTab), а все обращения к серверу
+ * YANDI делает этот фоновый скрипт: страница и её CSP/CORS не участвуют.
  */
 
-const API      = "http://127.0.0.1:9010/api/ext";
-const ORCH_API = "http://127.0.0.1:9010/api/ext/orch";
+const API      = `${YANDI_CONFIG.API}/api/ext`;
+const ORCH_API = `${YANDI_CONFIG.API}/api/ext/orch`;
 const POLL_MS  = 3000;
 
-// ── Context Menu: Verify with YANDI ──────────────────────────────────────────
+// ── Состояние сервера на значке ──────────────────────────────────────────────
+
+let serverUp = null;
+function setServerState(up) {
+  if (up === serverUp) return;
+  serverUp = up;
+  browser.browserAction.setBadgeText({ text: up ? "" : "off" });
+  browser.browserAction.setBadgeBackgroundColor({ color: "#b91c1c" });
+  browser.browserAction.setTitle({ title: up ? "YANDI" : "YANDI — сервер на порту 9010 не отвечает" });
+}
+
+async function apiFetch(path, options = {}, timeoutMs = YANDI_CONFIG.SHORT_TIMEOUT_MS) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    return await fetch(`${YANDI_CONFIG.API}${path}`, { cache: "no-store", ...options, signal: ctl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ── Verify: меню, горячая клавиша, оверлей ───────────────────────────────────
+
+let lastCheck = null;   // что проверяли последним (показывает popup)
 
 browser.contextMenus.create({
   id: "yandi-verify",
@@ -19,12 +45,88 @@ browser.contextMenus.create({
   contexts: ["selection"],
 });
 
+async function verifyInTab(tab, text) {
+  text = (text || "").trim();
+  if (!text || !tab || tab.id === undefined) return false;
+  try {
+    // activeTab даёт право внедрить скрипт в эту вкладку после клика по меню / нажатия клавиши
+    await browser.tabs.executeScript(tab.id, { file: "content_verify.js" });
+    await browser.tabs.sendMessage(tab.id, { type: "yandi_verify", text });
+    return true;
+  } catch (e) {
+    // about:, addons.mozilla.org, PDF-просмотрщик и т.п. — туда расширениям внедряться нельзя
+    console.warn("[YANDI] не удалось показать оверлей на этой странице:", e.message);
+    browser.browserAction.setBadgeText({ text: "!" });
+    browser.browserAction.setBadgeBackgroundColor({ color: "#b45309" });
+    setTimeout(() => { browser.browserAction.setBadgeText({ text: serverUp === false ? "off" : "" }); }, 4000);
+    return false;
+  }
+}
+
 browser.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId !== "yandi-verify") return;
-  const text = (info.selectionText || "").trim();
-  if (!text || !tab) return;
-  browser.tabs.sendMessage(tab.id, { type: "yandi_verify", text });
+  verifyInTab(tab, info.selectionText);
 });
+
+browser.commands.onCommand.addListener(async (command) => {
+  if (command !== "verify-selection") return;
+  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!tab) return;
+  try {
+    const res = await browser.tabs.executeScript(tab.id, { code: "String(window.getSelection())" });
+    await verifyInTab(tab, (res && res[0]) || "");
+  } catch (e) {
+    console.warn("[YANDI] не удалось прочитать выделение:", e.message);
+  }
+});
+
+// Сообщения от собственных скриптов расширения (оверлей, popup)
+browser.runtime.onMessage.addListener((msg, sender) => {
+  if (!sender || sender.id !== browser.runtime.id || !msg) return undefined;
+  if (msg.type === "yandi_ask") return handleAsk(msg.query);
+  if (msg.type === "yandi_history") return handleHistory();
+  if (msg.type === "yandi_note") { noteCheck(msg.note); return Promise.resolve({ ok: true }); }
+  if (msg.type === "yandi_last") return Promise.resolve({ ok: true, last: lastCheck });
+  return undefined;
+});
+
+function noteCheck(note) {
+  if (!note || typeof note !== "object") return;
+  lastCheck = {
+    query: String(note.query || "").slice(0, 200),
+    state: String(note.state || ""),
+    trust: String(note.trust || ""),
+    at: Date.now(),
+  };
+}
+
+async function handleAsk(query) {
+  query = String(query || "").trim();
+  if (!query) return { ok: false, error: "пустой запрос" };
+  try {
+    const resp = await apiFetch("/api/orchestrator/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, enable_web: true }),
+    }, YANDI_CONFIG.ASK_TIMEOUT_MS);
+    if (!resp.ok) return { ok: false, error: `HTTP ${resp.status}` };
+    setServerState(true);
+    return { ok: true, data: await resp.json() };
+  } catch (e) {
+    if (e.name !== "AbortError") setServerState(false);
+    return { ok: false, error: e.name === "AbortError" ? "сервер не ответил вовремя" : e.message };
+  }
+}
+
+async function handleHistory() {
+  try {
+    const resp = await apiFetch("/api/orch/history");
+    if (!resp.ok) return { ok: false, error: `HTTP ${resp.status}` };
+    return { ok: true, data: await resp.json() };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
 
 const MODELS = {
   "claude":   ["claude.ai"],
@@ -99,13 +201,16 @@ async function pollModel(model) {
       `${API}/poll?model=${model}&tab_open=${hasTab}`,
       { cache: "no-store" }
     );
+    setServerState(true);
     if (!resp.ok) return;
     const task = await resp.json();
     if (task && task.task_id && !task.paused && hasTab) {
       busy[model] = true;
       handleTask(model, task).finally(() => { busy[model] = false; });
     }
-  } catch (_) {}
+  } catch (_) {
+    setServerState(false);
+  }
 }
 
 async function handleTask(model, task) {

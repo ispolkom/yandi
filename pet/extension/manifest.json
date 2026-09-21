@@ -1,19 +1,22 @@
 {
   "manifest_version": 2,
   "name": "YANDI Council Bridge",
-  "version": "3.0",
-  "description": "Verify any text with YANDI: local AI + web search + multi-model consensus",
+  "version": "3.1.0",
+  "description": "Verify any text with YANDI: local AI + web search + multi-model consensus. Bridges the YANDI council to your logged-in AI chats.",
   "browser_specific_settings": {
     "gecko": {
       "id": "council-bridge@yandi.local",
       "strict_min_version": "91.0"
     }
   },
+  "icons": {
+    "48": "icons/yandi.svg",
+    "96": "icons/yandi.svg"
+  },
   "permissions": [
     "tabs",
     "contextMenus",
     "activeTab",
-    "<all_urls>",
     "http://127.0.0.1:9010/*",
     "*://claude.ai/*",
     "*://chatgpt.com/*",
@@ -23,24 +26,20 @@
   ],
   "browser_action": {
     "default_title": "YANDI",
+    "default_icon": "icons/yandi.svg",
     "default_popup": "popup.html"
   },
+  "commands": {
+    "verify-selection": {
+      "suggested_key": { "default": "Alt+Shift+Y" },
+      "description": "Verify the selected text with YANDI"
+    }
+  },
   "background": {
-    "scripts": ["background.js"],
+    "scripts": ["config.js", "background.js"],
     "persistent": true
   },
   "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["content_verify.js"],
-      "run_at": "document_idle",
-      "exclude_matches": [
-        "*://claude.ai/*",
-        "*://chatgpt.com/*",
-        "*://chat.deepseek.com/*",
-        "*://www.kimi.com/*"
-      ]
-    },
     {
       "matches": ["*://claude.ai/*"],
       "js": ["content_claude.js"],
