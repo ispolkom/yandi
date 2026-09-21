@@ -8,9 +8,8 @@ Tests: `pet/pet_core_lifecycle_regression_test.py` and `python -m contract.runne
 
 **Lifecycle unlock is implemented. Storage encryption is NOT yet bound to the Node-derived key.** The core, started in *core mode*, is a separate
 process on `127.0.0.1`, locked until `POST /v1/unlock`; while locked it serves nothing of the real application (HTTP and WebSocket). What is
-still true of today's system: the SQL/personal memory is **not application-encrypted at all** (plain text at rest, protected only by the dedicated database instance, its unix socket, a
-least-privilege role and file permissions; the automatic key in `~/.local/share/yandi/keys` belongs to the node's model configuration store), so "the memory is
-protected by the master password" must not be said yet; and the gate covers this process only (see *What still goes around the gate*).
+still true of today's system: the SQL/personal memory is **plain text at rest until the owner runs `python -m agent.db.sql.protect seal`** (P1c-2, `docs/STORAGE_PROTECTION.md`): the mechanism exists and is proven — the Core installs the key derived from this unlock into the storage layer and forgets it on lock — but it is **off by default**, covers **six tables** only, and until it is on the memory is protected only by the dedicated database instance, its unix socket, a
+least-privilege role and file permissions. "The memory is protected by the master password" may be said only of a database on which `seal` has been run, and only of those six tables; and the gate covers this process only (see *What still goes around the gate*).
 Classification: **PARTIAL** — a real, tested boundary in front of the real application, with the storage binding and the other entrances open.
 
 ## Starting a core
@@ -66,8 +65,7 @@ version of the database layer.
 1. **Other entrances to the same data.** The ordinary PET (`start.sh`, port 9010) is not in core mode and serves as before; scripts and daemons that talk to
    Redis or the database directly (`pet/council_chat_listen.py`, `pet/council_gpt_auto.py`, `pet/council_claude_auto.py`, `agent/council_*`) are separate
    processes the lifecycle knows nothing about.
-2. **Storage keys.** The Node-derived key is proven and held, but nothing encrypts with it yet, and there is no SQL storage key to bind it to: the personal memory is not encrypted (`docs/KEY_CHAIN_AUDIT.md`). Binding
-   storage to the derived key is a migration of its own, before the web UI moves onto `/v1` (P3/P4).
+2. **Storage keys.** The Node-derived key is held, and since P1c-2 the storage layer derives its data key from it (installed on unlock, cleared on lock). Sealing is **opt-in** (`docs/STORAGE_PROTECTION.md`): until the owner runs `seal`, nothing is encrypted; once run, six personal tables are sealed and a locked Core cannot open them. The other tables and the epistemic memory are not sealed.
 3. **Work started before a lock.** A request that started a background thread or task (for example the validation log writer in the council server) is not
    stopped by `lock`.
 4. **Key residency.** Zeroisation is best effort; the suite cannot and does not prove memory contents.

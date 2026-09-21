@@ -80,7 +80,7 @@ def main() -> int:
     # ── v16 -> v17 upgrade is additive ──
     with root.cursor() as cur:
         cur.execute("DROP TABLE IF EXISTS personal_fact_event"); cur.execute("DROP TABLE IF EXISTS personal_fact")
-        cur.execute("DELETE FROM schema_migrations WHERE version IN (17, 18)")
+        cur.execute("DELETE FROM schema_migrations WHERE version IN (17, 18, 19)")
         cur.execute("INSERT IGNORE INTO schema_migrations (version, description) VALUES (16, 'simulated v16')")
         cur.execute("INSERT IGNORE INTO interaction_turn (user_id, source_turn_id, turn_id_origin, user_text, created_at) "
                     "VALUES ('v16_owner', 'turn-v16-0001', 'client', 'row that existed at schema v16', NOW())")

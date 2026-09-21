@@ -45,6 +45,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from agent.db.sql import field_protection
+
 CONTRACT_VERSION = "1.0-rc1"
 IMPLEMENTATION_NAME = "yandi-python-core"
 IMPLEMENTATION_VERSION = "p1-lifecycle"
@@ -352,6 +354,7 @@ class Lifecycle:
             self._log(f"[core] unlock refused ({outcome})")
             return refused
         self._key = bytearray(key)
+        field_protection.install_key(key)          # P1c-2: the sealed personal ledger opens only while this process is unlocked
         self.state = "ready"
         self._log("[core] state: ready")
         if not self._ready_hooks_done:
@@ -360,6 +363,7 @@ class Lifecycle:
         return Reply(200, {"state": "ready"})
 
     def _forget_key(self) -> None:
+        field_protection.clear_key()
         if self._key is not None:
             for i in range(len(self._key)):              # best effort: Python cannot prove no other copy survives
                 self._key[i] = 0

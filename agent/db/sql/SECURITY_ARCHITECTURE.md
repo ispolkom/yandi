@@ -488,6 +488,10 @@ touched by this pass, on purpose.
 
 ## 21. What is explicitly deferred out of this pass (honest scope cut)
 
+> **Update 2026-09-22 (P1c-2):** the first item below is now done for SIX personal-ledger tables (`interaction_turn`, `personal_fact`, `personal_fact_event`, `commitment`,
+> `commitment_event`, `grievance`) by `field_protection.py` / `protect.py` — opt-in, keyed from the node's root, with migration, backup and restore proven on a real engine; see
+> `docs/STORAGE_PROTECTION.md`. Everything else in this list, and the epistemic tables of §12, remain as described here.
+
 To keep 5E-S reviewable and avoid mixing "new security primitives" with
 "rewiring working production code," the following are **designed/
 built as standalone, unit-tested modules this pass, but NOT wired into

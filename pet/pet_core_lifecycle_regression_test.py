@@ -40,6 +40,7 @@ os.environ.setdefault("YANDI_TEST_MODE", "1")
 
 from pet import core_lifecycle as cl                                   # noqa: E402
 from pet import core_main                                              # noqa: E402
+from agent.db.sql import field_protection as fpmod                     # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -194,15 +195,19 @@ async def lifecycle_section() -> None:
     check("3.2 health is open and exactly {state}", (s, json.loads(b)) == (200, {"state": "locked"}))
     s, b = await call(app, "GET", "/legacy/anything")
     check("3.3 while locked the application is not reached: 423", s == 423 and inner.calls == [] and json.loads(b)["error"]["code"] == "locked")
+    fpmod.clear_key()
     s, b = await unlock(app, WRONG_B64)
     check("3.4 a wrong key: 403, still locked", s == 403 and core.state == "locked" and core._key is None)
+    check("3.4b a wrong key installs nothing into the storage layer", not fpmod.has_key())
     s, b = await unlock(app, KEY_B64, idem="unlock-key-0002")
     check("3.5 the right key: 200 ready, the key is held", s == 200 and json.loads(b) == {"state": "ready"} and core.state == "ready" and bytes(core._key) == KEY)
+    check("3.5b …and the storage layer holds the key derived from it (the sealed personal ledger opens only while the core is unlocked)", fpmod.has_key())
     s, b = await call(app, "GET", "/legacy/anything")
     check("3.6 once ready the application is reached unchanged", s == 200 and inner.calls == ["http:/legacy/anything"])
     s, b = await call(app, "POST", "/v1/lock", body=b"{}", idem="lock-key-00001")
     check("3.7 lock: 200 locked, the key is forgotten, the gate closes again",
           s == 200 and core.state == "locked" and core._key is None and (await call(app, "GET", "/legacy/x"))[0] == 423)
+    check("3.7b lock: the storage layer forgets its key too (the sealed ledger is closed again)", not fpmod.has_key())
     s, b = await call(app, "GET", "/v1/capabilities")
     check("3.8 capabilities on a locked core is 423", s == 423)
     await unlock(app, KEY_B64, idem="unlock-key-0003")
@@ -431,10 +436,15 @@ def conformance_section() -> None:
 
 # ── 7. mutants ───────────────────────────────────────────────────────────────────────────────────────────────────
 def mini_repo(name: str, edits: dict[str, list[tuple[str, str]]]) -> Path:
-    """A copy of the two core modules with deliberate defects, laid out so that `import pet.core_main` finds them."""
+    """A copy of the two core modules with deliberate defects (and the unmodified storage-protection module they import), laid out so that `import pet.core_main` finds them."""
     d = fresh_dir(name)
     (d / "pet").mkdir(parents=True)
     (d / "pet" / "__init__.py").write_text("")
+    for pkg in ("agent", "agent/db", "agent/db/sql"):          # the storage-protection module the lifecycle installs its key into, unmodified
+        (d / pkg).mkdir(parents=True, exist_ok=True)
+        (d / pkg / "__init__.py").write_text("")
+    for name in ("field_protection", "crypto", "keys"):
+        shutil.copyfile(ROOT / "agent" / "db" / "sql" / f"{name}.py", d / "agent" / "db" / "sql" / f"{name}.py")
     for module in ("core_lifecycle", "core_main"):
         src = (ROOT / "pet" / f"{module}.py").read_text(encoding="utf-8")
         for old, new in edits.get(module, []):

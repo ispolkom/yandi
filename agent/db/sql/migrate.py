@@ -24,7 +24,7 @@ from agent.db.sql.schema import (
     SCHEMA_VERSION,
 )
 
-SCHEMA_VERSION_DESCRIPTION = "v18: provenance columns on commitment / commitment_event (source turn and evidence span of a promise and of its verified fulfilment). v17: personal_fact + personal_fact_event (provenance-backed append-only ledger of what the person reported about themselves). v16: interaction_turn (immutable per-person source history of chat turns, keyed by the client-minted turn id). v15: commitment + commitment_event + causal_event (immutable promise ledger + causal-event idempotency ledger). v14: knowledge_query_archive (\"точка ноль\" — agent/db/manager.py's sqlite KnowledgeDB query-log/moderation-queue retired)"
+SCHEMA_VERSION_DESCRIPTION = "v19: storage_protection_event (the mode of the sealed personal ledger) and wide text columns for interaction_turn / personal_fact / personal_fact_event / commitment / commitment_event / grievance. v18: provenance columns on commitment / commitment_event (source turn and evidence span of a promise and of its verified fulfilment). v17: personal_fact + personal_fact_event (provenance-backed append-only ledger of what the person reported about themselves). v16: interaction_turn (immutable per-person source history of chat turns, keyed by the client-minted turn id). v15: commitment + commitment_event + causal_event (immutable promise ledger + causal-event idempotency ledger). v14: knowledge_query_archive (\"точка ноль\" — agent/db/manager.py's sqlite KnowledgeDB query-log/moderation-queue retired)"
 
 
 def record_schema_version(

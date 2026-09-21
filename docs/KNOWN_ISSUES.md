@@ -150,9 +150,10 @@ exists in the personal chat yet, so reported fulfilment is remembered but does n
   without its state change. The new observed-delivery transition is strict (its failure rolls the turn back).
 - **Old episodes are not adopted.** The earlier `episode` rows have no person or turn identity and are
   left as they are; they are not read by the personal chat.
-- **Stored in plain text.** Message texts are stored like the other personal tables (grievance
+- **Stored in plain text until sealed.** Message texts are stored like the other personal tables (grievance
   descriptions, promise text): in the local dedicated database reached over a unix socket with a
-  least-privilege role, unencrypted at rest. Anyone with access to that database can read them.
+  least-privilege role, unencrypted at rest **unless the owner has run `python -m agent.db.sql.protect seal`**
+  (`docs/STORAGE_PROTECTION.md`; then these six tables are AES-256-GCM sealed). Until then anyone with access to that database can read them.
 - **Whether a model uses the memory depends on the model.** Measured on the real models with a real
   SQL engine, synthetic facts, 5 samples per cell, fresh process, empty client history, the memory
   written by another model: the model that answers in the persona's voice (`heretic:q8`) brought the
@@ -220,9 +221,10 @@ identity or per-user relationship state yet.
   (`docs/CORE_LIFECYCLE.md`). But **the legacy PET (`./start.sh`, :9010) is still started separately and reaches the same cognition and data without any lock**,
   and so do the council scripts/daemons that talk to Redis or the database directly. System-wide "the Core has exactly one caller: the node" is **not enforced**
   until the web UI moves onto `/v1` (P3/P4). Treat `start.sh` as the legacy/development path.
-* **The Node-derived key does not encrypt any personal storage yet, and the personal/epistemic memory is not encrypted at all** (P1c; see `docs/KEY_CHAIN_AUDIT.md`): the
-  SQL crypto primitives exist but are not wired; the automatic key in `~/.local/share/yandi/keys` protects only the node's model configuration store.
-  "Locked" therefore gates execution of the Core process, not decryption of the data. Do not describe the memory as protected by the master password.
+* **The personal memory is sealed only after `protect seal`, and only six tables** (P1c-2; `docs/STORAGE_PROTECTION.md`, `docs/KEY_CHAIN_AUDIT.md`): the layer, the migration tool, backup/restore and
+  the Core hook are built and proven on a real engine, but **off until the owner runs `seal`** on the live database (not yet done). The other personal tables, the epistemic memory, Redis and the legacy
+  stores are still plaintext. The automatic key in `~/.local/share/yandi/keys` protects only the node's model configuration store. Do not describe the memory as protected by the master password
+  unless `seal` has been run, and never the tables outside the six.
 * The node's master key is decrypted automatically at start on the same machine, but the key that protects it is derived from `/etc/machine-id`, which is not a secret:
   anyone who can read `~/.yandi_keys/auth.json` recovers it, with no password. **The master password cannot re-derive the master key** (its salt is never stored), so it is
   not a recovery path, and a rebind produces a different key. See `docs/KEY_CHAIN_AUDIT.md` (F1, F2).

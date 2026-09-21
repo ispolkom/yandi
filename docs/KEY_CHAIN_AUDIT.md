@@ -126,7 +126,7 @@ steps, each with its own tests and a restore rehearsal:
   master key; migrate the existing `auth.json`, identity and chat store in a way that is tested to be lossless. Tests first (restore on a clean directory,
   wrong password, changed machine id, tampered files), including mutants of F1/F2 themselves.
 * **P1c-2 — encrypt the personal memory** with data keys derived from the Core key (`HKDF(master, "yandi/core/v1")` → per-table DEKs, AAD as already designed
-  in `crypto.py`), wired into the repositories, with the backup → destroy → restore → decrypt → integrity check that the design says is a gate.
+  in `crypto.py`), wired into the repositories, with the backup → destroy → restore → decrypt → integrity check that the design says is a gate. **Built (2026-09-22): `docs/STORAGE_PROTECTION.md`.**
 * **P1c-3 — bind lock/unlock to that**: while locked, the persistent personal state cannot be decrypted (today it is merely not served).
 
 ## To check on the owner's machine (only the owner can see these)
@@ -157,3 +157,12 @@ Also: is there any backup of `~/.yandi_keys`, `~/.local/share/yandi` and the MyS
 | F11 a failed load replaces the identity | **Fixed** (also for legacy directories): fail closed, nothing written; `setup_auth` no longer overwrites an existing `auth.json` |
 | F4 chat store as weak as F2 | Same root as before, so as strong as the device key / recovery password after migration |
 | F6, F7, F8, F10 | **Unchanged**: SQL memory still not encrypted, no backup pipeline for it, legacy plaintext stores (P1c-2 and later) |
+
+## Status after P1c-2 (2026-09-22)
+
+| Finding | Now |
+|---|---|
+| F6 personal memory not encrypted | **Mechanism built and proven, OFF until the owner runs `seal`**, six tables (`interaction_turn`, `personal_fact`, `personal_fact_event`, `commitment`, `commitment_event`, `grievance`): AES-256-GCM per value, bound to table/column/row, key from the root via the Core key, mode recorded in the database with an HMAC, migration with per-table transactions and a content measure, encrypted backup and restore (backup → destroy → restore → open → identical content, on a real engine). See `docs/STORAGE_PROTECTION.md` |
+| F8 no backup pipeline for the SQL memory | Partly: `protect backup/restore` for these six tables (encrypted file). No general backup of the whole database |
+| P1c-3 lock closes the data | For a sealed database: yes (the Core forgets the storage key on lock; the legacy PET holds it while it runs). Not for tables outside the six |
+| Other tables, Redis, legacy stores (F10) | **Unchanged**: plaintext at rest |

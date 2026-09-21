@@ -39,6 +39,18 @@ export LLM_GATEWAY_ENABLE_LOCAL=1
 # — сбой этого шага никогда не должен мешать запуску самой ноды.
 "$PYTHON" -c "from llm_gateway.setup import maybe_prompt_first_run; maybe_prompt_first_run()" || true
 
+# Защищённая личная память (P1c-2). Если она включена в базе (python -m agent.db.sql.protect seal), этому процессу нужен ключ:
+# он берётся у ключевой утилиты ноды с ключом ЭТОЙ машины (пароль не вводится, ключ в файл не пишется).
+# Включается явно: YANDI_PROTECTED_STORAGE=1 ./start.sh
+if [ "${YANDI_PROTECTED_STORAGE:-0}" = "1" ]; then
+  KEYS_TOOL="${YANDI_KEYS_TOOL:-$SCRIPT_DIR/node/target/release/yandi-keys}"
+  if [ ! -x "$KEYS_TOOL" ]; then
+    echo "[ERROR] Нет ключевой утилиты: $KEYS_TOOL. Собери: cd node && cargo build --release -p yandi-key-root"
+    exit 1
+  fi
+  export YANDI_STORAGE_KEY_TOOL="$KEYS_TOOL"
+fi
+
 REQUIRED_SQL_GROUP="yandi-db"
 CURRENT_USER="$(id -un)"
 if getent group "$REQUIRED_SQL_GROUP" >/dev/null \

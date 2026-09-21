@@ -263,7 +263,7 @@ check(
 # definition introduced by this fix).
 # ============================================================
 check(
-    "3a. schema.ALL_TABLES_IN_ORDER currently defines exactly 60 tables "
+    "3a. schema.ALL_TABLES_IN_ORDER currently defines exactly 61 tables "
     "(21 domain/history/projection tables + instance_identity — v2 added "
     "decision_event, the \"живая память\" decision/reasoning ledger; v3 added "
     "integrity_journal, the \"10-year bastion\" Layer 4 tamper-evidence hash-chain; "
@@ -281,8 +281,8 @@ check(
     "KnowledgeDB query-log/moderation-queue; "
     "v15 added commitment + commitment_event + causal_event, the immutable promise ledger and the causal-event idempotency ledger; "
     "v16 added interaction_turn, the immutable per-person source history of chat turns; "
-    "v17 added personal_fact + personal_fact_event, the provenance-backed ledger of what the person reported about themselves)",
-    len(ALL_TABLES_IN_ORDER) == 60,
+    "v17 added personal_fact + personal_fact_event, the provenance-backed ledger of what the person reported about themselves; v19 added storage_protection_event, the mode record of the sealed personal ledger)",
+    len(ALL_TABLES_IN_ORDER) == 61,
     f"actual={len(ALL_TABLES_IN_ORDER)}",
 )
 check(

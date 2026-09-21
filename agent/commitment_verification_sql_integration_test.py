@@ -244,7 +244,7 @@ def main() -> int:
     with root.cursor() as cur:
         cur.execute("ALTER TABLE commitment DROP COLUMN source_turn_id")
         cur.execute("ALTER TABLE commitment_event DROP COLUMN source_turn_id, DROP COLUMN span_start, DROP COLUMN span_end")
-        cur.execute("DELETE FROM schema_migrations WHERE version=18")
+        cur.execute("DELETE FROM schema_migrations WHERE version IN (18, 19)")
     reset_world()
     as_runtime()
     t_old = tid("v17")
@@ -265,7 +265,7 @@ def main() -> int:
         "SELECT column_name, column_type, collation_name FROM information_schema.columns WHERE table_schema='yandi_epistemic' "
         "AND table_name IN ('commitment','commitment_event') AND column_name IN ('source_turn_id','span_start','span_end')")}
     check("0: the migration adds the v18 provenance columns and records version 18 (additive)",
-          upgraded and scalar("SELECT MAX(version) FROM schema_migrations") == schema.SCHEMA_VERSION == 18
+          upgraded and scalar("SELECT MAX(version) FROM schema_migrations") == schema.SCHEMA_VERSION == 19
           and scalar("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='yandi_epistemic' AND table_name='commitment_event' "
                      "AND column_name IN ('source_turn_id','span_start','span_end')") == 3
           and scalar("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='yandi_epistemic' AND table_name='commitment' AND column_name='source_turn_id'") == 1)
@@ -274,8 +274,8 @@ def main() -> int:
           and rows("SELECT source_turn_id, span_start FROM commitment_event")[0] == {"source_turn_id": None, "span_start": None})
     with contextlib.redirect_stdout(io.StringIO()) as buf:
         again = migrate.apply()
-    check("0: the migration is re-runnable (every ALTER reports 'already applied', the version stays 18)",
-          again and buf.getvalue().count("SKIP") >= 4 and scalar("SELECT COUNT(*) FROM schema_migrations WHERE version=18") == 1, buf.getvalue()[-200:])
+    check("0: the migration is re-runnable (every ALTER reports 'already applied', the current version stays recorded once)",
+          again and buf.getvalue().count("SKIP") >= 4 and scalar("SELECT COUNT(*) FROM schema_migrations WHERE version=%d" % schema.SCHEMA_VERSION) == 1, buf.getvalue()[-200:])
     collations = {r["COLUMN_NAME"] if "COLUMN_NAME" in r else r["column_name"]: (r.get("COLLATION_NAME") or r.get("collation_name")) for r in rows(
         "SELECT column_name, collation_name FROM information_schema.columns WHERE table_schema='yandi_epistemic' AND table_name='commitment_event' AND column_name='source_turn_id'")}
     check("0: the provenance turn id is compared exactly (binary collation) like every other turn identity", set(collations.values()) == {"ascii_bin"}, repr(collations))

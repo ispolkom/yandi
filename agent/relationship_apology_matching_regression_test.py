@@ -65,10 +65,12 @@ class FakeCursor:
                 "created_at": created_at, "apology_at": None, "understood_at": None, "forgiven_at": None,
                 "updated_at": updated_at}
         elif "STATUS != 'FORGIVEN'" in upper:
-            user_id, prefix = params
-            rows = [g for g in G.values() if g["user_id"] == user_id and g["status"] != "forgiven"
-                    and g["description"][:20] == prefix]
-            self._one = dict(sorted(rows, key=lambda g: g["created_at"], reverse=True)[0]) if rows else None
+            # the prefix match is made in Python on the opened text (the database holds a sealed value): all open ones, newest first
+            (user_id,) = params
+            rows = [g for g in G.values() if g["user_id"] == user_id and g["status"] != "forgiven"]
+            self._all = [dict(g) for g in sorted(rows, key=lambda g: g["created_at"], reverse=True)]
+        elif upper.startswith("SELECT MODE, NONCE, PROOF FROM STORAGE_PROTECTION_EVENT"):
+            self._one = self.conn.protection_record        # None: protection was never switched on (off)
         elif upper.startswith("UPDATE GRIEVANCE SET SEVERITY=%S"):
             severity, updated_at, gid = params
             G[gid].update(severity=severity, status="registered", apology_sincerity=0.0, apology_at=None,
@@ -226,6 +228,7 @@ class FakeConnection:
         self.interaction_turns: list[dict] = []
         self.personal_facts: list[dict] = []
         self.personal_fact_events: list[dict] = []
+        self.protection_record = None                  # the newest storage_protection_event row, or None (= off)
         self.lock = threading.Lock()  # stands in for the database's unique-key serialisation
 
     def cursor(self):

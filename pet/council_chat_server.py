@@ -3416,6 +3416,28 @@ if __name__ == "__main__":
         _os.environ["AGENT_SHELL_NET"] = "1"
         print("[tools] Shell: сеть разрешена")
 
+    # P1c-2: the sealed personal ledger. Opt-in (start.sh sets it when YANDI_PROTECTED_STORAGE=1): this process is not unlocked by the node, so
+    # it asks the node's key tool for the key of THIS machine's key directory (no password, nothing typed). If protection is on in the
+    # database and no key can be had, say so loudly: every write of the personal ledger would be refused (never written as plaintext).
+    from agent.db.sql import field_protection as _fp
+    if _os.environ.get("YANDI_STORAGE_KEY_TOOL"):
+        try:
+            _fp.install_key_from_tool(_os.environ["YANDI_STORAGE_KEY_TOOL"])
+            print("[storage] ключ защищённой памяти получен от ключевой утилиты ноды")
+        except _fp.StorageProtectionError as _exc:
+            print(f"[storage] ОШИБКА: {_exc}. Запуск остановлен: без ключа защищённая память недоступна.")
+            raise SystemExit(2)
+    try:
+        from agent.db.sql.connection import get_connection as _get_connection
+        with _get_connection(autocommit=True) as _c:
+            _mode = _fp.read_mode(_c)
+        print(f"[storage] защита личной памяти в базе: {_mode}; ключ у процесса: {'да' if _fp.has_key() else 'нет'}")
+        if _mode != "off" and not _fp.has_key():
+            print("[storage] ВНИМАНИЕ: память защищена, а ключа нет — чат не сможет ни читать, ни писать личную память. "
+                  "Запусти так: YANDI_PROTECTED_STORAGE=1 ./start.sh")
+    except Exception as _exc:  # noqa: BLE001 — a status line must never stop the server
+        print(f"[storage] состояние защиты не определено ({type(_exc).__name__})")
+
     print(f"[PET] Запуск на http://{args.host}:{args.port}")
     uvicorn.run(
         app,

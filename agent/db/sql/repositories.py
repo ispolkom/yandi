@@ -33,6 +33,10 @@ from typing import Any, Dict, List, Optional
 # not claim-specific.
 from agent.claim_identity import canonicalize_claim_text
 
+# P1c-2: the person's own words are sealed on the way in and opened on the way out (see field_protection.py). Every SQL touching
+# a protected column of the personal ledger goes through the helpers below, and only through this module.
+from agent.db.sql import field_protection as fp
+
 # Controlled vocabulary for source_observation.rejection_reason — small
 # and deliberate (mandate §13): epistemically meaningful reasons only,
 # never raw scraper/transport diagnostics.
@@ -1172,20 +1176,22 @@ def record_grievance(
     severity: float, context: Optional[Dict[str, Any]] = None, created_at=None,
 ) -> None:
     created_at = _coerce_datetime(created_at) or _now()
+    key = {"id": grievance_id}
+    description = fp.seal(conn, "grievance", "description", key, description)
+    context_text = fp.seal(conn, "grievance", "context", key, json.dumps(context) if context is not None else None)
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO grievance "
             "(id, user_id, event_type, description, severity, status, context, created_at, updated_at) "
             "VALUES (%s, %s, %s, %s, %s, 'registered', %s, %s, %s)",
-            (grievance_id, user_id, event_type, description, severity,
-             json.dumps(context) if context is not None else None, created_at, created_at),
+            (grievance_id, user_id, event_type, description, severity, context_text, created_at, created_at),
         )
 
 
 def get_grievance(conn, grievance_id: str) -> Optional[Dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM grievance WHERE id=%s", (grievance_id,))
-        row = cur.fetchone()
+        row = fp.open_row(conn, "grievance", cur.fetchone())
     if row and row.get("context") is not None and isinstance(row["context"], str):
         row["context"] = json.loads(row["context"])
     return row
@@ -1198,13 +1204,18 @@ def find_similar_open_grievance(conn, user_id: str, description: str) -> Optiona
     NEW grievance, not a reopening of the old one) — "unforgiven" ones
     ARE still matched, same as the original."""
     prefix = description[:20]
+    # The match is made here, on the opened text: the database only holds a sealed value and cannot compare its first characters.
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT * FROM grievance WHERE user_id=%s AND status != 'forgiven' "
-            "AND LEFT(description, 20) = %s ORDER BY created_at DESC LIMIT 1",
-            (user_id, prefix),
+            "SELECT * FROM grievance WHERE user_id=%s AND status != 'forgiven' ORDER BY created_at DESC",
+            (user_id,),
         )
-        return cur.fetchone()
+        candidates = cur.fetchall()
+    for row in candidates:
+        fp.open_row(conn, "grievance", row)
+        if row["description"][:20] == prefix:
+            return row
+    return None
 
 
 def bump_grievance(conn, grievance_id: str, new_severity: float, timestamp=None) -> None:
@@ -1268,7 +1279,7 @@ def list_active_grievances(conn, user_id: str) -> List[Dict[str, Any]]:
             "ORDER BY created_at ASC",
             (user_id,),
         )
-        rows = cur.fetchall()
+        rows = fp.open_rows(conn, "grievance", cur.fetchall())
     for row in rows:
         if row.get("context") is not None and isinstance(row["context"], str):
             row["context"] = json.loads(row["context"])
@@ -1285,7 +1296,7 @@ def list_recent_resolved_grievances(conn, user_id: str, limit: int = 20) -> List
             "ORDER BY updated_at DESC LIMIT %s",
             (user_id, int(limit)),
         )
-        return cur.fetchall()
+        return fp.open_rows(conn, "grievance", cur.fetchall())
 
 
 def count_grievances_by_status(conn, user_id: str, status: str) -> int:
@@ -2344,7 +2355,9 @@ def record_commitment(
     """Append a promise. With the v18 provenance column it records the turn the promise was made in; on a database that
     has not applied v18 it writes the promise without it (the promise itself must not depend on a migration)."""
     created_at = _coerce_datetime(created_at) or _now()
-    base = (commitment_id, user_id, kind, text[:500], evidence[:500], _coerce_datetime(due_at), created_at)
+    key = {"commitment_id": commitment_id}
+    base = (commitment_id, user_id, kind, fp.seal(conn, "commitment", "text", key, text[:500]),
+            fp.seal(conn, "commitment", "evidence", key, evidence[:500]), _coerce_datetime(due_at), created_at)
     with conn.cursor() as cur:
         try:
             cur.execute(
@@ -2361,13 +2374,13 @@ def record_commitment(
 def get_commitment(conn, commitment_id: str) -> Optional[Dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM commitment WHERE commitment_id=%s", (commitment_id,))
-        return cur.fetchone()
+        return fp.open_row(conn, "commitment", cur.fetchone())
 
 
 def list_commitments(conn, user_id: str) -> List[Dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM commitment WHERE user_id=%s ORDER BY created_at ASC, commitment_id ASC", (user_id,))
-        return cur.fetchall()
+        return fp.open_rows(conn, "commitment", cur.fetchall())
 
 
 def record_commitment_event(
@@ -2382,7 +2395,9 @@ def record_commitment_event(
     without the v18 columns a plain report is still written without it, but an event that
     REQUIRES provenance (a verification) is refused: the error propagates."""
     created_at = _coerce_datetime(created_at) or _now()
-    base = (commitment_id, user_id, event_type, source, (evidence or "")[:500] or None, created_at)
+    base = (commitment_id, user_id, event_type, source,
+            fp.seal(conn, "commitment_event", "evidence", {"commitment_id": commitment_id, "event_type": event_type},
+                    (evidence or "")[:500] or None), created_at)
     with conn.cursor() as cur:
         try:
             cur.execute(
@@ -2401,7 +2416,7 @@ def record_commitment_event(
 def list_commitment_events(conn, user_id: str) -> List[Dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM commitment_event WHERE user_id=%s ORDER BY event_id ASC", (user_id,))
-        return cur.fetchall()
+        return fp.open_rows(conn, "commitment_event", cur.fetchall())
 
 
 def count_commitment_events(conn, user_id: str, event_type: str, source: str) -> int:
@@ -2458,13 +2473,16 @@ def record_interaction_turn(
     row. A retry / double delivery of the same turn is ignored (never merged or
     updated); the same words in another turn are another row."""
     created_at = _coerce_datetime(created_at) or _now()
+    key = {"user_id": user_id, "source_turn_id": source_turn_id}
+    user_stored = fp.seal(conn, "interaction_turn", "user_text", key, user_text[:INTERACTION_TEXT_CAP])
+    assistant_stored = fp.seal(conn, "interaction_turn", "assistant_text", key,
+                               None if assistant_text is None else assistant_text[:INTERACTION_TEXT_CAP])
     with conn.cursor() as cur:
         cur.execute(
             "INSERT IGNORE INTO interaction_turn (user_id, source_turn_id, turn_id_origin, user_text, "
             "assistant_text, model, adapter, recalled_turn_ids, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (
-                user_id, source_turn_id, turn_id_origin, user_text[:INTERACTION_TEXT_CAP],
-                None if assistant_text is None else assistant_text[:INTERACTION_TEXT_CAP],
+                user_id, source_turn_id, turn_id_origin, user_stored, assistant_stored,
                 model, adapter, json.dumps(recalled_turn_ids) if recalled_turn_ids else None, created_at,
             ),
         )
@@ -2476,7 +2494,8 @@ def get_interaction_turn_text(conn, user_id: str, source_turn_id: str) -> Option
     with conn.cursor() as cur:
         cur.execute("SELECT user_text FROM interaction_turn WHERE user_id=%s AND source_turn_id=%s", (user_id, source_turn_id))
         row = cur.fetchone()
-        return None if not row else row["user_text"]
+        return None if not row else fp.open_value(
+            conn, "interaction_turn", "user_text", {"user_id": user_id, "source_turn_id": source_turn_id}, row["user_text"])
 
 
 def list_recent_interaction_turns(conn, user_id: str, limit: int = 300) -> List[Dict[str, Any]]:
@@ -2484,13 +2503,13 @@ def list_recent_interaction_turns(conn, user_id: str, limit: int = 300) -> List[
     events (causal_event types) that were confirmed in that same source turn."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT t.interaction_id, t.source_turn_id, t.user_text, t.assistant_text, t.model, t.adapter, "
+            "SELECT t.interaction_id, t.user_id, t.source_turn_id, t.user_text, t.assistant_text, t.model, t.adapter, "
             "t.created_at, (SELECT GROUP_CONCAT(c.event_type) FROM causal_event c "
             "WHERE c.user_id = t.user_id AND c.source_turn_id = t.source_turn_id) AS event_types "
             "FROM interaction_turn t WHERE t.user_id=%s ORDER BY t.created_at DESC, t.interaction_id DESC LIMIT %s",
             (user_id, int(limit)),
         )
-        return [dict(r) for r in cur.fetchall()]
+        return [fp.open_row(conn, "interaction_turn", dict(r)) for r in cur.fetchall()]
 
 
 # ============================================================
@@ -2504,6 +2523,9 @@ def insert_personal_fact(
     """Append a fact. Its source turn must already be an interaction_turn row
     (foreign key): a fact cannot exist without the immutable turn it was said in."""
     created_at = _coerce_datetime(created_at) or _now()
+    key = {"fact_id": fact_id}
+    statement = fp.seal(conn, "personal_fact", "statement", key, statement)
+    evidence = fp.seal(conn, "personal_fact", "evidence", key, evidence)
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO personal_fact (fact_id, user_id, fact_class, statement, polarity, temporality, evidence, "
@@ -2519,6 +2541,8 @@ def insert_personal_fact_event(
 ) -> None:
     """Append something that happened to a fact (restated / superseded)."""
     created_at = _coerce_datetime(created_at) or _now()
+    evidence = fp.seal(conn, "personal_fact_event", "evidence",
+                       {"fact_id": fact_id, "event_type": event_type, "source_turn_id": source_turn_id}, evidence)
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO personal_fact_event (fact_id, user_id, event_type, by_fact_id, evidence, span_start, span_end, "
@@ -2535,7 +2559,7 @@ def list_personal_facts(conn, user_id: str, limit: int = 1000) -> List[Dict[str,
             "FROM personal_fact WHERE user_id=%s ORDER BY created_at DESC, fact_id DESC LIMIT %s",
             (user_id, int(limit)),
         )
-        return [dict(r) for r in cur.fetchall()]
+        return [fp.open_row(conn, "personal_fact", dict(r)) for r in cur.fetchall()]
 
 
 def list_personal_fact_events(conn, user_id: str) -> List[Dict[str, Any]]:

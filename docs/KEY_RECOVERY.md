@@ -3,7 +3,7 @@
 What is **implemented**, and how the owner uses it. Design and findings: `docs/KEY_CHAIN_AUDIT.md`. Code: `node/key_root/` (library and the
 `yandi-keys` tool) and its use in `node/src/web/auth.rs`, `node/src/core/identity.rs`, `node/src/main.rs`.
 
-**P1c-1 protects the node's identity and root key and makes them recoverable. The SQL / personal memory is NOT bound to the root yet (P1c-2), and nothing of it is encrypted.**
+**P1c-1 protects the node's identity and root key and makes them recoverable. The SQL / personal memory can be sealed from the same root (P1c-2, `docs/STORAGE_PROTECTION.md`) — opt-in, six tables — and until the owner runs `seal` nothing of it is encrypted.**
 
 ## The goal, in two lines
 
@@ -126,4 +126,4 @@ node now stops and changes nothing. In the new format it has no role. Do not set
 * The first-run setup is Unix only; on Windows the node keeps its old setup path (legacy format).
 * The web "rebind" page no longer changes keys: it answers that recovery is done on the command line. The login page has "Forgot password → recovery code" for the web password.
 * Linux and macOS (Unix). On Windows the node keeps its old code path.
-* The SQL / personal memory, Redis and the Core's own storage are **not** encrypted or bound to the root (P1c-2).
+* The SQL / personal memory is sealed from the root only where `protect seal` has been run, and only six tables (`docs/STORAGE_PROTECTION.md`); Redis and the Core's own other storage are **not** encrypted or bound to the root.

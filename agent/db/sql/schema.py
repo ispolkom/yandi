@@ -46,7 +46,7 @@ DESIGN NOTES (read before changing a table):
    no HTTP retry chatter. RUN_ERROR is 5 columns, not a log warehouse.
 """
 
-SCHEMA_VERSION = 18  # v18: commitment.source_turn_id + commitment_event.source_turn_id/span_start/span_end (provenance of a promise and of its fulfilment evidence). v17: personal_fact + personal_fact_event (provenance-backed, append-only ledger of what the person reported about themselves). v16: interaction_turn (immutable per-person source record of each chat turn, keyed by the client-minted turn id). v15: commitment + commitment_event + causal_event (immutable promise ledger and the causal-event idempotency ledger for the relationship state). v14: knowledge_query_archive ("точка ноль" — agent/db/manager.py's sqlite KnowledgeDB query-log + moderation-queue system retired from registry/index.db + registry/knowledge/*.db)
+SCHEMA_VERSION = 19  # v19: storage_protection_event + wide text columns for the sealed personal ledger (agent/db/sql/field_protection.py). v18: commitment.source_turn_id + commitment_event.source_turn_id/span_start/span_end (provenance of a promise and of its fulfilment evidence). v17: personal_fact + personal_fact_event (provenance-backed, append-only ledger of what the person reported about themselves). v16: interaction_turn (immutable per-person source record of each chat turn, keyed by the client-minted turn id). v15: commitment + commitment_event + causal_event (immutable promise ledger and the causal-event idempotency ledger for the relationship state). v14: knowledge_query_archive ("точка ноль" — agent/db/manager.py's sqlite KnowledgeDB query-log + moderation-queue system retired from registry/index.db + registry/knowledge/*.db)
 
 SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -952,11 +952,11 @@ CREATE TABLE IF NOT EXISTS grievance (
     id                VARCHAR(64) PRIMARY KEY,
     user_id           VARCHAR(64) NOT NULL,
     event_type        VARCHAR(40) NOT NULL,     -- insult, dishonesty, manipulation, disrespect, ...
-    description       TEXT NOT NULL,
+    description       MEDIUMTEXT NOT NULL,      -- sealed when storage protection is on (agent/db/sql/field_protection.py)
     severity          FLOAT NOT NULL,           -- 0-1
     status            VARCHAR(20) NOT NULL DEFAULT 'registered',
     apology_sincerity FLOAT NOT NULL DEFAULT 0.0,
-    context           JSON NULL,
+    context           MEDIUMTEXT NULL,          -- JSON text (a sealed value is not JSON, so not the JSON type)
     created_at        DATETIME NOT NULL,
     apology_at        DATETIME NULL,
     understood_at     DATETIME NULL,
@@ -1358,8 +1358,8 @@ CREATE TABLE IF NOT EXISTS commitment (
     commitment_id VARCHAR(40) PRIMARY KEY,
     user_id       VARCHAR(64) NOT NULL,
     kind          VARCHAR(30) NOT NULL DEFAULT 'general',
-    text          VARCHAR(500) NOT NULL,      -- what was promised (the person's own words, current message)
-    evidence      VARCHAR(500) NOT NULL,      -- verbatim quote showing a promise was made
+    text          MEDIUMTEXT NOT NULL,        -- what was promised (the person's own words, current message; at most 500 characters)
+    evidence      MEDIUMTEXT NOT NULL,        -- verbatim quote showing a promise was made (at most 500 characters)
     due_at        DATETIME NULL,
     created_at    DATETIME NOT NULL,
     KEY idx_commitment_user (user_id, created_at)
@@ -1373,7 +1373,7 @@ CREATE TABLE IF NOT EXISTS commitment_event (
     user_id       VARCHAR(64) NOT NULL,
     event_type    VARCHAR(30) NOT NULL,       -- fulfillment_claimed | verified_fulfilled | verified_broken
     source        VARCHAR(40) NOT NULL,       -- user_report | <name of the verifier>
-    evidence      VARCHAR(500) NULL,
+    evidence      MEDIUMTEXT NULL,            -- at most 500 characters
     created_at    DATETIME NOT NULL,
     UNIQUE KEY uq_commitment_event (commitment_id, event_type),
     KEY idx_ce_user (user_id, created_at)
@@ -1434,8 +1434,8 @@ CREATE TABLE IF NOT EXISTS interaction_turn (
     user_id           VARCHAR(64) NOT NULL,
     source_turn_id    VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,  -- exact, case-sensitive identity
     turn_id_origin    VARCHAR(10) NOT NULL,                  -- client | server
-    user_text         TEXT NOT NULL,
-    assistant_text    TEXT NULL,                             -- NULL: no reply was produced for this turn
+    user_text         MEDIUMTEXT NOT NULL,
+    assistant_text    MEDIUMTEXT NULL,                           -- NULL: no reply was produced for this turn
     model             VARCHAR(120) NULL,                     -- resolved model that produced the reply
     adapter           VARCHAR(40) NULL,                      -- adapter/runtime kind that served it
     recalled_turn_ids JSON NULL,                             -- earlier turns shown to the model as memory for this reply
@@ -1475,10 +1475,10 @@ CREATE TABLE IF NOT EXISTS personal_fact (
     fact_id         VARCHAR(40) PRIMARY KEY,
     user_id         VARCHAR(64) NOT NULL,
     fact_class      VARCHAR(30) NOT NULL,
-    statement       VARCHAR(300) NOT NULL,
+    statement       MEDIUMTEXT NOT NULL,                  -- at most 300 characters
     polarity        VARCHAR(10) NOT NULL,                 -- affirmed | negated
     temporality     VARCHAR(10) NOT NULL,                 -- current | past (as the person stated it)
-    evidence        VARCHAR(500) NOT NULL,                -- exact span of the source message, code-reconstructed
+    evidence        MEDIUMTEXT NOT NULL,                  -- exact span of the source message, code-reconstructed (at most 500 characters)
     span_start      INT NULL,
     span_end        INT NULL,
     source_turn_id  VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -1496,7 +1496,7 @@ CREATE TABLE IF NOT EXISTS personal_fact_event (
     user_id         VARCHAR(64) NOT NULL,
     event_type      VARCHAR(20) NOT NULL,                 -- restated | superseded
     by_fact_id      VARCHAR(40) NULL,                     -- superseded: the fact that replaces it
-    evidence        VARCHAR(500) NOT NULL,                -- exact span from THIS event's source turn
+    evidence        MEDIUMTEXT NOT NULL,                  -- exact span from THIS event's source turn (at most 500 characters)
     span_start      INT NULL,
     span_end        INT NULL,
     source_turn_id  VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -1716,6 +1716,21 @@ CREATE TABLE IF NOT EXISTS instance_identity (
 
 # Ordered: each CREATE TABLE only references tables already created
 # above it (FK ordering matters in MySQL without deferred constraints).
+# ── STORAGE PROTECTION (v19) ─────────────────────────────────────────────
+# Whether the personal ledger's text columns are sealed (agent/db/sql/field_protection.py).
+# APPEND-ONLY (class B): the mode is the NEWEST row (none = off). Each row carries an HMAC made with the key derived from the
+# node's root, so a process that holds the key notices a record it did not (or could not) write. Only
+# `python -m agent.db.sql.protect` inserts here.
+STORAGE_PROTECTION_EVENT = """
+CREATE TABLE IF NOT EXISTS storage_protection_event (
+    event_id    BIGINT AUTO_INCREMENT PRIMARY KEY,
+    mode        VARCHAR(12) NOT NULL,                 -- off | migrating | on
+    nonce       CHAR(32) NOT NULL,
+    proof       VARBINARY(32) NULL,                   -- HMAC-SHA256 under a key derived from the root
+    created_at  DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
 ALL_TABLES_IN_ORDER = [
     ("schema_migrations", SCHEMA_MIGRATIONS),
     ("question", QUESTION),
@@ -1777,6 +1792,7 @@ ALL_TABLES_IN_ORDER = [
     ("social_knowledge", SOCIAL_KNOWLEDGE),
     ("knowledge_query_archive", KNOWLEDGE_QUERY_ARCHIVE),
     ("instance_identity", INSTANCE_IDENTITY),
+    ("storage_protection_event", STORAGE_PROTECTION_EVENT),
 ]
 
 
@@ -1796,10 +1812,29 @@ COMMITMENT_V18_ALTERS = [
     ("commitment_event.span_end column", "ALTER TABLE commitment_event ADD COLUMN span_end INT NULL;"),
 ]
 
+
+# v19: the sealed form of a value is longer than the value (nonce + tag + base64), so the protected columns are wide text.
+# One statement per column; MODIFY is idempotent, so migrate.py can run these again.
+STORAGE_V19_ALTERS = [
+    (f"{table}.{column} wide text", f"ALTER TABLE {table} MODIFY COLUMN {column} MEDIUMTEXT {nullability};")
+    for table, column, nullability in [
+        ("interaction_turn", "user_text", "NOT NULL"),
+        ("interaction_turn", "assistant_text", "NULL"),
+        ("personal_fact", "statement", "NOT NULL"),
+        ("personal_fact", "evidence", "NOT NULL"),
+        ("personal_fact_event", "evidence", "NOT NULL"),
+        ("commitment", "text", "NOT NULL"),
+        ("commitment", "evidence", "NOT NULL"),
+        ("commitment_event", "evidence", "NULL"),
+        ("grievance", "description", "NOT NULL"),
+        ("grievance", "context", "NULL"),
+    ]
+]
+
 # Deferred ALTER (needs answer_version to already exist).
 ALTER_STATEMENTS_IN_ORDER = [
     ("verification_run.final_answer_id FK", VERIFICATION_RUN_FINAL_ANSWER_FK),
-] + SOURCE_OBSERVATION_V13_ALTERS + COMMITMENT_V18_ALTERS
+] + SOURCE_OBSERVATION_V13_ALTERS + COMMITMENT_V18_ALTERS + STORAGE_V19_ALTERS
 
 # Truth-claiming vocabulary is explicitly BANNED from this schema
 # (mandate §1/§14) — a regression test greps every DDL string above for
@@ -1889,4 +1924,5 @@ TABLE_CLASSIFICATION = {
     "verification_run": "D",
     "instance_identity": "A",
     "knowledge_query_archive": "C",
+    "storage_protection_event": "B",
 }

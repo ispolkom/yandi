@@ -99,13 +99,13 @@ class FakeCursor:
             (gid,) = params
             self._result = dict(self.conn.grievances[gid]) if gid in self.conn.grievances else None
         elif "STATUS != 'FORGIVEN'" in upper:
-            user_id, prefix = params
-            matches = [
-                g for g in self.conn.grievances.values()
-                if g["user_id"] == user_id and g["status"] != "forgiven" and g["description"][:20] == prefix
-            ]
+            # the prefix match is made in Python on the opened text (the database holds a sealed value): all open ones, newest first
+            (user_id,) = params
+            matches = [g for g in self.conn.grievances.values() if g["user_id"] == user_id and g["status"] != "forgiven"]
             matches.sort(key=lambda g: g["created_at"], reverse=True)
-            self._result = dict(matches[0]) if matches else None
+            self._results = [dict(g) for g in matches]
+        elif upper.startswith("SELECT MODE, NONCE, PROOF FROM STORAGE_PROTECTION_EVENT"):
+            self._result = None                       # protection was never switched on (off)
         elif upper.startswith("UPDATE GRIEVANCE SET SEVERITY=%S"):
             severity, updated_at, gid = params
             self.conn.grievances[gid]["severity"] = severity

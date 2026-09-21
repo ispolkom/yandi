@@ -162,7 +162,23 @@ system: temporary directories, loopback ports chosen by the system, processes it
 
 `scripts/test-key-root.sh` runs, offline: `cargo fmt --check` and `cargo test` for `node/key_root` (the root document with its device and recovery wrappers, the identity formats and
 the load policy, atomic writes, migration with rollback, recovery on a "new machine", and the `yandi-keys` tool run as a subprocess whose output is scanned for secrets), a check of the whole
-node, and the mutation check (`scripts/key_root_mutants.py`, 21 deliberate defects: a failed decrypt that creates or overwrites an identity, a wrong password that leaves a trace, the machine id
+node, and the mutation check (`scripts/key_root_mutants.py`, 23 deliberate defects: a failed decrypt that creates or overwrites an identity, a wrong password that leaves a trace, the machine id
 used as a key, a weak hash for the recovery password, a printed password, a migration that cannot restore or keep backups, recovery that returns another identity, …). Everything uses temporary
 directories and a fake machine id: **the owner's real `~/.yandi_keys` is never touched.**
 The node's own tests (`cargo test --lib`, 196) cover the first-run web setup with the person's typed passwords (repeat mismatch, too short, never overwrites, restart, recovery on another "machine" with the typed master password, login-page reset) and the setup-only server (only `/setup` is served, other hosts refused, it stops after success); the mutation script also holds web mutants W1–W3.
+
+## Sealed personal memory (P1c-2)
+
+Three layers, all offline and none touching the live database:
+
+* `python -m agent.db_sql_field_protection_regression_test` — the storage layer and the repository wiring over an in-memory fake SQL that keeps exactly what
+  the repositories send (so "what the database holds" can be searched for the person's words): every mode, no key / wrong key / forged mode record, swapped and
+  planted values, a typed `yp1:`, the key tool, and structural guards (every writer of a protected table seals, every reader opens, no module outside the repository
+  layer runs SQL against those tables). It ends with ten in-process mutants of its own. Part of `scripts/test-core.sh` / `test-all.sh`.
+* `scripts/test-sql-temp.sh agent.db_sql_field_protection_sql_integration_test` — on a real, private MySQL: the v18 → v19 upgrade, `seal` (raw rows searched for the
+  words: none left), `unseal`, an interruption, an error mid-table, a row changed under the tool, a stray write, a skipped table, a planted plaintext row, swapped sealed values,
+  and backup → destroy → restore → identical content (with wrong-key, damaged and forged backups refused). Part of `scripts/test-sql-temp.sh`.
+* `python scripts/protect_mutants.py` — 29 deliberate defects in the layer, the wiring, the Core hook and the tool, each of which must fail one of the suites above
+  (takes tens of minutes: many of them run the real-engine suite). Needs `YANDI_PYTHON` (a python with `cryptography` and `PyMySQL`).
+
+The Rust side: `yandi-keys core-key` is covered by `cargo test -p yandi-key-root` (prints exactly the key the node gives the Core, one line, nothing on stderr; refuses a terminal).
