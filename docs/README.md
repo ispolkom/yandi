@@ -7,6 +7,7 @@
 | [MEMORY_AND_IDENTITY.md](MEMORY_AND_IDENTITY.md) | Self model, relationship memory, provenance guard, apology matching |
 | [EPISTEMIC_CORE.md](EPISTEMIC_CORE.md) | Claims, evidence, trust labels, beliefs, reflection |
 | [EXTENSION.md](EXTENSION.md) | Firefox extension: what it does, build, install, tests, limits |
+| [NODE_CORE_CONTRACT.md](NODE_CORE_CONTRACT.md) | Contract (1.0-rc1) between the node and the YANDI core: invariants, lifecycle, keys, conversation, egress, events, migration; executable form in `contract/` |
 | [TESTING.md](TESTING.md) | How to run the regression suites |
 | [KNOWN_ISSUES.md](KNOWN_ISSUES.md) | Open problems and limitations |
 
