@@ -106,7 +106,7 @@
   </div>
 
   <div class="rebind-notice" id="rebind-notice">
-    🖥️ Новое устройство обнаружено. Введите мастер-пароль для привязки к этому устройству.
+    🖥️ Это устройство не может открыть ключи само. Восстановление выполняется командой <b>yandi-keys recover</b> (код восстановления), затем запустите ноду снова.
   </div>
 
   <div id="login-section">
@@ -126,6 +126,24 @@
   <div class="error" id="error-msg"></div>
 
   <button id="login-btn" onclick="doLogin()">Войти</button>
+
+  <p style="text-align:center; margin-top:18px; font-size:13px;">
+    <a href="#" id="forgot-link" onclick="showRecover(); return false;" style="color:#94a3b8;">Забыли пароль? Восстановить по коду</a>
+  </p>
+
+  <div id="recover-section" style="display:none; margin-top:20px;">
+    <label for="rec_code">Код восстановления (мастер-ключ)</label>
+    <input type="text" id="rec_code" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false" autocapitalize="characters"
+           style="font-family: ui-monospace, monospace; letter-spacing: 1px;">
+    <div style="font-size:12px; color:#94a3b8; margin:-4px 0 12px;">Тот, что был показан при создании ключей и записан на бумагу. Регистр и дефисы не важны.</div>
+    <label for="rec_pw">Новый пароль входа</label>
+    <input type="password" id="rec_pw" placeholder="не короче 8 символов" autocomplete="new-password">
+    <label for="rec_pw2">Повторите новый пароль</label>
+    <input type="password" id="rec_pw2" autocomplete="new-password">
+    <div class="error" id="rec-error" style="display:none;"></div>
+    <button id="rec-btn" onclick="doRecover()">Восстановить доступ</button>
+    <p style="text-align:center; margin-top:14px; font-size:13px;"><a href="#" onclick="hideRecover(); return false;" style="color:#94a3b8;">← Назад ко входу</a></p>
+  </div>
 </div>
 
 <script>
@@ -183,7 +201,51 @@ function showError(msg) {
   el.style.display = 'block';
 }
 
-document.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+function showRecover() {
+  document.getElementById('recover-section').style.display = 'block';
+  document.getElementById('forgot-link').style.display = 'none';
+  document.getElementById('login-btn').style.display = 'none';
+  document.getElementById('login-section').style.display = 'none';
+  document.getElementById('error-msg').style.display = 'none';
+  document.getElementById('rec_code').focus();
+}
+function hideRecover() {
+  document.getElementById('recover-section').style.display = 'none';
+  document.getElementById('forgot-link').style.display = 'inline';
+  document.getElementById('login-btn').style.display = 'block';
+  document.getElementById('login-section').style.display = 'block';
+}
+function recError(msg) {
+  const el = document.getElementById('rec-error');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+async function doRecover() {
+  const code = document.getElementById('rec_code').value.trim();
+  const pw = document.getElementById('rec_pw').value;
+  const pw2 = document.getElementById('rec_pw2').value;
+  document.getElementById('rec-error').style.display = 'none';
+  if (!code) { recError('Введите код восстановления'); return; }
+  if (pw.length < 8) { recError('Новый пароль — не короче 8 символов'); return; }
+  if (pw !== pw2) { recError('Пароли не совпадают'); return; }
+  const btn = document.getElementById('rec-btn');
+  btn.disabled = true; btn.textContent = 'Проверка…';
+  try {
+    const resp = await fetch('/api/auth/recover', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recovery_code: code, new_login_password: pw, remember_me: false })
+    });
+    const data = await resp.json();
+    if (resp.ok) { window.location.href = '/'; return; }
+    recError(data.error || 'Не удалось восстановить');
+  } catch (e) { recError('Сетевая ошибка: ' + e.message); }
+  btn.disabled = false; btn.textContent = 'Восстановить доступ';
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  if (document.getElementById('recover-section').style.display === 'block') doRecover(); else doLogin();
+});
 document.getElementById('login_pw').focus();
 </script>
 </body>

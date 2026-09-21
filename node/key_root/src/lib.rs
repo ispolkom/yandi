@@ -16,6 +16,7 @@ pub mod keydir;
 pub mod legacy;
 pub mod machine;
 pub mod migrate;
+pub mod recovery_code;
 pub mod root;
 pub mod unlock;
 pub mod wrap;
@@ -27,7 +28,10 @@ pub use identity_store::{
 };
 pub use keydir::KeyDir;
 pub use machine::{FixedMachine, MachineContext, SystemMachine};
-pub use migrate::{Migration, MigrationReport, Recovery, RecoveryReport};
+pub use migrate::{
+    Migration, MigrationReport, NewRecoveryCode, PendingRecovery, Recovery, RecoveryReport,
+};
+pub use recovery_code::{recovery_secret, RecoveryCode};
 pub use root::RootDocument;
 pub use unlock::{status, unlock_root, KeyStoreStatus, RootSource};
 pub use wrap::{derive_domain, KdfParams, KdfPolicy, DOMAIN_CORE, DOMAIN_IDENTITY};

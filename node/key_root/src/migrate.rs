@@ -254,3 +254,73 @@ impl Recovery<'_> {
         })
     }
 }
+
+/// Replace the recovery secret by a fresh, system-made recovery code, with the DEVICE opening the root (no old password is needed, and the
+/// identity, the root and the chats are untouched). Two steps so that nothing changes until the owner has proved the code was copied:
+/// `prepare` makes and returns the code, `commit` writes it only if the owner typed it back correctly.
+pub struct NewRecoveryCode<'a> {
+    pub dir: &'a KeyDir,
+    pub machine: &'a dyn MachineContext,
+    pub device: &'a dyn DeviceKeyProvider,
+    pub params: KdfParams,
+    pub policy: &'a KdfPolicy,
+}
+
+pub struct PendingRecovery {
+    code: crate::recovery_code::RecoveryCode,
+}
+
+impl PendingRecovery {
+    /// The code to show, once, and never to store.
+    pub fn code(&self) -> &crate::recovery_code::RecoveryCode {
+        &self.code
+    }
+}
+
+impl NewRecoveryCode<'_> {
+    pub fn prepare(&self) -> Result<PendingRecovery> {
+        let bytes = read_private_file(&self.dir.auth_file())?;
+        match auth_format(&bytes)? {
+            AuthFormat::RootV2 => {}
+            AuthFormat::LegacyV1 => {
+                return Err(KeyRootError::Refused(
+                    "a legacy key directory has no recovery wrapper; migrate it first",
+                ))
+            }
+        }
+        let doc = RootDocument::parse(&bytes)?;
+        let key = self.device.load()?.ok_or(KeyRootError::RecoveryRequired)?;
+        doc.unlock_with_device(&key, self.machine)?; // only the device may replace the recovery secret
+        Ok(PendingRecovery {
+            code: crate::recovery_code::RecoveryCode::generate(),
+        })
+    }
+
+    /// Writes the new wrapper only if `typed` is the shown code. The previous `auth.json` is kept as a backup.
+    pub fn commit(&self, pending: &PendingRecovery, typed: &str) -> Result<PathBuf> {
+        let typed = crate::recovery_code::RecoveryCode::parse(typed)?;
+        if !typed.same_as(&pending.code) {
+            return Err(KeyRootError::Invalid(
+                "what you typed is not the code that was shown; nothing was changed",
+            ));
+        }
+        let auth_path = self.dir.auth_file();
+        let bytes = read_private_file(&auth_path)?;
+        let doc = RootDocument::parse(&bytes)?;
+        let key = self.device.load()?.ok_or(KeyRootError::RecoveryRequired)?;
+        let root = doc.unlock_with_device(&key, self.machine)?;
+        let next = doc.with_new_recovery(&root, pending.code.secret(), self.params, self.policy)?;
+        let next_bytes = next.to_json();
+        let backup = backup_copy(&auth_path, "before-new-code")?;
+        write_atomic(&auth_path, &next_bytes, |w| {
+            RootDocument::parse(w)
+                .and_then(|d| {
+                    let by_code = d.unlock_with_password(pending.code.secret(), self.policy)?;
+                    let by_device = d.unlock_with_device(&key, self.machine)?;
+                    Ok(*by_code == *root && *by_device == *root)
+                })
+                .unwrap_or(false)
+        })?;
+        Ok(backup)
+    }
+}

@@ -500,6 +500,7 @@ impl WebServer {
             .route("/api/auth/setup", post(api_auth_setup))
             .route("/api/auth/logout", get(api_auth_logout))
             .route("/api/auth/rebind", post(api_auth_rebind))
+            .route("/api/auth/recover", post(api_auth_recover))
             .layer(TraceLayer::new_for_http())
     }
 }
@@ -689,6 +690,48 @@ async fn api_auth_rebind(
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": e})),
         ).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct RecoverRequest {
+    recovery_code: String,
+    new_login_password: String,
+    #[serde(default)]
+    remember_me: bool,
+}
+
+/// Forgot the login password: the recovery code (the "master key" written down at creation) sets a new one.
+async fn api_auth_recover(
+    State(state): State<AppState>,
+    Json(body): Json<RecoverRequest>,
+) -> Response {
+    // the same brute-force throttle as the login: a wrong code counts as a failed attempt
+    if let Some(remaining) = state.auth_state.login_backoff_remaining() {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": format!("Слишком много попыток, подождите {}с", remaining.as_secs().max(1))})),
+        ).into_response();
+    }
+    let auth_state = state.auth_state.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::web::auth::recover_login(&auth_state, &body.recovery_code, &body.new_login_password).map(|_| body.remember_me)
+    })
+    .await
+    .unwrap_or_else(|_| Err("Внутренняя ошибка".to_string()));
+    match result {
+        Ok(remember_me) => {
+            state.auth_state.record_login_success();
+            let token = state.auth_state.create_session(remember_me);
+            let cookie = crate::web::auth::make_session_cookie(&token, remember_me);
+            let mut resp_headers = HeaderMap::new();
+            resp_headers.insert("Set-Cookie", cookie.parse().unwrap());
+            (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true}))).into_response()
+        }
+        Err(e) => {
+            state.auth_state.record_login_failure();
+            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e}))).into_response()
+        }
     }
 }
 

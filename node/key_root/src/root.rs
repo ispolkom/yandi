@@ -190,6 +190,41 @@ impl RootDocument {
         }
     }
 
+    /// The same document with a NEW recovery secret (a recovery code, or a password): the old one stops working, the device wrapper, the
+    /// login hash and the root are untouched. `root` must be this document's root.
+    pub fn with_new_recovery(
+        &self,
+        root: &[u8; 32],
+        secret: &str,
+        params: KdfParams,
+        policy: &KdfPolicy,
+    ) -> Result<RootDocument> {
+        if root_id(root) != self.root_id {
+            return Err(KeyRootError::Corrupt);
+        }
+        let salt = random_bytes::<32>();
+        let kek = derive_kek(secret.as_bytes(), &salt, &params, policy)?;
+        let (n, c) = seal(&kek, &recovery_aad(&self.root_id, &params), root);
+        let mut next = self.clone();
+        next.recovery = RecoveryWrapper {
+            kdf: "argon2id".into(),
+            memory_kib: params.memory_kib,
+            iterations: params.iterations,
+            parallelism: params.parallelism,
+            salt: hex::encode(salt),
+            nonce: hex::encode(n),
+            ciphertext: hex::encode(c),
+        };
+        Ok(next)
+    }
+
+    /// The same document with another web login hash (a login-password reset); nothing else changes.
+    pub fn with_login_hash(&self, login_hash: &str) -> RootDocument {
+        let mut next = self.clone();
+        next.login_hash = login_hash.to_owned();
+        next
+    }
+
     /// The same document with the device wrapper replaced (a new device key, or a new machine); the recovery wrapper is untouched.
     pub fn rewrapped_for_device(
         &self,

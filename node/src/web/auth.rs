@@ -503,6 +503,66 @@ pub fn rebind_to_machine(
     Err("Recovery is done on the command line: run `yandi-keys recover` (see docs/KEY_RECOVERY.md). Nothing was changed.".to_string())
 }
 
+/// Forgot the web password: the recovery code proves ownership and sets a new one. The recovery wrapper is opened (Argon2id: about half a
+/// second per attempt, and the caller throttles attempts); only then is `auth.json` rewritten, atomically, with the same wrappers and the
+/// new login hash. Every existing session is ended. Errors are short messages that are safe to show.
+#[cfg(unix)]
+pub fn recover_login(state: &AuthState, code_input: &str, new_login_password: &str) -> Result<(), String> {
+    let path = auth_file_path();
+    let dir = key_root::KeyDir::open(path.parent().ok_or("Файл ключей недоступен")?.to_path_buf()).map_err(|_| "Каталог ключей недоступен".to_string())?;
+    recover_login_in(state, &dir, code_input, new_login_password, &key_root::KdfPolicy::production())
+}
+
+#[cfg(unix)]
+pub(crate) fn recover_login_in(
+    state: &AuthState,
+    dir: &key_root::KeyDir,
+    code_input: &str,
+    new_login_password: &str,
+    policy: &key_root::KdfPolicy,
+) -> Result<(), String> {
+    use key_root::{recovery_secret, KeyRootError, RecoveryCode, RootDocument};
+    if new_login_password.chars().count() < 8 {
+        return Err("Новый пароль входа должен быть не короче 8 символов".to_string());
+    }
+    let bytes = key_root::keydir::read_private_file(&dir.auth_file()).map_err(|_| "Файл ключей недоступен".to_string())?;
+    match key_root::legacy::auth_format(&bytes) {
+        Ok(key_root::legacy::AuthFormat::RootV2) => {}
+        Ok(_) => return Err("Ключи в старом формате: сначала выполните `yandi-keys migrate`".to_string()),
+        Err(_) => return Err("Файл ключей повреждён".to_string()),
+    }
+    // a code with a typo is a typo, not "wrong"
+    if key_root::recovery_code::looks_like_code(code_input) && RecoveryCode::parse(code_input).is_err() {
+        return Err("В коде опечатка: он не проходит проверку. Проверьте, что записано, и введите ещё раз".to_string());
+    }
+    let doc = RootDocument::parse(&bytes).map_err(|_| "Файл ключей повреждён".to_string())?;
+    let secret = recovery_secret(code_input);
+    let root = match doc.unlock_with_password(&secret, policy) {
+        Ok(r) => r,
+        Err(KeyRootError::RecoveryFailed) => return Err("Код восстановления не подошёл".to_string()),
+        Err(_) => return Err("Файл ключей повреждён".to_string()),
+    };
+    let hash = hash_login_password(new_login_password)?;
+    let next = doc.with_login_hash(&hash).to_json();
+    let auth_path = dir.auth_file();
+    key_root::atomic::backup_copy(&auth_path, "before-login-reset").map_err(|_| "Не удалось сохранить копию ключей; ничего не изменено".to_string())?;
+    key_root::atomic::write_atomic(&auth_path, &next, |written| {
+        RootDocument::parse(written)
+            .and_then(|d| Ok(d.login_hash == hash && *d.unlock_with_password(&secret, policy)? == *root))
+            .unwrap_or(false)
+    })
+    .map_err(|_| "Не удалось записать новый пароль; ничего не изменено".to_string())?;
+    if let Ok(mut sessions) = state.sessions.lock() {
+        sessions.clear(); // a password reset ends every session that existed before it
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn recover_login(_state: &AuthState, _code_input: &str, _new_login_password: &str) -> Result<(), String> {
+    Err("Восстановление по коду пока поддерживается только на Linux и macOS".to_string())
+}
+
 /// Extract session token from Cookie header value.
 pub fn extract_session_token(cookie_header: &str) -> Option<String> {
     for part in cookie_header.split(';') {
@@ -641,5 +701,72 @@ mod key_root_integration_tests {
         assert_eq!(login_hash_of(r#"{"version":2,"login_hash":"h2","root_id":"x"}"#).unwrap(), "h2");
         assert!(login_hash_of(r#"{"version":2}"#).is_err());
         assert!(login_hash_of("not json").is_err());
+    }
+
+    #[cfg(unix)]
+    mod recover {
+        use super::*;
+        use key_root::{FixedMachine, KdfParams, KdfPolicy, KeyDir, RecoveryCode, RootDocument};
+
+        const FAST: KdfParams = KdfParams { memory_kib: 64, iterations: 1, parallelism: 1 };
+
+        fn store(code: &RecoveryCode) -> (std::path::PathBuf, KeyDir) {
+            let base = std::env::temp_dir().join(format!("yandi-recover-test-{}-{}", std::process::id(), rand::random::<u32>()));
+            let dir = KeyDir::open(base.join("keys")).unwrap();
+            let old_hash = hash_login_password("the old login password").unwrap();
+            let doc = RootDocument::create(&[7u8; 32], &old_hash, &[9u8; 32], "file-v1", &FixedMachine("m".into()), code.secret(), FAST, &KdfPolicy::for_tests()).unwrap();
+            key_root::atomic::create_new_file(&dir.auth_file(), &doc.to_json()).unwrap();
+            (base, dir)
+        }
+
+        fn state_with_a_session() -> (AuthState, String) {
+            let st = AuthState::default();
+            let token = st.create_session(false);
+            (st, token)
+        }
+
+        #[test]
+        fn the_recovery_code_resets_the_login_password_and_ends_old_sessions() {
+            let code = RecoveryCode::generate();
+            let (base, dir) = store(&code);
+            let (st, token) = state_with_a_session();
+            assert!(st.verify_session(&token));
+            recover_login_in(&st, &dir, &code.display().to_lowercase().replace('-', " "), "a brand new password", &KdfPolicy::for_tests()).unwrap();
+            let doc = RootDocument::parse(&std::fs::read(dir.auth_file()).unwrap()).unwrap();
+            assert!(verify_login_password("a brand new password", &doc.login_hash));
+            assert!(!verify_login_password("the old login password", &doc.login_hash));
+            assert!(!st.verify_session(&token), "an old session survived a password reset");
+            // the keys themselves are untouched: the same code still opens the same root, the device still opens it too
+            assert_eq!(*doc.unlock_with_password(code.secret(), &KdfPolicy::for_tests()).unwrap(), [7u8; 32]);
+            assert_eq!(*doc.unlock_with_device(&[9u8; 32], &FixedMachine("m".into())).unwrap(), [7u8; 32]);
+            let _ = std::fs::remove_dir_all(base);
+        }
+
+        #[test]
+        fn a_wrong_code_a_typo_a_weak_password_and_a_legacy_directory_change_nothing() {
+            let code = RecoveryCode::generate();
+            let (base, dir) = store(&code);
+            let before = std::fs::read(dir.auth_file()).unwrap();
+            let (st, token) = state_with_a_session();
+            let pol = KdfPolicy::for_tests();
+            let other = RecoveryCode::generate().display();
+            assert_eq!(recover_login_in(&st, &dir, &other, "a brand new password", &pol).unwrap_err(), "Код восстановления не подошёл");
+            let mut typo = code.display();
+            typo.replace_range(0..1, if typo.starts_with('A') { "B" } else { "A" });
+            assert!(recover_login_in(&st, &dir, &typo, "a brand new password", &pol).unwrap_err().contains("опечатка"));
+            assert!(recover_login_in(&st, &dir, &code.display(), "short", &pol).is_err());
+            assert!(recover_login_in(&st, &dir, "", "a brand new password", &pol).is_err());
+            assert_eq!(std::fs::read(dir.auth_file()).unwrap(), before, "a refused reset changed auth.json");
+            assert!(st.verify_session(&token), "a refused reset ended a session");
+            // a legacy (v1) directory has no recovery wrapper
+            let legacy = std::env::temp_dir().join(format!("yandi-recover-legacy-{}-{}", std::process::id(), rand::random::<u32>()));
+            let ldir = KeyDir::open(legacy.join("keys")).unwrap();
+            let v1 = key_root::legacy::seal_legacy_auth(&[7u8; 32], "$h", &FixedMachine("m".into())).unwrap();
+            key_root::atomic::create_new_file(&ldir.auth_file(), &v1).unwrap();
+            assert!(recover_login_in(&st, &ldir, &code.display(), "a brand new password", &pol).unwrap_err().contains("migrate"));
+            assert_eq!(std::fs::read(ldir.auth_file()).unwrap(), v1);
+            let _ = std::fs::remove_dir_all(base);
+            let _ = std::fs::remove_dir_all(legacy);
+        }
     }
 }
