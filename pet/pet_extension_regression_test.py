@@ -144,6 +144,11 @@ def main() -> int:
     old_call = "const s = await fetch(`${YANDI_API}/api/orch/status/${msgId}`);"
     check("5: MUTANT the old overlay's call to /api/orch/status/<id> is recognised as a path the server does not have",
           any(p not in routes for p in called_paths(old_call)) and called_paths(old_call) == {"/api/orch/status/"})
+    import pet.local_guard as lg
+    blocked_by_guard = sorted(p for p in called if not lg.is_extension_path(p))
+    check("5: every path the extension calls is one the server's guard lets the extension use (otherwise the guard would break it)", not blocked_by_guard, repr(blocked_by_guard))
+    check("5: and the guard opens nothing the extension does not call (the allowlist stays minimal)",
+          lg.EXTENSION_PATHS <= called and all(any(p.startswith(pre) for p in called) for pre in lg.EXTENSION_PATH_PREFIXES), repr(sorted(called)))
     missing = sorted(p for p in called if p not in routes)
     check("5: every server path the extension calls is a route the server registers (the old overlay waited on /api/orch/status/<id>, which never existed)",
           not missing, repr(missing))

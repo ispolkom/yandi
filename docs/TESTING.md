@@ -24,7 +24,7 @@ The interpreter is `YANDI_PYTHON`, else `./.venv`, else `~/venv`, else `python3`
 | Area | Suites |
 |---|---|
 | Gateway | `llm_gateway.client_regression_test`, `remote_backend_`, `llamacpp_backend_`, `intelligence_bridge_`, `secure_store_` |
-| Personal chat | `pet.pet_chat_local_regression_test`, `pet.pet_event_extraction_regression_test`, `pet.pet_event_provenance_regression_test`, `pet.pet_relationship_focus_regression_test`, `pet.pet_relationship_state_causality_regression_test`, `pet.pet_commitment_events_regression_test`, `pet.pet_turn_identity_regression_test`, `pet.pet_personal_memory_regression_test`, `pet.pet_turn_transaction_regression_test`, `pet.pet_fact_extraction_regression_test`, `pet.pet_personal_facts_regression_test`, `pet.pet_commitment_verification_regression_test`, `pet.pet_commitment_trust_regression_test`, `pet.pet_extension_regression_test`, `pet.pet_settings_tab_regression_test` |
+| Personal chat | `pet.pet_chat_local_regression_test`, `pet.pet_event_extraction_regression_test`, `pet.pet_event_provenance_regression_test`, `pet.pet_relationship_focus_regression_test`, `pet.pet_relationship_state_causality_regression_test`, `pet.pet_commitment_events_regression_test`, `pet.pet_turn_identity_regression_test`, `pet.pet_personal_memory_regression_test`, `pet.pet_turn_transaction_regression_test`, `pet.pet_fact_extraction_regression_test`, `pet.pet_personal_facts_regression_test`, `pet.pet_commitment_verification_regression_test`, `pet.pet_commitment_trust_regression_test`, `pet.pet_extension_regression_test`, `pet.pet_settings_tab_regression_test`, `pet.pet_web_guard_regression_test` |
 | Relationship memory | `agent.message_intensity_regression_test`, `agent.relationship_memory_regression_test`, `agent.relationship_apology_matching_regression_test`, `agent.relationship_healing_clock_regression_test`, `agent.relationship_state_regression_test`, `agent.relationship_commitments_regression_test`, `agent.relationship_direct_fulfilment_regression_test`, `agent.relationship_idempotency_regression_test` |
 | Epistemic / write-back | `agent.epistemic_canonical_trust_shadow_regression_test`, `agent.writeback_episodic_sql_regression_test` |
 | SQL layer | `agent.db_sql_shadow_write_regression_test`, `agent.db_sql_security_injection_regression_test`, `agent.db_sql_test_isolation_regression_test` |
@@ -129,3 +129,13 @@ browser and the model-file check, and the page wiring. `python -m pet.settings_t
 `redis-server` and `pip install marionette_driver`) starts the REAL server with a throw-away Redis and drives the tab in a
 real headless Firefox: first-run placement, the browse window on another disk, apply, the tab moving to the end and staying
 closed after a reload, and a page from another origin being refused. It refuses to run when ports 9010 or 6379 are in use.
+
+## The server is closed to other websites
+
+`pet.pet_web_guard_regression_test` (core suite) checks the "deny by default" rule (`pet/local_guard.py`) for HTTP and WebSocket:
+foreign origins, cross-site requests, DNS rebinding, duplicate headers, the extension on its own paths only, path tricks, CORS,
+security headers, with eight mutants. `python -m pet.web_guard_firefox_e2e` (needs `firefox-esr`, `redis-server`,
+`websockets` and `pip install marionette_driver`) starts the real server with a throw-away Redis, installs the extension package
+in a real headless Firefox and opens a page of another origin: the own page and the extension keep working, the other page can
+read nothing, run no tool, open no WebSocket, and even a "simple" request that needs no preflight has no effect (checked in Redis).
+With the rule switched off the same scenario fails on four points.

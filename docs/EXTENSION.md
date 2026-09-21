@@ -45,6 +45,8 @@ regular Firefox: `about:debugging` → *This Firefox* → *Load Temporary Add-on
   each site's page structure (selectors); they are checked only against a fake page. A site redesign breaks them.
 - A task queued for a model whose chat tab is not open is taken from the server's queue and dropped (the requester
   times out); the extension does not queue it for later.
-- The server currently answers with `allow_origins=["*"]`; Firefox 140 still applies CORS to the extension's own
-  requests, so the extension depends on that. Tightening the server's CORS would break it.
+- The server accepts the extension only on its own addresses (`/api/ext/*`, `/api/orchestrator/ask`, `/api/orch/history`,
+  `/api/council/connections`) and answers CORS to the extension only (`pet/local_guard.py`); Firefox 140 still applies CORS to the
+  extension's own requests, so the extension depends on that answer. Adding a server address the extension needs means adding it
+  to the guard's list (a test checks that the list and the extension's calls agree).
 - `pet/extension/content_qwen.js` is not registered (the server has no qwen queue).

@@ -87,13 +87,19 @@ def _loads_visible_messages(raw: list[str]) -> list[dict]:
             pass
     return _visible_council_messages(messages)
 
+from pet.local_guard import EXTENSION_CORS_ORIGIN_REGEX, LocalOnlyMiddleware
+
 app = FastAPI()
+# CORS отвечает только расширению Firefox (а не «всем сайтам»); чужие страницы не получают разрешения читать ответы.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=EXTENSION_CORS_ORIGIN_REGEX,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Самая внешняя прослойка (добавлена последней): весь сервер, HTTP и WebSocket, по правилу «по умолчанию нельзя»
+# (pet/local_guard.py). Раньше сервер отвечал любому сайту и позволял ему, например, запускать инструменты агента.
+app.add_middleware(LocalOnlyMiddleware)
 app.mount("/media", StaticFiles(directory=str(_HERE / "media")), name="media")
 
 # ── Подключаем роутеры каждого чата ──────────────────────────────────────────

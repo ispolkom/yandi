@@ -186,13 +186,19 @@ Beliefs, reflection, the scalar "inner state" and character engine, and the lega
 model are not all connected to the personal chat path. `relationship_memory` (event-based) is the
 one used by PET.
 
-## The web UI server is open to any website
+## The web UI server and other websites
 
-The server on `127.0.0.1:9010` has no authentication and answers CORS for every origin, so any website open in the same
-browser can call its endpoints. The settings tab and the disk browser are protected (`pet/local_guard.py`: they accept only
-requests from the server's own page or from programs on this computer), the older endpoints are not. In particular
-`/api/tools/run` runs the agent's tools from a web page, and `shell.run` allows `python3` with any arguments, which is code
-execution on this computer. The Firefox extension currently depends on the CORS wildcard, so it cannot simply be removed.
+The server on `127.0.0.1:9010` listens on this computer only, but the browser on this computer opens other websites too,
+and a page of any website can send requests to `127.0.0.1:9010` and open a WebSocket to it. The whole server (every HTTP
+endpoint and the WebSocket, `pet/local_guard.py`) therefore works on "deny by default": a request passes only from the
+server's own page or from a program on this computer (no Origin header), or from the Firefox extension and only on its own
+addresses; CORS answers the extension only (no more `*`). Answers carry anti-framing headers.
+
+Limits: the server still has NO login, so any program or person on this computer can use it (a login is planned); the
+Firefox extension origin `moz-extension://<uuid>` is accepted on the extension's addresses whichever extension it belongs to
+(another installed extension could call those addresses); the older endpoints still exist and work for the own page, in
+particular `/api/tools/run` (agent tools, `shell.run` allows `python3` with any arguments) until the Agent tab is removed.
+`requirements.txt` did not list a WebSocket library, so a fresh install had no live updates; `websockets` is listed now.
 
 ## Single-owner personal chat
 
