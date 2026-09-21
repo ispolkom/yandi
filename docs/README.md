@@ -10,6 +10,7 @@
 | [NODE_CORE_CONTRACT.md](NODE_CORE_CONTRACT.md) | Contract (1.0-rc1) between the node and the YANDI core: invariants, lifecycle, keys, conversation, egress, events, migration; executable form in `contract/` |
 | [CORE_LIFECYCLE.md](CORE_LIFECYCLE.md) | The Python Core's P1 lifecycle boundary: how it is started, locked, unlocked and shut down, and what still goes around the gate |
 | [KEY_RECOVERY.md](KEY_RECOVERY.md) | P1c-1: the root key with a device wrapper and a recovery-password wrapper, the identity that survives loss of the device, `yandi-keys` |
+| [WEB_UI_VOICE.md](WEB_UI_VOICE.md) | The «YANDI» tab: the chosen local model is registered in the gateway and really answers; what is not connected yet |
 | [WEB_LOGIN.md](WEB_LOGIN.md) | One account, two web pages: the assistant's page (9010) asks for the same login password and recovery phrase as the node's page; who is checked and who is not |
 | [STORAGE_PROTECTION.md](STORAGE_PROTECTION.md) | P1c-2: the sealed personal memory (AES-256-GCM from the root key): what is sealed, how to turn it on and off, backup/restore, limits |
 | [KEY_CHAIN_AUDIT.md](KEY_CHAIN_AUDIT.md) | Read-only audit of every key and what it really protects (P1c part 1): findings, threat table, decisions, recommendation |

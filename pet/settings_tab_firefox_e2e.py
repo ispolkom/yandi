@@ -82,7 +82,8 @@ def main() -> int:
         (tmp / "redis").mkdir()
         procs.append(subprocess.Popen([redis, "--port", "6379", "--bind", "127.0.0.1", "--save", "", "--appendonly", "no", "--dir", str(tmp / "redis")],
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        env = {**os.environ, "YANDI_WEB_SETTINGS": str(settings_file), "YANDI_TEST_MODE": "1"}
+        env = {**os.environ, "YANDI_WEB_SETTINGS": str(settings_file), "YANDI_TEST_MODE": "1",
+               "YANDI_NODE_DB": str(tmp / "node.db"), "YANDI_KEK_PATH": str(tmp / "nodekeys" / "kek.bin")}   # «Применить» регистрирует модель в шлюзе: во временном хранилище
         procs.append(subprocess.Popen([sys.executable, "-m", "pet.council_chat_server", "--port", "9010"], cwd=str(ROOT), env=env,
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         deadline = time.time() + 90

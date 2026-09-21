@@ -199,6 +199,12 @@
       return;
     }
     const d = describe(cfg);
+    if (cfg.applied === false) {
+      // выбор сохранён, но не действует: не пишем «сейчас используется» (pet/voice.py)
+      box.append(document.createTextNode("Выбран Голос — "), el("b", "", d.voice));
+      box.appendChild(document.createTextNode(`, но он пока НЕ используется${cfg.note ? ": " + cfg.note : ""}.`));
+      return;
+    }
     box.append(document.createTextNode("Сейчас используется: Голос — "), el("b", "", d.voice));
     box.appendChild(document.createTextNode(d.advisors.length ? `; советники: ${d.advisors.join(", ")}` : "; советников нет"));
   }
@@ -235,7 +241,8 @@
       $("st-api-key").value = "";                 // ключ не сохранён и не остаётся в поле
       renderCurrent(d);
       applyTabOrder();
-      setStatus("✅ Сохранено. Вкладка «YANDI» перенесена в конец списка.", "ok");
+      if (d.applied) setStatus(`✅ Применено: ${d.note}. Вкладка «YANDI» перенесена в конец списка.`, "ok");
+      else setStatus(`⚠️ Сохранено, но не применено: ${d.note}`, "bad");
     } catch (e) {
       setStatus(`❌ ${e.message}`, "bad");
     }

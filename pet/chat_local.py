@@ -17,6 +17,7 @@ import redis.asyncio as aioredis
 from fastapi import APIRouter
 
 from pet.shared import REDIS_URL, LOCAL_MSGS_KEY, MAX_MESSAGES
+from pet import voice as _voice
 import os
 import re
 
@@ -740,13 +741,15 @@ async def local_chat(payload: dict):
     messages    = payload.get("messages", [])
     if not messages:
         return {"ok": False, "error": "empty messages"}
+    # Голос из вкладки «YANDI» (если он локальный и применён) отвечает вместо выбранного в списке (pet/voice.py)
+    model = await asyncio.get_event_loop().run_in_executor(None, lambda: _voice.effective_model(model))
     turn_id = _valid_turn_id(payload.get("turn_id"))
     loop = asyncio.get_event_loop()
     try:
         content = await loop.run_in_executor(
             None, lambda: _respond_with_character(model, messages, temperature, turn_id)
         )
-        return {"ok": True, "content": content}
+        return {"ok": True, "content": content, "model_used": model}
     except Exception as e:
         return {"ok": False, "error": str(e), "content": f"❌ {e}"}
 

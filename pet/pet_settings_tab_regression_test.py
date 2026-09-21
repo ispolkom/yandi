@@ -48,6 +48,13 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="yandi-settings-"))
     settings_file = tmp / "cfg" / "web_settings.json"
     os.environ["YANDI_WEB_SETTINGS"] = str(settings_file)
+    # «Применить» регистрирует локальную модель в шлюзе узла: настоящий файл модели и своё, временное хранилище шлюза
+    (tmp / "models").mkdir()
+    gguf = tmp / "models" / "q.gguf"
+    gguf.write_bytes(b"GGUF" + b"\0" * 60)
+    GOOD["local"]["path"] = str(gguf)
+    os.environ["YANDI_NODE_DB"] = str(tmp / "node.db")
+    os.environ["YANDI_KEK_PATH"] = str(tmp / "keys" / "kek.bin")
     try:
         # ── 1. валидация и файл ──
         check("1: до первого сохранения настройки «не сохранены»", us.load() == us.defaults() and us.load()["saved"] is False)
