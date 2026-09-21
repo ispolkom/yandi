@@ -602,14 +602,18 @@ async fn api_auth_login(
 #[derive(Deserialize)]
 struct SetupRequest {
     login_password: String,
+    #[serde(default)]
+    login_password_repeat: String,
     master_password: String,
+    #[serde(default)]
+    master_password_repeat: String,
 }
 
 async fn api_auth_setup(
     State(state): State<AppState>,
     Json(body): Json<SetupRequest>,
 ) -> Response {
-    match crate::web::auth::setup_auth(&state.auth_state, &body.login_password, &body.master_password) {
+    match crate::web::auth::setup_auth(&state.auth_state, &body.login_password, &body.login_password_repeat, &body.master_password, &body.master_password_repeat) {
         Ok(_master_key) => {
             let token = state.auth_state.create_session(false);
             let cookie = crate::web::auth::make_session_cookie(&token, false);

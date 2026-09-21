@@ -415,8 +415,104 @@ fn login_hash_of(json: &str) -> Result<String, String> {
     value.get("login_hash").and_then(|v| v.as_str()).map(str::to_owned).ok_or_else(|| "auth.json has no login hash".to_string())
 }
 
-/// Perform first-time setup: hash login password, derive master_key, store both.
+/// First-time setup, exactly as the person entered it in the web page: a login password and a master password, each typed twice.
+/// The master password is the person's own recovery secret (it is not generated); the actual master key is a random root that this
+/// creates, wrapped for THIS device (a device key file) and for the master password (Argon2id). Nothing is stored that could
+/// open the root without the device key or the master password. Fails, changing nothing, if key material already exists.
 pub fn setup_auth(
+    state: &AuthState,
+    login_password: &str,
+    login_password_repeat: &str,
+    master_password: &str,
+    master_password_repeat: &str,
+) -> Result<[u8; 32], String> {
+    check_setup_inputs(login_password, login_password_repeat, master_password, master_password_repeat)?;
+    #[cfg(unix)]
+    {
+        let path = auth_file_path();
+        let dir = key_root::KeyDir::open(path.parent().ok_or("Каталог ключей недоступен")?.to_path_buf()).map_err(|_| "Каталог ключей недоступен".to_string())?;
+        let device = key_root::FileDeviceKey::new(dir.file("device.key"));
+        setup_auth_in(state, &dir, &key_root::SystemMachine, &device, login_password, master_password, key_root::KdfParams::RECOMMENDED, &key_root::KdfPolicy::production())
+    }
+    #[cfg(not(unix))]
+    {
+        setup_auth_legacy(state, login_password, master_password)
+    }
+}
+
+/// The rules for what the person typed, in words that are safe to show.
+pub(crate) fn check_setup_inputs(login: &str, login_repeat: &str, master: &str, master_repeat: &str) -> Result<(), String> {
+    if login.chars().count() < 8 {
+        return Err("Пароль входа: минимум 8 символов".to_string());
+    }
+    if login != login_repeat {
+        return Err("Пароли входа не совпадают".to_string());
+    }
+    if master.chars().count() < 12 {
+        return Err("Мастер-пароль: минимум 12 символов (лучше фраза из нескольких слов)".to_string());
+    }
+    if master != master_repeat {
+        return Err("Мастер-пароли не совпадают".to_string());
+    }
+    if master == login {
+        return Err("Мастер-пароль должен отличаться от пароля входа".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn setup_auth_in(
+    state: &AuthState,
+    dir: &key_root::KeyDir,
+    machine: &dyn key_root::MachineContext,
+    device: &dyn key_root::DeviceKeyProvider,
+    login_password: &str,
+    master_password: &str,
+    params: key_root::KdfParams,
+    policy: &key_root::KdfPolicy,
+) -> Result<[u8; 32], String> {
+    use key_root::{RootDocument, Zeroizing};
+    let auth_path = dir.auth_file();
+    ensure_no_existing_auth(&auth_path)?;
+    if device.load().map(|k| k.is_some()).unwrap_or(true) {
+        return Err("В каталоге ключей уже есть ключ устройства; настройка не выполнена, чтобы ничего не затереть".to_string());
+    }
+    let root = Zeroizing::new(key_root::wrap::random_bytes::<32>());
+    let login_hash = hash_login_password(login_password)?;
+    let device_key = device.create().map_err(|_| "Не удалось создать ключ устройства".to_string())?;
+    let created = (|| -> Result<(), String> {
+        let doc = RootDocument::create(&root, &login_hash, &device_key, device.name(), machine, master_password, params, policy)
+            .map_err(|e| format!("Не удалось создать ключи: {}", e))?;
+        key_root::atomic::create_new_file(&auth_path, &doc.to_json()).map_err(|_| "Не удалось записать файл ключей".to_string())?;
+        // both ways in must open the very root that was just made, read back from disk
+        let bytes = key_root::keydir::read_private_file(&auth_path).map_err(|_| "Файл ключей не прочитался".to_string())?;
+        let doc = RootDocument::parse(&bytes).map_err(|_| "Файл ключей не прошёл проверку".to_string())?;
+        let by_device = doc.unlock_with_device(&device_key, machine).map_err(|_| "Ключ устройства не открывает корень".to_string())?;
+        let by_password = doc.unlock_with_password(master_password, policy).map_err(|_| "Мастер-пароль не открывает корень".to_string())?;
+        if *by_device != *root || *by_password != *root {
+            return Err("Проверка ключей не прошла".to_string());
+        }
+        Ok(())
+    })();
+    if let Err(e) = created {
+        // undo only what this call has just created (nothing existed before: that was checked above)
+        let _ = std::fs::remove_file(&auth_path);
+        if let Some(p) = dir.file("device.key").to_str() {
+            let _ = std::fs::remove_file(p);
+        }
+        return Err(e);
+    }
+    state.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
+    state.needs_rebind.store(false, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut mk) = state.master_key.lock() {
+        *mk = Some(*root);
+    }
+    println!("[auth] ✅ Keys created (device key + master password); the master password is your recovery secret");
+    Ok(*root)
+}
+
+#[cfg(not(unix))]
+fn setup_auth_legacy(
     state: &AuthState,
     login_password: &str,
     master_password: &str,
@@ -767,6 +863,129 @@ mod key_root_integration_tests {
             assert_eq!(std::fs::read(ldir.auth_file()).unwrap(), v1);
             let _ = std::fs::remove_dir_all(base);
             let _ = std::fs::remove_dir_all(legacy);
+        }
+    }
+
+    #[cfg(unix)]
+    mod first_setup_flow {
+        use super::*;
+        use crate::core::identity::NodeIdentity;
+        use key_root::{
+            unlock_root, FileDeviceKey, FixedMachine, IdentityFormat, KdfParams, KdfPolicy, KeyDir, KeyRootError, OpenContext, Recovery, RootDocument, RootSource,
+        };
+        use std::os::unix::fs::PermissionsExt;
+
+        const FAST: KdfParams = KdfParams { memory_kib: 64, iterations: 1, parallelism: 1 };
+        const LOGIN: &str = "my login password";
+        const MASTER: &str = "my own master phrase, written on paper";
+
+        fn fresh() -> (std::path::PathBuf, KeyDir) {
+            let base = std::env::temp_dir().join(format!("yandi-setup-test-{}-{}", std::process::id(), rand::random::<u32>()));
+            let dir = KeyDir::open(base.join("keys")).unwrap();
+            (base, dir)
+        }
+
+        fn setup(dir: &KeyDir, machine: &FixedMachine, state: &AuthState) -> Result<[u8; 32], String> {
+            let device = FileDeviceKey::new(dir.file("device.key"));
+            setup_auth_in(state, dir, machine, &device, LOGIN, MASTER, FAST, &KdfPolicy::for_tests())
+        }
+
+        #[test]
+        fn what_the_person_typed_is_the_recovery_secret_and_the_device_opens_the_key_by_itself() {
+            let (base, dir) = fresh();
+            let m = FixedMachine("machine-A".into());
+            let state = AuthState::default();
+            let root = setup(&dir, &m, &state).unwrap();
+            assert_eq!(state.get_master_key(), Some(root));
+            let bytes = std::fs::read(dir.auth_file()).unwrap();
+            let doc = RootDocument::parse(&bytes).unwrap();
+            let device = FileDeviceKey::new(dir.file("device.key"));
+            // normal start: no password
+            let (by_device, source) = unlock_root(&dir, &m, &device).unwrap();
+            assert_eq!((*by_device, source), (root, RootSource::Device));
+            // the master password exactly as typed opens it; a near miss does not
+            assert_eq!(*doc.unlock_with_password(MASTER, &KdfPolicy::for_tests()).unwrap(), root);
+            assert_eq!(doc.unlock_with_password("my own master phrase, written on paper.", &KdfPolicy::for_tests()).unwrap_err(), KeyRootError::RecoveryFailed);
+            assert!(verify_login_password(LOGIN, &doc.login_hash) && !verify_login_password(MASTER, &doc.login_hash));
+            // nothing readable: neither password, nor the root, nor the device key is in any file
+            let device_key = std::fs::read(dir.file("device.key")).unwrap();
+            for name in ["auth.json", "device.key"] {
+                let content = std::fs::read(dir.file(name)).unwrap();
+                for secret in [MASTER.as_bytes().to_vec(), LOGIN.as_bytes().to_vec(), root.to_vec(), hex::encode(root).into_bytes()] {
+                    assert!(!content.windows(secret.len()).any(|w| w == secret.as_slice()), "{name} contains a secret");
+                }
+            }
+            assert!(!std::fs::read(dir.auth_file()).unwrap().windows(32).any(|w| w == device_key.as_slice()));
+            for name in ["auth.json", "device.key"] {
+                assert_eq!(std::fs::metadata(dir.file(name)).unwrap().permissions().mode() & 0o777, 0o600);
+            }
+            let _ = std::fs::remove_dir_all(base);
+        }
+
+        #[test]
+        fn setup_never_overwrites_and_refuses_what_the_person_typed_wrongly() {
+            let (base, dir) = fresh();
+            let m = FixedMachine("machine-A".into());
+            let state = AuthState::default();
+            setup(&dir, &m, &state).unwrap();
+            let before = (std::fs::read(dir.auth_file()).unwrap(), std::fs::read(dir.file("device.key")).unwrap());
+            assert!(setup(&dir, &m, &AuthState::default()).is_err(), "a second setup must not overwrite the keys");
+            assert_eq!((std::fs::read(dir.auth_file()).unwrap(), std::fs::read(dir.file("device.key")).unwrap()), before);
+            // the rules on the typed text
+            assert!(check_setup_inputs("short", "short", MASTER, MASTER).unwrap_err().contains("минимум 8"));
+            assert!(check_setup_inputs(LOGIN, "another", MASTER, MASTER).unwrap_err().contains("Пароли входа не совпадают"));
+            assert!(check_setup_inputs(LOGIN, LOGIN, "eleven char", "eleven char").unwrap_err().contains("минимум 12"));
+            assert!(check_setup_inputs(LOGIN, LOGIN, MASTER, "another master phrase").unwrap_err().contains("Мастер-пароли не совпадают"));
+            assert!(check_setup_inputs(LOGIN, LOGIN, LOGIN, LOGIN).unwrap_err().contains("отличаться"));
+            assert!(check_setup_inputs(LOGIN, LOGIN, MASTER, MASTER).is_ok());
+            // a fresh directory where a stray device key already lies: refused, nothing is written
+            let (base2, dir2) = fresh();
+            std::fs::write(dir2.file("device.key"), [1u8; 32]).unwrap();
+            std::fs::set_permissions(dir2.file("device.key"), std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(setup(&dir2, &m, &AuthState::default()).is_err());
+            assert!(!dir2.auth_file().exists());
+            let _ = std::fs::remove_dir_all(base);
+            let _ = std::fs::remove_dir_all(base2);
+        }
+
+        #[test]
+        fn a_fresh_install_gets_a_recoverable_identity_and_the_typed_master_password_brings_it_back() {
+            let (base, dir) = fresh();
+            let m = FixedMachine("machine-A".into());
+            let state = AuthState::default();
+            let root = setup(&dir, &m, &state).unwrap();
+            // the identity is created UNDER the new keys (format v3), at first start
+            let id = NodeIdentity::load_or_create_in(&dir, &m, None, 9000, Some(&root)).unwrap();
+            let file = std::fs::read(dir.identity_file(9000)).unwrap();
+            assert_eq!(key_root::identity_store::identity_format(&file).unwrap(), IdentityFormat::RootV3);
+            // every later start: the device opens the key, the same identity loads, no password
+            let device = FileDeviceKey::new(dir.file("device.key"));
+            let (root2, _) = unlock_root(&dir, &m, &device).unwrap();
+            let again = NodeIdentity::load_or_create_in(&dir, &m, None, 9000, Some(&root2)).unwrap();
+            assert_eq!(again.node_id().0, id.node_id().0);
+            // ANOTHER MACHINE, the device key gone: only the two files and the master password the person typed
+            let other = std::env::temp_dir().join(format!("yandi-setup-other-{}-{}", std::process::id(), rand::random::<u32>()));
+            let odir = KeyDir::open(other.join("keys")).unwrap();
+            for name in ["auth.json", "node_identity_9000.json"] {
+                key_root::atomic::create_new_file(&odir.file(name), &std::fs::read(dir.file(name)).unwrap()).unwrap();
+            }
+            let mb = FixedMachine("machine-B".into());
+            let device_b = FileDeviceKey::new(odir.file("device.key"));
+            assert_eq!(unlock_root(&odir, &mb, &device_b).err().unwrap(), KeyRootError::RecoveryRequired);
+            let pol = KdfPolicy::for_tests();
+            let wrong = Recovery { dir: &odir, port: 9000, machine: &mb, device: &device_b, password: "not the master password", policy: &pol }.run();
+            assert_eq!(wrong.err().unwrap(), KeyRootError::RecoveryFailed);
+            Recovery { dir: &odir, port: 9000, machine: &mb, device: &device_b, password: MASTER, policy: &pol }.run().unwrap();
+            let (root3, _) = unlock_root(&odir, &mb, &device_b).unwrap();
+            let back = NodeIdentity::load_or_create_in(&odir, &mb, None, 9000, Some(&root3)).unwrap();
+            assert_eq!(back.node_id().0, id.node_id().0, "the recovered node id is not the same");
+            // and the login page: forgot the login password → the master password (as typed) sets a new one
+            recover_login_in(&AuthState::default(), &odir, MASTER, "a new login password", &pol).unwrap();
+            let doc = RootDocument::parse(&std::fs::read(odir.auth_file()).unwrap()).unwrap();
+            assert!(verify_login_password("a new login password", &doc.login_hash));
+            let _ = OpenContext { machine: &mb, env_password: None, root: None };
+            let _ = std::fs::remove_dir_all(base);
+            let _ = std::fs::remove_dir_all(other);
         }
     }
 }

@@ -128,14 +128,14 @@
   <button id="login-btn" onclick="doLogin()">Войти</button>
 
   <p style="text-align:center; margin-top:18px; font-size:13px;">
-    <a href="#" id="forgot-link" onclick="showRecover(); return false;" style="color:#94a3b8;">Забыли пароль? Восстановить по коду</a>
+    <a href="#" id="forgot-link" onclick="showRecover(); return false;" style="color:#94a3b8;">Забыли пароль? Восстановить по мастер-паролю</a>
   </p>
 
   <div id="recover-section" style="display:none; margin-top:20px;">
-    <label for="rec_code">Код восстановления (мастер-ключ)</label>
-    <input type="text" id="rec_code" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false" autocapitalize="characters"
-           style="font-family: ui-monospace, monospace; letter-spacing: 1px;">
-    <div style="font-size:12px; color:#94a3b8; margin:-4px 0 12px;">Тот, что был показан при создании ключей и записан на бумагу. Регистр и дефисы не важны.</div>
+    <label for="rec_code">Мастер-пароль (или код восстановления)</label>
+    <input type="password" id="rec_code" placeholder="Мастер-пароль, который вы создали при настройке" autocomplete="off" spellcheck="false">
+    <label class="remember" style="display:flex; gap:8px; align-items:center; margin:-4px 0 10px; font-size:13px;"><input type="checkbox" onchange="document.getElementById('rec_code').type = this.checked ? 'text' : 'password'"> Показать</label>
+    <div style="font-size:12px; color:#94a3b8; margin:-4px 0 12px;">Тот, что вы придумали при первой настройке и записали на бумаге. Если у вас код вида XXXX-XXXX-…, регистр и дефисы не важны.</div>
     <label for="rec_pw">Новый пароль входа</label>
     <input type="password" id="rec_pw" placeholder="не короче 8 символов" autocomplete="new-password">
     <label for="rec_pw2">Повторите новый пароль</label>
@@ -225,7 +225,7 @@ async function doRecover() {
   const pw = document.getElementById('rec_pw').value;
   const pw2 = document.getElementById('rec_pw2').value;
   document.getElementById('rec-error').style.display = 'none';
-  if (!code) { recError('Введите код восстановления'); return; }
+  if (!code) { recError('Введите мастер-пароль'); return; }
   if (pw.length < 8) { recError('Новый пароль — не короче 8 символов'); return; }
   if (pw !== pw2) { recError('Пароли не совпадают'); return; }
   const btn = document.getElementById('rec-btn');

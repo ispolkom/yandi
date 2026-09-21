@@ -134,28 +134,36 @@
 
   <div class="warning">
     <strong>⚠️ Важно — прочитайте перед началом</strong>
-    <strong>Мастер-пароль шифрует все данные ноды:</strong> ключи, переписку, файлы.
-    Он не может быть восстановлен. Если вы его потеряете — данные будут недоступны навсегда.
+    Вы сами придумываете <strong>два пароля</strong>. Ничего не создаётся за вас.<br><br>
+    <strong>Мастер-пароль — это ваш ключ восстановления.</strong> Он понадобится, если вы забудете пароль входа или перенесёте ноду на другой
+    компьютер. Он не хранится нигде и <strong>не может быть восстановлен</strong>: потеряете — личность на новой машине вернуть будет нельзя.
     <br><br>
-    <strong>Запишите мастер-пароль на бумаге</strong> и храните отдельно от устройства.
+    <strong>Запишите мастер-пароль на бумаге</strong> и храните отдельно от компьютера. Проверьте, что записали именно то, что ввели:
+    поставьте галочку «Показать пароли» и сверьте.
   </div>
 
   <p class="section-label">Пароль для входа в интерфейс</p>
   <label for="login_pw">Пароль входа</label>
-  <input type="password" id="login_pw" placeholder="Минимум 4 символа" autocomplete="new-password">
-  <p class="hint">Используется для открытия веб-интерфейса. Браузер может его запомнить.</p>
+  <input type="password" id="login_pw" placeholder="Минимум 8 символов" autocomplete="new-password">
+  <label for="login_pw2">Повторите пароль входа</label>
+  <input type="password" id="login_pw2" placeholder="Повторите пароль входа" autocomplete="new-password">
+  <p class="hint">Открывает веб-интерфейс на этом компьютере.</p>
 
   <hr class="separator">
 
-  <p class="section-label">Мастер-пароль шифрования</p>
+  <p class="section-label">Мастер-пароль (ключ восстановления)</p>
   <label for="master_pw">Мастер-пароль</label>
-  <input type="password" id="master_pw" placeholder="Минимум 8 символов" autocomplete="new-password"
+  <input type="password" id="master_pw" placeholder="Минимум 12 символов — лучше фраза из нескольких слов" autocomplete="new-password"
          oninput="updateStrength(this.value)">
   <div class="strength"><div class="strength-bar" id="strength-bar"></div></div>
 
   <label for="master_pw2">Повторите мастер-пароль</label>
-  <input type="password" id="master_pw2" placeholder="Повторите пароль" autocomplete="new-password">
-  <p class="hint">НЕ сохраняется в браузере. Привязывается к этому устройству. Запишите на бумаге.</p>
+  <input type="password" id="master_pw2" placeholder="Повторите мастер-пароль" autocomplete="new-password">
+  <p class="hint">Не совпадает с паролем входа. Используйте латинские буквы, если вводить его придётся на другом компьютере.</p>
+
+  <label class="remember" style="display:flex; gap:8px; align-items:center; margin:12px 0;">
+    <input type="checkbox" id="show_pw" onchange="togglePasswords(this.checked)"> Показать пароли
+  </label>
 
   <div class="error" id="error-msg"></div>
 
@@ -177,30 +185,40 @@ function updateStrength(pw) {
   bar.style.width = widths[score] || '0%';
 }
 
+function togglePasswords(show) {
+  for (const id of ['login_pw', 'login_pw2', 'master_pw', 'master_pw2']) {
+    document.getElementById(id).type = show ? 'text' : 'password';
+  }
+}
+
 async function doSetup() {
   const loginPw = document.getElementById('login_pw').value;
+  const loginPw2 = document.getElementById('login_pw2').value;
   const masterPw = document.getElementById('master_pw').value;
   const masterPw2 = document.getElementById('master_pw2').value;
   const errEl = document.getElementById('error-msg');
   const btn = document.getElementById('setup-btn');
 
   errEl.style.display = 'none';
-  if (loginPw.length < 4) { showError('Пароль входа: минимум 4 символа'); return; }
-  if (masterPw.length < 8) { showError('Мастер-пароль: минимум 8 символов'); return; }
+  if ([...loginPw].length < 8) { showError('Пароль входа: минимум 8 символов'); return; }
+  if (loginPw !== loginPw2) { showError('Пароли входа не совпадают'); return; }
+  if ([...masterPw].length < 12) { showError('Мастер-пароль: минимум 12 символов (лучше фраза из нескольких слов)'); return; }
   if (masterPw !== masterPw2) { showError('Мастер-пароли не совпадают'); return; }
+  if (masterPw === loginPw) { showError('Мастер-пароль должен отличаться от пароля входа'); return; }
 
   btn.disabled = true;
-  btn.textContent = 'Настройка…';
+  btn.textContent = 'Создание ключей…';
 
   try {
     const resp = await fetch('/api/auth/setup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ login_password: loginPw, master_password: masterPw })
+      body: JSON.stringify({ login_password: loginPw, login_password_repeat: loginPw2, master_password: masterPw, master_password_repeat: masterPw2 })
     });
     const data = await resp.json();
     if (resp.ok) {
-      window.location.href = '/';
+      btn.textContent = 'Ключи созданы. Нода запускается…';
+      await waitForNode();
     } else {
       showError(data.error || 'Ошибка настройки');
       btn.disabled = false;
@@ -211,6 +229,18 @@ async function doSetup() {
     btn.disabled = false;
     btn.textContent = 'Создать и запустить ноду';
   }
+}
+
+// After the keys exist the node goes on starting (identity, network); this page's server steps aside for the real interface.
+async function waitForNode() {
+  for (let i = 0; i < 120; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const r = await fetch('/login');
+      if (r.status === 200) { window.location.href = '/'; return; }
+    } catch (e) { /* the server is switching over */ }
+  }
+  window.location.href = '/';
 }
 
 function showError(msg) {

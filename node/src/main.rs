@@ -209,6 +209,19 @@ async fn main() -> anyhow::Result<()> {
     // 7. Load or create identity (используем discovery порт из конфига)
     let config = get_config();
     let discovery_port = config.ports.discovery;
+
+    // First run (no auth.json): the person creates the login password and the master password in the browser BEFORE the identity is
+    // made, because the identity is stored under the keys that this creates. The setup server stops as soon as it has succeeded.
+    #[cfg(unix)]
+    if !auth_state.is_setup.load(std::sync::atomic::Ordering::Relaxed) {
+        let port = config.ports.web_ui;
+        println!("🔐 Первый запуск: откройте http://127.0.0.1:{port} и создайте пароль входа и мастер-пароль");
+        if let Err(e) = yandi::web::first_setup::run(auth_state.clone(), port).await {
+            eprintln!("🔐 Первичная настройка не запустилась: {e}");
+            std::process::exit(2);
+        }
+        println!("🔐 Ключи созданы; продолжаем запуск ноды");
+    }
     // A failure to open an EXISTING identity is an error and stops the node here; it never creates a new identity or touches the file.
     #[cfg(unix)]
     let identity = {
