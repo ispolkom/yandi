@@ -157,3 +157,11 @@ core, `tests/support/fake_core.py`, needing only `python3`), the tests against t
 core's requirements), the six supervisor scenarios of the contract through the Rust harness (`python -m contract.runner run --target none --only supervisor.
 --supervisor-harness …`), and the mutation check (`scripts/supervisor_mutants.py`: 14 deliberate defects, each must fail a named test). None of it touches the live
 system: temporary directories, loopback ports chosen by the system, processes it spawned itself.
+
+## Node key root (Rust, P1c-1)
+
+`scripts/test-key-root.sh` runs, offline: `cargo fmt --check` and `cargo test` for `node/key_root` (the root document with its device and recovery wrappers, the identity formats and
+the load policy, atomic writes, migration with rollback, recovery on a "new machine", and the `yandi-keys` tool run as a subprocess whose output is scanned for secrets), a check of the whole
+node, and the mutation check (`scripts/key_root_mutants.py`, 17 deliberate defects: a failed decrypt that creates or overwrites an identity, a wrong password that leaves a trace, the machine id
+used as a key, a weak hash for the recovery password, a printed password, a migration that cannot restore or keep backups, recovery that returns another identity, …). Everything uses temporary
+directories and a fake machine id: **the owner's real `~/.yandi_keys` is never touched.**

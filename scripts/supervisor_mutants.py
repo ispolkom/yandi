@@ -27,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CRATE = ROOT / "node" / "core_supervisor"
 LOCK = ROOT / "node" / "Cargo.lock"
-TARGET_DIR = ROOT / "node" / "target"          # the dependencies are already compiled here; only the crate itself is rebuilt
+TARGET_DIR = ROOT / "node" / "target-mutants"   # its OWN build directory: mutant builds must never overwrite the real binaries and libraries          # the dependencies are already compiled here; only the crate itself is rebuilt
 
 SUP = "src/supervisor.rs"
 RT = "src/runtime.rs"
