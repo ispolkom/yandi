@@ -28,6 +28,14 @@ QUERY = "какая столица у Франции? а ещё я обещаю 
 TURN = "turn-orch-0001"
 
 
+DECORATED_PAST = (
+    "Сруб за три миллиона — это серьёзно. Главный риск — не переплатить.\n\n"
+    "📄 *Архивариус: зафиксировано как уточнение к запросу о стоимости покупки* — выдумано моделью, кода для этого нет.\n\n"
+    "⚠ DeepSeek: частично подтверждено\n\n"
+    "💬 *Где именно нужен сруб и какие сроки доставки требуются?*"
+)
+
+
 def run_checks() -> list:
     failures: list = []
 
@@ -41,7 +49,7 @@ def run_checks() -> list:
 
     resp = SimpleNamespace(answer=DIGEST + "\n\n🔄 Отправлен на проверку через доверенные ноды (ID: abc123)", trust_level="supported",
                            sources=["https://a.example", "https://b.example"])
-    context = [{"from": "human", "text": f"вопрос {i}"} if i % 2 == 0 else {"from": "orchestrator", "text": f"ответ {i}"} for i in range(10)]
+    context = [{"from": "human", "text": f"вопрос {i}"} if i % 2 == 0 else {"from": "orchestrator", "text": DECORATED_PAST} for i in range(10)]
 
     class _Loop:
         async def run_in_executor(self, executor, fn):
@@ -71,6 +79,19 @@ def run_checks() -> list:
               call["verified"]["answer"] == resp.answer and call["verified"]["trust_level"] == "supported" and len(call["verified"]["sources"]) == 2
               and not any(DIGEST in m["content"] for m in call["messages"]))
         check("O7 the answer is given by the chosen Voice (the model comes from the settings)", call["model"] == voice.effective_model("heretic:q8"))
+
+        # ── code-appended decorations of a PAST orchestrator turn never reach the Voice as its own history ──
+        assistant_history = [m["content"] for m in call["messages"][:-1] if m["role"] == "assistant"]
+        check("O15 the pending header, verdict line, hashtags-free clarifying question and the FABRICATED "
+              "'📄 Архивариус: …' line are all gone from what the Voice sees as its own past turn",
+              assistant_history and all(
+                  "Архивариус" not in h and "DeepSeek" not in h and "💬" not in h and "🔄" not in h and "⚠" not in h
+                  for h in assistant_history))
+        check("O16 …but the real content of that past turn is kept, not thrown away wholesale",
+              any("Сруб за три миллиона" in h and "Главный риск" in h for h in assistant_history))
+        human_history = [m["content"] for m in call["messages"][:-1] if m["role"] == "user"]
+        check("O17 a HUMAN turn is passed through untouched (only assistant/orchestrator turns are stripped)",
+              all(h.startswith("вопрос ") for h in human_history))
         check("O8 the code-owned status line of the check is kept in the text", "🔄 Отправлен на проверку через доверенные ноды (ID: abc123)" in text)
         with patch.object(chat_local, "_respond_with_character", lambda *a, **k: "Ответ.\n\n🔄 Отправлен на проверку через доверенные ноды (ID: abc123)"):
             text2, _ = personal_turn({"turn_id": TURN})
@@ -189,12 +210,16 @@ def mutants() -> list:
         from pet.chat_local import _respond_with_character
         return _respond_with_character("m", [{"role": "user", "content": query}], 0.7, None, {"answer": resp.answer}), None
 
+    def no_stripping(text):                                                     # M6: decorations of a past turn are fed back to the Voice as its own words
+        return text.strip()
+
     return [
         ("M1 a failing personal step breaks the delivery", swapped(chat_orch, "_personal_turn", raises_through)),
         ("M2 the verified summary is not handed to the Voice", swapped(chat_orch, "_personal_turn", drops_verified)),
         ("M3 the summary is put into the conversation (it would reach the extractors)", swapped(chat_orch, "_personal_turn", digest_in_messages)),
         ("M4 web text goes into the prompt unquoted", swapped(chat_local, "_verified_digest_message", unquoted)),
         ("M5 a personal turn is made without a turn id", swapped(chat_orch, "_personal_turn", ignores_turn_id)),
+        ("M6 code-appended decorations of a past turn are fed back to the Voice unstripped", swapped(chat_orch, "_strip_ui_decorations", no_stripping)),
     ]
 
 

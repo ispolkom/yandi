@@ -284,6 +284,30 @@ async def orchestrator_ask(payload: dict):
 
 _STATUS_LINE_RE = re.compile(r"🔄 Отправлен на проверку[^\n]*")
 
+# Everything pet/chat_orch.py itself appends to a STORED orchestrator message — the pending header, the eventual
+# DeepSeek/YANDI-nodes verdict line, the clarifying question — never part of what the Voice actually said.
+# _personal_turn feeds a person's past turns back to the Voice as ITS OWN earlier "assistant" replies (so it can
+# hold a conversation); an undecorated history teaches it that plain, unadorned answers are its natural voice.
+# A decorated one lets it learn the icon+colon+claim SHAPE of these lines and imitate it — including inventing a
+# brand new, entirely fake "record" claim under an icon and label that code never produced (observed live: a
+# fabricated "📄 Архивариус: зафиксировано…" line that matches no code path in this repository). Stripped from
+# EVERY past turn, including one the Voice may already have hallucinated on its own, so a fabrication is never
+# reinforced by being fed back on the next turn either.
+_UI_DECORATION_RE = re.compile(
+    r"^\[ПРЕДВАРИТЕЛЬНЫЙ[^\]]*\]\s*\n?"       # the pending-header bracket (orch_optimistic.py)
+    # A line starting with ANY symbol/emoji character (not just the specific ones code happens to use today,
+    # \u2300-\u27BF and \U0001F300-\U0001FAFF cover ⚠✅❌⏳💭💬🔄 and the general modern emoji ranges): in this
+    # codebase's own convention a leading icon marks a CODE-appended line, never genuine chat text (see
+    # _BASE_CHARACTER_PROMPT in pet/chat_local.py — plain short replies, no structured markers) — so this also
+    # strips an icon the Voice itself invented, not only the icons code is currently known to use.
+    r"|(?:^|\n)[\u2300-\u27BF\U0001F300-\U0001FAFF][^\n]*",
+    re.MULTILINE,
+)
+
+
+def _strip_ui_decorations(text: str) -> str:
+    return re.sub(r"\n{3,}", "\n\n", _UI_DECORATION_RE.sub("", text)).strip()
+
 
 async def _personal_turn(payload: dict, query: str, chat_context: list, resp, loop):
     """(текст Голоса или None, имя ошибки или None). Один личный ход на сообщение человека: та же цепочка, что у `/api/local/chat`."""
@@ -293,7 +317,8 @@ async def _personal_turn(payload: dict, query: str, chat_context: list, resp, lo
     if not turn_id:
         return None, None
     history = [
-        {"role": "user" if m.get("from") == "human" else "assistant", "content": str(m.get("text") or "")}
+        {"role": "user" if m.get("from") == "human" else "assistant",
+         "content": str(m.get("text") or "") if m.get("from") == "human" else _strip_ui_decorations(str(m.get("text") or ""))}
         for m in chat_context[-6:]
     ]
     messages = history + [{"role": "user", "content": query}]
