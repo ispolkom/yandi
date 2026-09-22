@@ -510,6 +510,7 @@ body{font-family:var(--font);background:var(--icq-bg);color:var(--icq-text);
 .tool-btn:hover{background:#f0f0f0}
 .tool-btn.blocked{background:#f0c0c0;color:#880000;text-decoration:line-through}
 .tool-btn.paused{background:#fff0c0;color:#886600}
+.tool-btn.oai-on{background:#c8e6c9;color:#1b5e20;border-color:#66bb6a;font-weight:bold}
 .tool-btn.primary{background:var(--icq-header);color:white}
 .tool-btn.primary:hover{background:var(--icq-header-light)}
 .tool-btn.w100{width:100%;margin-top:5px}
@@ -729,12 +730,13 @@ a.cl{color:#2244aa;text-decoration:underline}
         </div>
       </div>
       <div class="tool-sec">
-        <div class="tool-lbl">Действия</div>
+        <div class="tool-lbl">Альтернативное мнение</div>
+        <div class="tool-hint">Выберите ИИ-чат, чтобы получить альтернативную, оценочную точку зрения на ваш вопрос:</div>
         <div class="tool-btns">
-          <button class="tool-btn" onclick="saveDataset()">💾 Сессия</button>
-          <button class="tool-btn" onclick="exportChat()">📁 .md</button>
-          <button class="tool-btn" onclick="copyContext()">📋 Контекст</button>
-          <button class="tool-btn" onclick="resetTokens()">⟳ Токены</button>
+          <button class="tool-btn" id="oai-claude"   onclick="toggleOrchAi('claude')">Клод</button>
+          <button class="tool-btn" id="oai-gpt"      onclick="toggleOrchAi('gpt')">ГПТ</button>
+          <button class="tool-btn" id="oai-deepseek" onclick="toggleOrchAi('deepseek')">ДипСик</button>
+          <button class="tool-btn" id="oai-kimi"     onclick="toggleOrchAi('kimi')">Кими</button>
         </div>
       </div>
     </div>
@@ -1150,6 +1152,8 @@ async function sendToOrch(query){
   // Оптимистично показываем вопрос пользователя сразу — не ждём WS
   const qPanel=msgsElFor("orch");
   addMsg({from:"human",tab:"orch",text:query,ts:now(),id:"tmp-"+Date.now()},qPanel);
+  // Параллельно, не дожидаясь ответа Оркестратора: выбранные ИИ-чаты отвечают своим темпом
+  _askOrchAiOpinions(query);
   try{
     // личный ход: идентичность этой доставки сообщения мигрирует вместе с запросом (повтор того же сообщения узнаётся)
     const turnId=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():("t"+Date.now().toString(36)+Math.random().toString(36).slice(2,12));
@@ -1377,6 +1381,34 @@ function openChat(model){
     return;
   }
   window.open(url,"_blank","noopener");
+}
+
+// ── Оркестратор: альтернативное мнение выбранных ИИ-чатов ─────────────────────
+// Выключено по умолчанию на каждой загрузке страницы (сознательно не сохраняется
+// между сессиями — это разовый выбор "для этого разговора", а не постоянная настройка).
+const orchAiSelected=new Set();
+
+function toggleOrchAi(model){
+  const btn=document.getElementById("oai-"+model);
+  if(!btn)return;
+  if(orchAiSelected.has(model)){
+    orchAiSelected.delete(model);
+    btn.classList.remove("oai-on");
+  } else {
+    orchAiSelected.add(model);
+    btn.classList.add("oai-on");
+    openChat(model);   // сразу открываем вкладку браузера с этим чатом
+  }
+}
+
+async function _askOrchAiOpinions(query){
+  if(!orchAiSelected.size)return;
+  try{
+    await fetch("/api/orch/ai_opinion",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({text:query, models:[...orchAiSelected]}),
+    });
+  }catch(_){}
 }
 
 // ── Orchestrator actions ──────────────────────────────────────────────────────
@@ -2296,31 +2328,57 @@ async def ext_result(payload: dict):
         _tokens[from_who]["recv"] += int(payload.get("tokens_recv", 0))
         await broadcast({"type": "tokens", "tokens": _tokens, "limits": TOKEN_LIMITS})
 
-    # Записываем сообщение — turn_next по RELAY_CHAIN, последний → human
-    try:
-        _idx = RELAY_CHAIN.index(from_who)
-        turn_next = RELAY_CHAIN[_idx + 1] if _idx + 1 < len(RELAY_CHAIN) else "human"
-    except ValueError:
+    # ctx определяет, куда идёт сообщение: обычная вкладка Интернет-чат (relay/broadcast,
+    # turn_next по RELAY_CHAIN) или альтернативное мнение для Оркестратора (свой tab="orch",
+    # никогда не занимает TURN_KEY и не входит в relay-цепочку/синтез Интернет-чата — это
+    # независимый по времени ответ, а не ход в диалоге).
+    ctx = _relay_ctx.get(task_id)
+    is_orch_opinion = bool(ctx and ctx.get("tab") == "orch")
+
+    if is_orch_opinion:
         turn_next = "human"
+        msg_key   = ORCH_MSGS_KEY
+        msg_tab   = "orch"
+    else:
+        # Записываем сообщение — turn_next по RELAY_CHAIN, последний → human
+        try:
+            _idx = RELAY_CHAIN.index(from_who)
+            turn_next = RELAY_CHAIN[_idx + 1] if _idx + 1 < len(RELAY_CHAIN) else "human"
+        except ValueError:
+            turn_next = "human"
+        msg_key = MESSAGES_KEY
+        msg_tab = "inet"
+
     msg = {
         "type":      "message",
         "from":      from_who,
         "text":      text,
+        "tab":       msg_tab,
         "ts":        datetime.now().strftime("%H:%M"),
         "_ts":       datetime.now().timestamp(),
         "id":        str(uuid.uuid4()),
         "task_id":   task_id,
         "turn_next": turn_next,
     }
-    await r.lpush(MESSAGES_KEY, json.dumps(msg)); await r.ltrim(MESSAGES_KEY, 0, MAX_MESSAGES - 1)
-    await r.set(TURN_KEY, turn_next)
+    await r.lpush(msg_key, json.dumps(msg)); await r.ltrim(msg_key, 0, MAX_MESSAGES - 1)
+    if not is_orch_opinion:
+        await r.set(TURN_KEY, turn_next)   # TURN_KEY принадлежит только вкладке Интернет-чат
     write_log(msg)
     await r.publish(PUBSUB_CH, json.dumps(msg))
     await r.aclose()
     await broadcast(msg)
 
+    if is_orch_opinion:
+        # Альтернативное мнение: просто снимаем модель из pending, без цепочки и без
+        # синтеза (_inet_collect_responses/_inet_ready_after принадлежат Интернет-чату).
+        pending = ctx.get("pending", set())
+        pending.discard(from_who)
+        ctx["pending"] = pending
+        if not pending:
+            _relay_ctx.pop(task_id, None)
+        return {"ok": True}
+
     # Relay-цепочка: передаём эстафету следующей АКТИВНОЙ модели
-    ctx = _relay_ctx.get(task_id)
     if ctx and not ctx.get("broadcast"):
         ctx[f"{from_who}_resp"] = text
         active     = _active_models()
@@ -2833,6 +2891,35 @@ async def council_broadcast(payload: dict):
     if requested is not None:
         active = [m for m in active if m in requested]
     _relay_ctx[msg_id] = {"text": text, "broadcast": True, "pending": set(active)}
+    for model in active:
+        try:
+            _ext_queues[model].put_nowait({"task_id": msg_id, "text": text})
+        except asyncio.QueueFull:
+            pass
+    return {"ok": True, "task_id": msg_id, "sent_to": active}
+
+
+@app.post("/api/orch/ai_opinion")
+async def orch_ai_opinion(payload: dict):
+    """Оркестратор просит выбранные браузерные ИИ-чаты (расширение) за альтернативное,
+    оценочное мнение по текущему вопросу пользователя — сырой, непроверенный ответ,
+    показывается рядом с ответом Оркестратора, никогда не смешивается с проверкой
+    утверждений (PASS1/PASS2). Не путать с /api/council/broadcast (вкладка Интернет-чат,
+    ведёт свою историю сообщений) и с /api/ext/orch/poll (фоновая структурированная
+    проверка DeepSeek, orch_ai_validator) — оба самостоятельные, независимые механизмы.
+    """
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return {"ok": False}
+    requested_models = payload.get("models") or []
+    requested = {str(m) for m in requested_models if str(m) in _ext_queues}
+    if not requested:
+        return {"ok": False, "error": "no valid models"}
+    active = [m for m in _active_models() if m in requested]
+    if not active:
+        return {"ok": True, "task_id": "", "sent_to": []}
+    msg_id = str(uuid.uuid4())
+    _relay_ctx[msg_id] = {"text": text, "broadcast": True, "pending": set(active), "tab": "orch"}
     for model in active:
         try:
             _ext_queues[model].put_nowait({"task_id": msg_id, "text": text})
