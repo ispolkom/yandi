@@ -132,32 +132,28 @@ def apply_claim_claim_disagreement(
         # investigation): this used to call /api/embed ONCE
         # PER CLAIM sequentially — the exact same N+1 pattern
         # already found and fixed in extract_claim_from_source()
-        # (claim_relation.py) earlier this session. Ollama's
-        # /api/embed accepts a list input and returns one
-        # embedding per item in one call — batching here uses
-        # the identical technique, same math (each vector still
-        # individually L2-normalized), just fewer round-trips.
+        # (claim_relation.py) earlier this session. One batched
+        # call for every claim's text, same math (each vector
+        # still individually L2-normalized), just fewer round-trips.
+        #
+        # 2026-09-22: was its own raw HTTP session straight to Ollama's endpoint (127.0.0.1:11434), bypassing
+        # llm_gateway.embed() entirely — the ONE bypass of the per-node embedding decoupling left in agent/ (every
+        # other caller, e.g. agent/final_claim_coverage.py's own _embed_texts_batch, already goes through the
+        # gateway). On a node where Ollama is only the verified FALLBACK and is not the primary running engine, that
+        # direct call fails every time, and this prefilter's own fail-open then compares ALL N*(N-1)/2 claim pairs
+        # instead of the cheap top-K/threshold subset — silently, many minutes slower, for a reason invisible outside
+        # verbose logging. Routing through the gateway fixes both: it reaches whatever embedding backend this node
+        # actually has configured (own engine first, Ollama-compatible fallback second), the same as every other
+        # embedding call in this codebase.
         try:
-            import requests
             import numpy as np
-
-            embed_session = requests.Session()
-            embed_session.trust_env = False
+            from llm_gateway import embed as _llm_embed
 
             def _claim_embed_batch(values):
-                resp = embed_session.post(
-                    "http://127.0.0.1:11434/api/embed",
-                    json={
-                        "model": "embeddinggemma:latest",
-                        "input": [v[:2000] for v in values],
-                    },
-                    timeout=30,
-                )
-
-                resp.raise_for_status()
+                result = _llm_embed([v[:2000] for v in values], model="embeddinggemma:latest")
 
                 vecs = np.array(
-                    resp.json()["embeddings"],
+                    result.vectors,
                     dtype=np.float32,
                 )
 

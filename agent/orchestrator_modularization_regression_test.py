@@ -830,24 +830,19 @@ check("personality: exception caught -> does not propagate or affect return valu
 # 13. claims/disagreement.py — apply_claim_claim_disagreement
 # ============================================================
 #
-# The embedding call uses a raw `requests.Session().post(...)` created
-# *inside* the function body (matches the original inline code exactly —
-# not something this migration should "fix"), so it can't be monkeypatched
-# via a module-level attribute the way the other extractions' dependencies
-# are. Forcing requests.Session.post to raise exercises the "FAIL-OPEN FOR
-# CORRECTNESS" branch deterministically (semantic_available=False -> full
-# candidate pair set, still routed through batch NLI) without any real
-# network call — this is itself a real, load-bearing code path (embedding
-# service down), not just a test convenience.
+# 2026-09-22: the embedding call goes through llm_gateway.embed() (this node's own configured backend, Ollama-compatible
+# fallback second) — no longer a raw HTTP call straight to Ollama that bypassed the per-node decoupling. Forcing
+# llm_gateway.embed to raise exercises the SAME "FAIL-OPEN FOR CORRECTNESS" branch deterministically
+# (semantic_available=False -> full candidate pair set, still routed through batch NLI), by the same patch.object
+# idiom agent/embeddings_migration_regression_test.py already uses for every other embed() caller in this codebase —
+# this is itself a real, load-bearing code path (the embedding backend down), not just a test convenience.
 
-import requests as _requests_mod
+import llm_gateway as _llm_gateway_mod
+from unittest.mock import patch as _patch
 
-_orig_session_post = _requests_mod.Session.post
 _orig_infer_batch = disagreement_mod.infer_claim_relations_batch
-
-
-def _raise_post(self, *a, **kw):
-    raise RuntimeError("embed endpoint unreachable (test)")
+_embed_patch = _patch.object(_llm_gateway_mod, "embed", side_effect=RuntimeError("embed endpoint unreachable (test)"))
+_embed_patch.start()
 
 
 captured_infer_calls = []
@@ -872,7 +867,6 @@ class _FakeDisagreementEngine:
         captured_challenge_calls.append(kw)
 
 
-_requests_mod.Session.post = _raise_post
 disagreement_mod.infer_claim_relations_batch = _fake_infer_batch
 
 try:
@@ -935,7 +929,7 @@ try:
     check("disagreement: batch NLI exception logs [V6] Ошибка batch спора", any("Ошибка batch спора" in l for l in logged_exc_dis))
 
 finally:
-    _requests_mod.Session.post = _orig_session_post
+    _embed_patch.stop()
     disagreement_mod.infer_claim_relations_batch = _orig_infer_batch
 
 
