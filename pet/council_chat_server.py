@@ -598,7 +598,6 @@ a.cl{color:#2244aa;text-decoration:underline}
       <button class="nav-btn" id="tab-settings" onclick="switchMode('settings')">⚙ YANDI</button>
       <button class="nav-btn" id="tab-orch"  onclick="switchMode('orch')">🤖 Оркестратор</button>
       <button class="nav-btn"        id="tab-inet"  onclick="switchMode('inet')">🌐 Интернет чат</button>
-      <button class="nav-btn"        id="tab-local" onclick="switchMode('local')">🟣 YANDI Помощник</button>
     </div>
     <div class="ml-auto" style="display:flex;gap:3px">
       <button class="hdr-btn" id="btn-sound" onclick="toggleSound()">🔊</button>
@@ -692,7 +691,6 @@ a.cl{color:#2244aa;text-decoration:underline}
   <div class="center-panel">
     <div id="msgs-orch"  class="msgs-panel"></div>
     <div id="msgs-inet"  class="msgs-panel" style="display:none"></div>
-    <div id="msgs-local" class="msgs-panel" style="display:none"></div>
     <div id="msgs-review" class="msgs-panel" style="display:none"></div>
     <div id="msgs-settings" class="msgs-panel" style="display:none"></div>
     <div id="copy-chat-bar" style="display:none;padding:4px 10px;text-align:right">
@@ -815,34 +813,6 @@ a.cl{color:#2244aa;text-decoration:underline}
           <button class="tool-btn" onclick="saveDataset()">💾 Сессия</button>
           <button class="tool-btn" onclick="resetTokens()">⟳ Токены</button>
         </div>
-      </div>
-    </div>
-
-    <!-- YANDI Помощник tools -->
-    <div id="tools-local" style="display:none">
-      <div class="card-hdr"><span class="card-title">🟣 YANDI Помощник</span></div>
-      <div class="tool-sec">
-        <div class="tool-lbl">Модель</div>
-        <select id="local-model" style="width:100%;padding:4px;font-size:13px;font-family:Tahoma;border:1px solid var(--icq-border-light);background:var(--icq-panel)">
-          <option value="heretic:q4">heretic:q4</option>
-          <option value="heretic:q6">heretic:q6</option>
-          <option value="heretic:q8" selected>heretic:q8</option>
-          <option value="qwen3:14b">qwen3:14b</option>
-          <option value="qwen3:7b">qwen3:7b</option>
-          <option value="deepseek-r1:14b">deepseek-r1:14b</option>
-          <option value="gemma4:e4b">gemma4:e4b</option>
-        </select>
-      </div>
-      <div class="tool-sec">
-        <div class="tool-lbl">Температура: <span id="local-temp-val">0.7</span></div>
-        <input type="range" id="local-temp" min="0" max="1" step="0.05" value="0.7"
-          style="width:100%" oninput="document.getElementById('local-temp-val').textContent=this.value">
-      </div>
-      <div class="tool-sec">
-        <div class="tool-lbl" style="color:#888;font-size:11px">🔒 Приват — ничего не сохраняется.<br>История только в этой вкладке.</div>
-      </div>
-      <div class="tool-sec">
-        <button class="tool-btn w100" onclick="clearLocalChat()" style="color:#cc0000">🗑 Очистить чат</button>
       </div>
     </div>
 
@@ -1023,15 +993,6 @@ async function deleteMsg(btn, msgId){
   div.remove();
 }
 
-function deleteLocalMsg(idx){
-  _localHistory.splice(idx,1);
-  fetch("/api/local/clear",{method:"POST"}).then(()=>{
-    return Promise.all(_localHistory.map(m=>fetch("/api/local/message",{
-      method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(m)})));
-  }).catch(()=>{});
-  renderLocalChat();
-}
-
 function _updateCopyChatBar(){
   const bar=document.getElementById("copy-chat-bar");
   if(!bar)return;
@@ -1121,15 +1082,13 @@ async function switchMode(mode){
   localStorage.setItem("activeTab", mode);
   document.getElementById("tab-orch").classList.toggle("active",mode==="orch");
   document.getElementById("tab-inet").classList.toggle("active",mode==="inet");
-  document.getElementById("tab-local").classList.toggle("active",mode==="local");
   document.getElementById("tab-settings").classList.toggle("active",mode==="settings");
   document.body.classList.toggle("mode-settings",mode==="settings");
   document.getElementById("tools-orch").style.display=mode==="orch"?"":"none";
   document.getElementById("tools-inet").style.display=mode==="inet"?"":"none";
-  document.getElementById("tools-local").style.display=mode==="local"?"":"none";
   document.getElementById("web-wrap").style.display=mode==="orch"?"":"none";
   // Показываем нужную панель сообщений
-  ["orch","inet","local","settings"].forEach(t=>{
+  ["orch","inet","settings"].forEach(t=>{
     const el=document.getElementById("msgs-"+t);
     if(el)el.style.display=mode===t?"":"none";
   });
@@ -1139,7 +1098,6 @@ async function switchMode(mode){
   if(mode==="orch") setTurn("human");
   if(mode==="orch") _loadTabHistory("orch");
   if(mode==="inet") _loadTabHistory("inet");
-  if(mode==="local"){_loadLocalHistory();_loadLocalModels();}
   if(mode==="settings"&&window.SettingsTab){SettingsTab.onEnter();}
   applyI18n();
 }
@@ -1162,115 +1120,12 @@ async function sendMessage(){
   if(text.length>8) _detectUserLang(text);
   if(currentMode==="orch"){
     await sendToOrch(text);
-  } else if(currentMode==="local"){
-    await sendToLocal(text);
   } else {
     if(ws.readyState!==WebSocket.OPEN)return;
     lastQ=text;
     ws.send(JSON.stringify({text, tab: currentMode}));
     // кнопка блокируется через inet_broadcast_start от сервера
   }
-}
-
-// ── YANDI Помощник (локальный приват-чат) ─────────────────────────────────────
-let _localHistory=[];
-
-function renderLocalChat(){
-  const msgs=document.getElementById("msgs-local");
-  if(!msgs)return;
-  msgs.innerHTML="";
-  for(const m of _localHistory){
-    const div=document.createElement("div");
-    div.className="msg "+(m.role==="user"?"human":"local-ai");
-    const idx=_localHistory.indexOf(m);
-    const trBtn=m.role==="assistant"
-      ?`<button class="act-btn" onclick="translateMsg(this,'','')">🌐 Перевести</button>`
-      :"";
-    div.innerHTML=`<div class="msg-meta"><span class="msg-name">${m.role==="user"?"Вы":"🟣 YANDI"}</span><span class="msg-time">${m.ts||""}</span></div><div class="bubble">${escHtml(m.content)}</div>
-      <div class="msg-actions">${trBtn}
-        <button class="act-btn" onclick="copyMsg(this)">📋 Копировать</button>
-        <button class="act-btn del" onclick="deleteLocalMsg(${idx})">🗑 Удалить</button>
-      </div>`;
-    msgs.appendChild(div);
-  }
-  msgs.scrollTop=msgs.scrollHeight;
-  _updateCopyChatBar();
-}
-
-function escHtml(s){return s.trim().replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/\\n/g,"<br>")}
-
-async function _saveLocalMsg(msg){
-  try{ await fetch("/api/local/message",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(msg)}); }catch(_){}
-}
-
-async function clearLocalChat(){
-  _localHistory=[];
-  renderLocalChat();
-  try{ await fetch("/api/local/clear",{method:"POST"}); }catch(_){}
-}
-
-async function _loadLocalHistory(){
-  try{
-    const d=await fetch("/api/local/history").then(r=>r.json());
-    if(d.messages?.length){ _localHistory=d.messages; renderLocalChat(); }
-  }catch(_){}
-}
-
-async function _loadLocalModels(){
-  try{
-    const d=await fetch("/api/local/models").then(r=>r.json());
-    if(!d.models?.length)return;
-    const sel=document.getElementById("local-model");
-    const cur=sel.value;
-    sel.innerHTML=d.models.map(m=>`<option value="${m}"${m===cur?" selected":""}>${m}</option>`).join("");
-  }catch(_){}
-}
-
-async function sendToLocal(text){
-  const model=document.getElementById("local-model").value;
-  const temp=parseFloat(document.getElementById("local-temp").value);
-  const ts=now();
-  // turn identity: minted once when the message is created, saved with it and sent with the request,
-  // so a retry of THIS message is recognised while a new message with the same words is a new turn
-  const turnId=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():("t"+Date.now().toString(36)+Math.random().toString(36).slice(2,12));
-  const userMsg={role:"user",content:text,ts,id:turnId};
-  _localHistory.push(userMsg);
-  renderLocalChat();
-  await _saveLocalMsg(userMsg);
-  sendBtn.disabled=true;
-  sbTurn.textContent="⏳ Думает...";
-
-  const thinkId="local-think-"+Date.now();
-  const msgs=document.getElementById("msgs-local");
-  const ph=document.createElement("div");
-  ph.className="msg local-ai"; ph.id=thinkId;
-  ph.innerHTML=`<div class="msg-meta"><span class="msg-name">🟣 YANDI</span></div><div class="bubble" id="${thinkId}-bub">⏳</div>`;
-  msgs.appendChild(ph); msgs.scrollTop=msgs.scrollHeight;
-
-  try{
-    const r=await fetch("/api/local/chat",{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({model,temperature:temp,turn_id:turnId,messages:_localHistory.map(m=>({role:m.role,content:m.content}))}),
-    });
-    const d=await r.json();
-    const reply=d.content||"[нет ответа]";
-    const aiMsg={role:"assistant",content:reply,ts:now()};
-    _localHistory.push(aiMsg);
-    document.getElementById(thinkId)?.remove();
-    renderLocalChat();
-    await _saveLocalMsg(aiMsg);
-    // какая модель ответила (Голос из вкладки «YANDI» — «yandi-voice»): видно, действует ли выбор
-    sbTurn.textContent=d.model_used?("✅ Готово · отвечает: "+(d.model_used==="yandi-voice"?"выбранный Голос (yandi-voice)":d.model_used)):"✅ Готово";
-  }catch(e){
-    document.getElementById(thinkId)?.remove();
-    const errMsg={role:"assistant",content:"❌ Ошибка: "+e.message,ts:now()};
-    _localHistory.push(errMsg);
-    renderLocalChat();
-    await _saveLocalMsg(errMsg);
-    sbTurn.textContent="❌ Ошибка";
-  }
-  sendBtn.disabled=false;
-  inpEl.focus();
 }
 
 async function _detectUserLang(text){
@@ -1896,10 +1751,9 @@ function playSound(who){
 
 // ── Controls ──────────────────────────────────────────────────────────────────
 async function clearChat(){
-  const labels={orch:"Оркестратор",inet:"Интернет чат",local:"YANDI Помощник"};
+  const labels={orch:"Оркестратор",inet:"Интернет чат"};
   const label=labels[currentMode]||currentMode;
   if(!confirm("Очистить историю: "+label+"?"))return;
-  if(currentMode==="local"){await clearLocalChat();return;}
   const url="/api/"+currentMode+"/clear";
   const d=await fetch(url,{method:"POST"}).then(r=>r.json());
   if(d.ok) activeMsgsEl().innerHTML="";
@@ -1974,7 +1828,7 @@ setInterval(refreshStats,10000);
 setInterval(checkConnections,15000);
 setInterval(loadReviewQueue,30000);
 loadConfig();
-switchMode((["orch","inet","local","settings"].includes(localStorage.getItem("activeTab")))?localStorage.getItem("activeTab"):"orch");   // вкладки «Агент» и «Верификация» убраны
+switchMode((["orch","inet","settings"].includes(localStorage.getItem("activeTab")))?localStorage.getItem("activeTab"):"orch");   // вкладки «Агент», «Верификация» и «YANDI Помощник» убраны
 // Restore language selector and apply i18n
 (()=>{const s=document.getElementById("lang-sel");if(s)s.value=userLang})();
 applyI18n();
