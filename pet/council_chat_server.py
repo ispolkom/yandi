@@ -2899,6 +2899,18 @@ async def council_broadcast(payload: dict):
     return {"ok": True, "task_id": msg_id, "sent_to": active}
 
 
+# Владелец решил (2026-09-22): источники, которые называет сама модель, НИКОГДА не заносятся
+# в базу автоматически — сама модель может их выдумать. Просьба назвать их — только для
+# прозрачности на экране (сырые ссылки в тексте авторендерятся кликабельными, см. renderText в
+# HTML), сохранение остаётся полностью ручным (кнопка «📌 Запомнить»), как и для любого другого
+# сырого ответа ИИ-чата.
+_ORCH_AI_OPINION_SOURCING_SUFFIX = (
+    "\n\n---\nВ конце ответа отдельной строкой укажи: это твоё собственное мнение, или ты "
+    "использовал(а) поиск в интернете. Если использовал(а) — перечисли несколько ссылок на "
+    "источники. Если не уверен(а) в источнике — так и скажи, не выдумывай ссылку."
+)
+
+
 @app.post("/api/orch/ai_opinion")
 async def orch_ai_opinion(payload: dict):
     """Оркестратор просит выбранные браузерные ИИ-чаты (расширение) за альтернативное,
@@ -2920,9 +2932,10 @@ async def orch_ai_opinion(payload: dict):
         return {"ok": True, "task_id": "", "sent_to": []}
     msg_id = str(uuid.uuid4())
     _relay_ctx[msg_id] = {"text": text, "broadcast": True, "pending": set(active), "tab": "orch"}
+    prompt_text = text + _ORCH_AI_OPINION_SOURCING_SUFFIX
     for model in active:
         try:
-            _ext_queues[model].put_nowait({"task_id": msg_id, "text": text})
+            _ext_queues[model].put_nowait({"task_id": msg_id, "text": prompt_text})
         except asyncio.QueueFull:
             pass
     return {"ok": True, "task_id": msg_id, "sent_to": active}

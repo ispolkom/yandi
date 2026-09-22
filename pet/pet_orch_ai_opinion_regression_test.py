@@ -94,6 +94,15 @@ def main() -> int:
         check("A4 the relay ctx is tagged tab=orch", server._relay_ctx.get(task_id, {}).get("tab") == "orch")
         check("A5 pending set is exactly the sent-to models", server._relay_ctx.get(task_id, {}).get("pending") == {"deepseek"})
 
+        # ── A5b: the model is actually asked to disclose its sourcing (owner's request 2026-09-22) ──
+        queued = server._ext_queues["deepseek"].get_nowait()
+        check("A5b the queued task is for our task_id", queued.get("task_id") == task_id, repr(queued))
+        check("A5c the original question text is still there, verbatim", queued.get("text", "").startswith("тестовый вопрос"), repr(queued))
+        check("A5d …plus the sourcing-disclosure instruction (own opinion vs web, list sources, never invent a link)",
+              queued.get("text", "") == "тестовый вопрос" + server._ORCH_AI_OPINION_SOURCING_SUFFIX, repr(queued))
+        check("A5e the ctx itself still keeps the CLEAN original text (suffix is only added to what's sent out)",
+              server._relay_ctx.get(task_id, {}).get("text") == "тестовый вопрос")
+
         # ── A6: no valid models at all -> rejected outright ──
         resp2 = c.post("/api/orch/ai_opinion", json={"text": "q", "models": ["not-a-model", "also-fake"]})
         check("A6 no real model requested -> ok:false", resp2.json().get("ok") is False)
@@ -163,6 +172,8 @@ def main() -> int:
         _orch_block = re.search(r'if is_orch_opinion:(.*?)# Relay-цепочка', src, re.S)
         check("E4 the orch branch RETURNS (never falls through into the relay-chain/broadcast-pending code below)",
               bool(_orch_block) and 'return {"ok": True}' in _orch_block.group(1), repr(_orch_block.group(1) if _orch_block else None))
+        check("E5 the sourcing-disclosure suffix is actually appended to what's queued out (not left unused)",
+              "prompt_text = text + _ORCH_AI_OPINION_SOURCING_SUFFIX" in src and '"text": prompt_text' in src)
 
         return 1 if FAILURES else 0
     finally:
