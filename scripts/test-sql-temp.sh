@@ -76,6 +76,7 @@ if [ "${#SUITES[@]}" -eq 0 ]; then
     agent.personal_facts_sql_integration_test
     agent.commitment_verification_sql_integration_test
     agent.db_sql_field_protection_sql_integration_test
+    agent.db_sql_schema_drift_sql_integration_test
   )
 fi
 failed=()

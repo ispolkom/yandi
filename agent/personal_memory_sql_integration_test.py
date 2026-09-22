@@ -73,7 +73,7 @@ def main() -> int:
                     "VALUES ('v15_owner', 'turn-v15-0001', 'insult', NOW())")
         cur.execute("DROP TABLE IF EXISTS personal_fact_event"); cur.execute("DROP TABLE IF EXISTS personal_fact")
         cur.execute("DROP TABLE IF EXISTS interaction_turn")
-        cur.execute("DELETE FROM schema_migrations WHERE version IN (16, 17, 18, 19)")
+        cur.execute("DELETE FROM schema_migrations WHERE version IN (16, 17, 18, 19, 20)")
         cur.execute("INSERT IGNORE INTO schema_migrations (version, description) VALUES (15, 'simulated v15')")
     check("U: the simulated v15 database has no interaction_turn and version 15",
           scalar(root, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='yandi_epistemic' AND table_name='interaction_turn'") == 0

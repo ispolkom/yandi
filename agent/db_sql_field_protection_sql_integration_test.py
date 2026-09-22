@@ -109,7 +109,7 @@ def main() -> int:
         return False
 
     # ── v18 -> v19 upgrade is additive ────────────────────────────────────────────────────────────────────────────
-    run("DELETE FROM schema_migrations WHERE version = 19")
+    run("DELETE FROM schema_migrations WHERE version = %s" % schema.SCHEMA_VERSION)
     run("DROP TABLE IF EXISTS storage_protection_event")
     run("SET FOREIGN_KEY_CHECKS=0")
     for table in protect.ORDER:
@@ -138,7 +138,7 @@ def main() -> int:
     types = {(t, c): scalar("SELECT data_type FROM information_schema.columns WHERE table_schema='yandi_epistemic' AND table_name=%s AND column_name=%s", (t, c))
              for t, cols in fp.PROTECTED.items() for c in cols}
     check("U2: the migration upgrades v18 -> v19, records version 19 and creates the mode table",
-          upgraded and scalar("SELECT MAX(version) FROM schema_migrations") == schema.SCHEMA_VERSION == 19
+          upgraded and scalar("SELECT MAX(version) FROM schema_migrations") == schema.SCHEMA_VERSION == 20
           and scalar("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='yandi_epistemic' AND table_name='storage_protection_event'") == 1)
     check("U3: every protected column is now wide text", all(v in ("mediumtext", "text", "longtext") for v in types.values()), repr(types))
     check("U4: the v18 rows are untouched (text, and the JSON is the same JSON)",

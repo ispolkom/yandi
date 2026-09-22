@@ -46,7 +46,7 @@ DESIGN NOTES (read before changing a table):
    no HTTP retry chatter. RUN_ERROR is 5 columns, not a log warehouse.
 """
 
-SCHEMA_VERSION = 19  # v19: storage_protection_event + wide text columns for the sealed personal ledger (agent/db/sql/field_protection.py). v18: commitment.source_turn_id + commitment_event.source_turn_id/span_start/span_end (provenance of a promise and of its fulfilment evidence). v17: personal_fact + personal_fact_event (provenance-backed, append-only ledger of what the person reported about themselves). v16: interaction_turn (immutable per-person source record of each chat turn, keyed by the client-minted turn id). v15: commitment + commitment_event + causal_event (immutable promise ledger and the causal-event idempotency ledger for the relationship state). v14: knowledge_query_archive ("точка ноль" — agent/db/manager.py's sqlite KnowledgeDB query-log + moderation-queue system retired from registry/index.db + registry/knowledge/*.db)
+SCHEMA_VERSION = 20  # v20: semantic_edge.triggering_claim_ids + belief.evidence_for/evidence_against/claim_ids (schema drift found by agent/db/sql/schema_drift.py). v19: storage_protection_event + wide text columns for the sealed personal ledger (agent/db/sql/field_protection.py). v18: commitment.source_turn_id + commitment_event.source_turn_id/span_start/span_end (provenance of a promise and of its fulfilment evidence). v17: personal_fact + personal_fact_event (provenance-backed, append-only ledger of what the person reported about themselves). v16: interaction_turn (immutable per-person source record of each chat turn, keyed by the client-minted turn id). v15: commitment + commitment_event + causal_event (immutable promise ledger and the causal-event idempotency ledger for the relationship state). v14: knowledge_query_archive ("точка ноль" — agent/db/manager.py's sqlite KnowledgeDB query-log + moderation-queue system retired from registry/index.db + registry/knowledge/*.db)
 
 SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1831,10 +1831,21 @@ STORAGE_V19_ALTERS = [
     ]
 ]
 
+
+# v20: two tables whose CREATE TABLE gained columns AFTER they were already live on some installations (`CREATE TABLE IF NOT
+# EXISTS` never adds a column to an existing table) — found via agent/db/sql/schema_drift.py after `semantic_edge.
+# triggering_claim_ids` crashed a live request with (1054, "Unknown column"). Additive, nullable, one statement per column.
+SCHEMA_DRIFT_V20_ALTERS = [
+    ("semantic_edge.triggering_claim_ids column", "ALTER TABLE semantic_edge ADD COLUMN triggering_claim_ids JSON NULL;"),
+    ("belief.evidence_for column", "ALTER TABLE belief ADD COLUMN evidence_for JSON NULL;"),
+    ("belief.evidence_against column", "ALTER TABLE belief ADD COLUMN evidence_against JSON NULL;"),
+    ("belief.claim_ids column", "ALTER TABLE belief ADD COLUMN claim_ids JSON NULL;"),
+]
+
 # Deferred ALTER (needs answer_version to already exist).
 ALTER_STATEMENTS_IN_ORDER = [
     ("verification_run.final_answer_id FK", VERIFICATION_RUN_FINAL_ANSWER_FK),
-] + SOURCE_OBSERVATION_V13_ALTERS + COMMITMENT_V18_ALTERS + STORAGE_V19_ALTERS
+] + SOURCE_OBSERVATION_V13_ALTERS + COMMITMENT_V18_ALTERS + STORAGE_V19_ALTERS + SCHEMA_DRIFT_V20_ALTERS
 
 # Truth-claiming vocabulary is explicitly BANNED from this schema
 # (mandate §1/§14) — a regression test greps every DDL string above for

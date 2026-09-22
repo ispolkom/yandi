@@ -244,7 +244,7 @@ def main() -> int:
     with root.cursor() as cur:
         cur.execute("ALTER TABLE commitment DROP COLUMN source_turn_id")
         cur.execute("ALTER TABLE commitment_event DROP COLUMN source_turn_id, DROP COLUMN span_start, DROP COLUMN span_end")
-        cur.execute("DELETE FROM schema_migrations WHERE version IN (18, 19)")
+        cur.execute("DELETE FROM schema_migrations WHERE version IN (18, 19, 20)")
     reset_world()
     as_runtime()
     t_old = tid("v17")
@@ -265,7 +265,7 @@ def main() -> int:
         "SELECT column_name, column_type, collation_name FROM information_schema.columns WHERE table_schema='yandi_epistemic' "
         "AND table_name IN ('commitment','commitment_event') AND column_name IN ('source_turn_id','span_start','span_end')")}
     check("0: the migration adds the v18 provenance columns and records version 18 (additive)",
-          upgraded and scalar("SELECT MAX(version) FROM schema_migrations") == schema.SCHEMA_VERSION == 19
+          upgraded and scalar("SELECT MAX(version) FROM schema_migrations") == schema.SCHEMA_VERSION == 20
           and scalar("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='yandi_epistemic' AND table_name='commitment_event' "
                      "AND column_name IN ('source_turn_id','span_start','span_end')") == 3
           and scalar("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='yandi_epistemic' AND table_name='commitment' AND column_name='source_turn_id'") == 1)
