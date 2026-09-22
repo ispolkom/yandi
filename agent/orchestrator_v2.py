@@ -616,9 +616,19 @@ def process(
         # across requests. Phase 12 (below) reads its return value on
         # purpose; nothing that affects THIS request's own answer, Trust,
         # claim status, retrieval, or coverage does.
-        _family_dependency_stats = apply_family_dependency_shadow(
-            claims_data, _disagreement_result, log, verbose,
-        )
+        # Fail-open: this module's own docstring promises it is "purely observational" and "structurally incapable of
+        # influencing this request's own answer" — but nothing enforced that against an unexpected exception (a live crash,
+        # e.g. (1054, "Unknown column") from schema drift, previously took the whole answer down with it). `None` is
+        # already the documented, accepted input for every downstream reader of this value (build_shadow_request_summary,
+        # apply_dependency_recheck both take Optional[...]), so a failure here degrades to "no family-dependency data this
+        # request", never to losing the request.
+        try:
+            _family_dependency_stats = apply_family_dependency_shadow(
+                claims_data, _disagreement_result, log, verbose,
+            )
+        except Exception as e:  # noqa: BLE001
+            log(f"[FamilyDependency] shadow write failed (fail-open, answer unaffected): {type(e).__name__}: {e}")
+            _family_dependency_stats = None
 
         # Epistemic Core v1 P10 (Этап 4G-4): read-only shadow classifier
         # over Phase 11's persisted contradicts edges — evidence-grounded
