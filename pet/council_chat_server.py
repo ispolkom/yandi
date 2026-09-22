@@ -1292,9 +1292,11 @@ async function sendToOrch(query){
   const qPanel=msgsElFor("orch");
   addMsg({from:"human",tab:"orch",text:query,ts:now(),id:"tmp-"+Date.now()},qPanel);
   try{
+    // личный ход: идентичность этой доставки сообщения мигрирует вместе с запросом (повтор того же сообщения узнаётся)
+    const turnId=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():("t"+Date.now().toString(36)+Math.random().toString(36).slice(2,12));
     const r=await fetch("/api/orchestrator/ask",{
       method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({query,enable_web:useWeb}),
+      body:JSON.stringify({query,enable_web:useWeb,turn_id:turnId}),
     });
     const d=await r.json();
     sbTurn.textContent=d.ok?`✅ ${(d.latency||0).toFixed(1)}s | проверка в фоне...`:`❌ ${d.error}`;

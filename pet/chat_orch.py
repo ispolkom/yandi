@@ -170,12 +170,20 @@ async def orchestrator_ask(payload: dict):
         await r.aclose()
         return {"ok": False, "error": str(e)}
 
+    # ── Память и отношения: тот же личный ход, что в чате Помощника ─────────────
+    # Проверенную сводку оркестратора Голос проговаривает С памятью, отношениями и обещаниями человека; в память идут ТОЛЬКО слова
+    # человека из этого сообщения (события и факты извлекаются из него одного), сводка — данные для ответа, не для памяти.
+    # Нет turn_id (не страница) или личный шаг упал — остаётся проверенный ответ оркестратора как есть, ничего не теряется.
+    voice_text, voice_error = await _personal_turn(payload, query, chat_context, resp, loop)
+
     msg_id = str(uuid.uuid4())
     msg = {
         "type":        "message",
         "from":        "orchestrator",
         "tab":         "orch",
-        "text":        resp.answer,
+        "text":        voice_text or resp.answer,
+        "verified_answer": resp.answer if voice_text else None,
+        "voice_error": voice_error,
         "ts":          datetime.now().strftime("%H:%M"),
         "_ts":         datetime.now().timestamp(),
         "id":          msg_id,
@@ -272,6 +280,40 @@ async def orchestrator_ask(payload: dict):
         "missing":     frame.missing,
         "frame":       frame.to_dict(),
     }
+
+
+_STATUS_LINE_RE = re.compile(r"🔄 Отправлен на проверку[^\n]*")
+
+
+async def _personal_turn(payload: dict, query: str, chat_context: list, resp, loop):
+    """(текст Голоса или None, имя ошибки или None). Один личный ход на сообщение человека: та же цепочка, что у `/api/local/chat`."""
+    from pet import voice as _voice
+    from pet.chat_local import _respond_with_character, _valid_turn_id
+    turn_id = _valid_turn_id(payload.get("turn_id"))
+    if not turn_id:
+        return None, None
+    history = [
+        {"role": "user" if m.get("from") == "human" else "assistant", "content": str(m.get("text") or "")}
+        for m in chat_context[-6:]
+    ]
+    messages = history + [{"role": "user", "content": query}]
+    verified = {
+        "answer": resp.answer,
+        "trust_level": resp.trust_level,
+        "sources": getattr(resp, "sources", []) or [],
+    }
+    try:
+        model = await loop.run_in_executor(None, lambda: _voice.effective_model("heretic:q8"))
+        text = await loop.run_in_executor(None, lambda: _respond_with_character(model, messages, 0.7, turn_id, verified))
+    except Exception as exc:  # noqa: BLE001 — проверенный ответ важнее личного слоя
+        return None, type(exc).__name__
+    text = (text or "").strip()
+    if not text:
+        return None, "EmptyReply"
+    status = _STATUS_LINE_RE.search(resp.answer or "")
+    if status and status.group(0) not in text:                     # строку статуса проверки пишет код, а не модель
+        text = text.rstrip() + "\n\n" + status.group(0)
+    return text, None
 
 
 def _p2p_available() -> bool:

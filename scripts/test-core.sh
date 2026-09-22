@@ -48,6 +48,7 @@ SUITES=(
   pet.pet_extension_regression_test
   pet.pet_settings_tab_regression_test
   pet.pet_voice_regression_test
+  pet.pet_orch_memory_regression_test
   pet.pet_web_guard_regression_test
   pet.pet_web_login_regression_test
   agent.message_intensity_regression_test
