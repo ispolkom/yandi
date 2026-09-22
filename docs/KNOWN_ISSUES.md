@@ -195,10 +195,11 @@ endpoint and the WebSocket, `pet/local_guard.py`) therefore works on "deny by de
 server's own page or from a program on this computer (no Origin header), or from the Firefox extension and only on its own
 addresses; CORS answers the extension only (no more `*`). Answers carry anti-framing headers.
 
-Limits: the server still has NO login, so any program or person on this computer can use it (a login is planned); the
+Limits: a browser needs the login since 2026-09-22 (`docs/WEB_LOGIN.md`), but programs on this computer are still not asked; the
 Firefox extension origin `moz-extension://<uuid>` is accepted on the extension's addresses whichever extension it belongs to
-(another installed extension could call those addresses); the older endpoints still exist and work for the own page, in
-particular `/api/tools/run` (agent tools, `shell.run` allows `python3` with any arguments) until the Agent tab is removed.
+(another installed extension could call those addresses). **The Agent and Verification tabs were removed (2026-09-22)** together
+with their endpoints (`/api/agent/*`, `/api/tools/*`, `/api/browser/*`, `pet/chat_agent.py`, the dead `pet/review_tab.py`), so nothing on the
+server can run `python3` for a page any more; the agent's own code (`agent/tools/`) is untouched and is used by scripts, not by the web page.
 `requirements.txt` did not list a WebSocket library, so a fresh install had no live updates; `websockets` is listed now.
 
 ## Single-owner personal chat

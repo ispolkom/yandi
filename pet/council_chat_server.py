@@ -8,7 +8,6 @@ Open:  http://localhost:9010
   chat_local.py     — YANDI Помощник (/api/local/*)
   chat_translate.py — переводчик (/api/council/translate)
   chat_orch.py      — Оркестратор (/api/orchestrator/*, /api/orch/*)
-  chat_agent.py     — Агент (/api/agent/*, /api/tools/*, /api/browser/*)
   shared.py         — общие константы, broadcast, write_log
 """
 
@@ -109,7 +108,6 @@ app.mount("/media", StaticFiles(directory=str(_HERE / "media")), name="media")
 from pet.chat_local     import router as _local_router
 from pet.chat_translate import router as _translate_router
 from pet.chat_orch      import router as _orch_router
-from pet.chat_agent     import router as _agent_router
 from pet.chat_models    import router as _models_router
 from pet.settings_api   import router as _settings_router
 
@@ -123,7 +121,6 @@ app.include_router(_web_login.router)      # /login, /setup, /api/auth/*
 app.include_router(_local_router)
 app.include_router(_translate_router)
 app.include_router(_orch_router)
-app.include_router(_agent_router)
 app.include_router(_models_router)
 app.include_router(_settings_router)
 
@@ -483,7 +480,6 @@ body{font-family:var(--font);background:var(--icq-bg);color:var(--icq-text);
 
 /* INPUT */
 #input-area{background:var(--icq-panel);border-top:2px solid var(--icq-border-dark);
-#input-area-review{background:var(--icq-panel);border-top:2px solid var(--icq-border-dark);padding:6px 10px;display:flex;gap:6px;align-items:flex-end;flex-shrink:0}
   padding:7px 9px;display:flex;gap:5px;align-items:flex-end;flex-shrink:0}
 #inp{flex:1;background:white;border:1px solid var(--icq-border);
   border-right:2px solid var(--icq-border-dark);border-bottom:2px solid var(--icq-border-dark);
@@ -603,8 +599,6 @@ a.cl{color:#2244aa;text-decoration:underline}
       <button class="nav-btn" id="tab-orch"  onclick="switchMode('orch')">🤖 Оркестратор</button>
       <button class="nav-btn"        id="tab-inet"  onclick="switchMode('inet')">🌐 Интернет чат</button>
       <button class="nav-btn"        id="tab-local" onclick="switchMode('local')">🟣 YANDI Помощник</button>
-      <button class="nav-btn"        id="tab-agent" onclick="switchMode('agent')">🛠 Агент</button>
-      <button class="nav-btn" id="tab-review" onclick="switchMode('review')">📋 Верификация</button>
     </div>
     <div class="ml-auto" style="display:flex;gap:3px">
       <button class="hdr-btn" id="btn-sound" onclick="toggleSound()">🔊</button>
@@ -699,7 +693,6 @@ a.cl{color:#2244aa;text-decoration:underline}
     <div id="msgs-orch"  class="msgs-panel"></div>
     <div id="msgs-inet"  class="msgs-panel" style="display:none"></div>
     <div id="msgs-local" class="msgs-panel" style="display:none"></div>
-    <div id="msgs-agent" class="msgs-panel" style="display:none;font-family:monospace;font-size:12px"></div>
     <div id="msgs-review" class="msgs-panel" style="display:none"></div>
     <div id="msgs-settings" class="msgs-panel" style="display:none"></div>
     <div id="copy-chat-bar" style="display:none;padding:4px 10px;text-align:right">
@@ -719,10 +712,6 @@ a.cl{color:#2244aa;text-decoration:underline}
     <div id="status-bar">
       <span id="sb-mode">Режим: Оркестратор</span>
       <span id="sb-turn">Ваш ход ✍️</span>
-    </div>
-    <div id="input-area-review">
-      <textarea id="inp-review" placeholder="Вопрос для верификации... (Enter — отправить)"></textarea>
-      <button class="send-btn" id="send-review-btn" onclick="sendReviewMessage()">Отправить</button>
     </div>
   </div>
 
@@ -826,52 +815,6 @@ a.cl{color:#2244aa;text-decoration:underline}
           <button class="tool-btn" onclick="saveDataset()">💾 Сессия</button>
           <button class="tool-btn" onclick="resetTokens()">⟳ Токены</button>
         </div>
-      </div>
-    </div>
-
-    <!-- Агент tools -->
-    <div id="tools-agent" style="display:none">
-      <div class="card-hdr"><span class="card-title">🛠 Агент</span></div>
-      <div class="tool-sec">
-        <div class="tool-lbl">Задача для агента</div>
-        <textarea id="agent-task" rows="4"
-          placeholder="Опиши задачу... например: проверь все tools и напиши отчёт"
-          oninput="_saveAgentInput()"
-          style="width:100%;box-sizing:border-box;padding:6px;font-size:12px;font-family:Tahoma;border:1px solid var(--icq-border-light);background:var(--icq-panel);resize:vertical"></textarea>
-      </div>
-      <div class="tool-sec">
-        <div class="tool-lbl">Контекст (опционально)</div>
-        <textarea id="agent-context" rows="2"
-          placeholder="Дополнительный контекст..."
-          oninput="_saveAgentInput()"
-          style="width:100%;box-sizing:border-box;padding:6px;font-size:12px;font-family:Tahoma;border:1px solid var(--icq-border-light);background:var(--icq-panel);resize:vertical"></textarea>
-      </div>
-      <div class="tool-sec">
-        <div class="tool-lbl">Подключить чаты</div>
-        <div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:4px">
-          <button class="tool-btn" onclick="browserConnect(['claude'])">Claude</button>
-          <button class="tool-btn" onclick="browserConnect(['gpt'])">GPT</button>
-          <button class="tool-btn" onclick="browserConnect(['deepseek'])">DeepSeek</button>
-          <button class="tool-btn" onclick="browserConnect(['kimi'])">Kimi</button>
-          <button class="tool-btn" style="background:#4a6b2a" onclick="browserConnect(null)">🌐 Все</button>
-        </div>
-        <div id="browser-status" style="font-size:11px;font-family:monospace"></div>
-      </div>
-      <div class="tool-sec" style="display:flex;gap:4px">
-        <button class="tool-btn" style="flex:1" onclick="agentBuildPlan()">📋 Построить план</button>
-        <button class="tool-btn" style="flex:1;background:#4a6b2a" onclick="agentRunTask()">▶ Запустить</button>
-      </div>
-      <div class="tool-sec" id="agent-plan-box" style="display:none">
-        <div class="tool-lbl">План (<span id="agent-step-count">0</span> шагов)</div>
-        <div id="agent-plan" style="font-size:11px;max-height:160px;overflow-y:auto;background:var(--icq-bg);border:1px solid var(--icq-border-light);padding:4px"></div>
-        <button class="tool-btn w100" style="margin-top:4px" onclick="agentExecutePlan()">⚙️ Выполнить план</button>
-      </div>
-      <div class="tool-sec">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <div class="tool-lbl" style="margin:0">Лог выполнения</div>
-          <button class="tool-btn" style="padding:1px 6px;font-size:11px;color:#cc0000" onclick="agentClearLog()">🗑 Очистить</button>
-        </div>
-        <div id="agent-log" style="font-size:11px;max-height:200px;overflow-y:auto;background:var(--icq-bg);border:1px solid var(--icq-border-light);padding:4px;font-family:monospace;margin-top:3px"></div>
       </div>
     </div>
 
@@ -1178,19 +1121,14 @@ async function switchMode(mode){
   document.getElementById("tab-orch").classList.toggle("active",mode==="orch");
   document.getElementById("tab-inet").classList.toggle("active",mode==="inet");
   document.getElementById("tab-local").classList.toggle("active",mode==="local");
-  document.getElementById("tab-agent").classList.toggle("active",mode==="agent");
-  document.getElementById("tab-review").classList.toggle("active",mode==="review");
   document.getElementById("tab-settings").classList.toggle("active",mode==="settings");
   document.body.classList.toggle("mode-settings",mode==="settings");
   document.getElementById("tools-orch").style.display=mode==="orch"?"":"none";
   document.getElementById("tools-inet").style.display=mode==="inet"?"":"none";
   document.getElementById("tools-local").style.display=mode==="local"?"":"none";
-  document.getElementById("tools-agent").style.display=mode==="agent"?"":"none";
   document.getElementById("web-wrap").style.display=mode==="orch"?"":"none";
-  const reviewInput = document.getElementById("input-area-review");
-  if (reviewInput) reviewInput.style.display = mode === "review" ? "flex" : "none";
   // Показываем нужную панель сообщений
-  ["orch","inet","local","agent","settings"].forEach(t=>{
+  ["orch","inet","local","settings"].forEach(t=>{
     const el=document.getElementById("msgs-"+t);
     if(el)el.style.display=mode===t?"":"none";
   });
@@ -1198,7 +1136,6 @@ async function switchMode(mode){
   if(mode==="orch") _loadTabHistory("orch");
   if(mode==="inet") _loadTabHistory("inet");
   if(mode==="local"){_loadLocalHistory();_loadLocalModels();}
-  if(mode==="agent"){_loadAgentState();}
   if(mode==="settings"&&window.SettingsTab){SettingsTab.onEnter();}
   applyI18n();
 }
@@ -1211,148 +1148,6 @@ async function _loadTabHistory(tab){
     (d.messages||[]).forEach(m=>addMsg(m,panel));
     _updateCopyChatBar();
   }catch(_){}
-}
-
-// ── Агент ─────────────────────────────────────────────────────────────────────
-let _agentPlan=[];
-
-function _agentLog(html, save=true){
-  // Лог отображается в центральной панели msgs-agent
-  const el=document.getElementById("msgs-agent");
-  el.innerHTML+=html+"<br>";
-  el.scrollTop=el.scrollHeight;
-  // Синхронизируем и с боковым agent-log (если видим)
-  const side=document.getElementById("agent-log");
-  if(side){side.innerHTML+=html+"<br>";side.scrollTop=side.scrollHeight;}
-  if(save) fetch("/api/agent/log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({html})}).catch(()=>{});
-}
-
-async function _loadAgentState(){
-  try{
-    const d=await fetch("/api/agent/state").then(r=>r.json());
-    if(d.task) document.getElementById("agent-task").value=d.task;
-    if(d.context) document.getElementById("agent-context").value=d.context;
-    const msgsEl=document.getElementById("msgs-agent");
-    const logEl=document.getElementById("agent-log");
-    if(d.log?.length){
-      const logHtml=d.log.join("<br>")+"<br>";
-      msgsEl.innerHTML=logHtml;
-      msgsEl.scrollTop=msgsEl.scrollHeight;
-      if(logEl){logEl.innerHTML=logHtml;logEl.scrollTop=logEl.scrollHeight;}
-    }
-  }catch(_){}
-}
-
-async function _saveAgentInput(){
-  const task=(document.getElementById("agent-task").value||"");
-  const context=(document.getElementById("agent-context").value||"");
-  fetch("/api/agent/state",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({task,context})}).catch(()=>{});
-}
-
-async function agentClearLog(){
-  document.getElementById("msgs-agent").innerHTML="";
-  const side=document.getElementById("agent-log");
-  if(side) side.innerHTML="";
-  _agentPlan=[];
-  document.getElementById("agent-plan-box").style.display="none";
-  await fetch("/api/agent/clear",{method:"POST"}).catch(()=>{});
-}
-
-async function browserConnect(models){
-  const statusEl=document.getElementById("browser-status");
-  statusEl.textContent="⏳ Проверяем и открываем...";
-  _agentLog("🌐 Подключаем: "+(models?models.join(", "):"все"));
-  try{
-    const r=await fetch("/api/browser/connect",{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({models,wait_sec:8}),
-    });
-    const d=await r.json();
-    const lines=Object.entries(d.models||{}).map(([m,v])=>`${v.status} ${m}`);
-    statusEl.innerHTML=lines.join("<br>");
-    for(const [m,v] of Object.entries(d.models||{})){
-      _agentLog(`  ${v.status} ${m}${v.action==="opened"?" → открыли вкладку":""}`);
-    }
-  }catch(e){statusEl.textContent="❌ "+e.message;}
-}
-
-async function agentBuildPlan(){
-  const task=(document.getElementById("agent-task").value||"").trim();
-  if(!task){alert("Введи задачу!");return;}
-  const ctx=document.getElementById("agent-context").value||"";
-  _agentLog("📋 Строим план...");
-  sbTurn.textContent="⏳ Планирование...";
-  try{
-    const r=await fetch("/api/tools/plan",{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({task,context:ctx}),
-    });
-    const d=await r.json();
-    if(!d.ok){_agentLog("❌ "+d.error);return;}
-    _agentPlan=d.steps||[];
-    document.getElementById("agent-step-count").textContent=_agentPlan.length;
-    const planEl=document.getElementById("agent-plan");
-    planEl.innerHTML=_agentPlan.map(s=>
-      `<div style="margin-bottom:3px"><b>[${s.step}]</b> <code>${s.tool}</code> — ${escHtml(s.description||"")}</div>`
-    ).join("");
-    document.getElementById("agent-plan-box").style.display="";
-    _agentLog(`✅ План: ${_agentPlan.length} шагов`);
-    sbTurn.textContent="✅ План готов";
-  }catch(e){_agentLog("❌ "+e.message);sbTurn.textContent="❌ Ошибка";}
-}
-
-async function agentExecutePlan(){
-  if(!_agentPlan.length){_agentLog("❌ Нет плана");return;}
-  _agentLog("⚙️ Выполняем план...");
-  sbTurn.textContent="⏳ Выполнение...";
-  try{
-    const r=await fetch("/api/tools/execute",{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({steps:_agentPlan,stop_on_fail:false}),
-    });
-    const d=await r.json();
-    for(const e of (d.log||[])){
-      const ok=e.ok?"✅":"❌";
-      _agentLog(`${ok} [${e.step}] <b>${e.tool}</b> (${e.elapsed}s)`);
-    }
-    _agentLog(d.ok?"✅ Выполнено":"❌ Есть ошибки");
-    sbTurn.textContent=d.ok?"✅ Готово":"❌ Ошибки";
-  }catch(e){_agentLog("❌ "+e.message);}
-}
-
-async function agentRunTask(){
-  const task=(document.getElementById("agent-task").value||"").trim();
-  if(!task){alert("Введи задачу!");return;}
-  const ctx=document.getElementById("agent-context").value||"";
-  document.getElementById("agent-log").innerHTML="";
-  _agentLog("🤖 Задача: <b>"+escHtml(task)+"</b>");
-  _agentLog("📋 Строим план → выполняем → проверяем...");
-  sbTurn.textContent="⏳ Агент работает...";
-  try{
-    const r=await fetch("/api/tools/run_task",{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({task,context:ctx}),
-    });
-    const d=await r.json();
-    // Показываем ошибку планирования
-    if(d.stage==="planning"){
-      _agentLog(`❌ Планировщик: ${escHtml(d.error||"")}`)
-      if(d.raw) _agentLog(`<details><summary>raw</summary>${escHtml(d.raw)}</details>`);
-      sbTurn.textContent="❌ Ошибка планирования";
-      return;
-    }
-    if(d.exec?.log){
-      for(const e of d.exec.log){
-        const ok=e.ok?"✅":"❌";
-        _agentLog(`${ok} [${e.step}] <b>${e.tool}</b> (${e.elapsed}s)`);
-      }
-    }
-    const verdict=escHtml(d.verdict||"нет вердикта");
-    _agentLog(`<br>${d.ok?"✅":"❌"} <b>Вердикт:</b> ${verdict}`);
-    _agentLog(`⏱ ${d.elapsed??0}s | ${d.steps??0} шагов`);
-    sbTurn.textContent=d.ok?"✅ Задача выполнена":"❌ Задача не выполнена";
-  }catch(e){_agentLog("❌ "+e.message);sbTurn.textContent="❌ Ошибка";}
 }
 
 // ── Send ──────────────────────────────────────────────────────────────────────
@@ -2173,7 +1968,7 @@ setInterval(refreshStats,10000);
 setInterval(checkConnections,15000);
 setInterval(loadReviewQueue,30000);
 loadConfig();
-switchMode(localStorage.getItem("activeTab")||"orch");
+switchMode((["orch","inet","local","settings"].includes(localStorage.getItem("activeTab")))?localStorage.getItem("activeTab"):"orch");   // вкладки «Агент» и «Верификация» убраны
 // Restore language selector and apply i18n
 (()=>{const s=document.getElementById("lang-sel");if(s)s.value=userLang})();
 applyI18n();
