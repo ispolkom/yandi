@@ -515,9 +515,15 @@ def process(
         # below is UNCHANGED — it was already a pure per-claim function
         # called once after everything else, so it does not need to
         # become streaming itself.
+        # Same domain derivation orchestrator/claims/lifecycle.py's assign_claim_family_identity() uses later in
+        # this same request (that function's own docstring: "same domain derivation... extracted verbatim") — given
+        # here too so the memory pass's semantic-family fallback (agent.verification_memory.lookup_historical_
+        # evidence) can link a claim into the same family that call will (idempotently) confirm afterwards.
+        _memory_domain = epistemic_result.domain if not is_subjective_answer else "subjective"
         evidence_data = run_async_claim_pipeline(
             claims_data, evidence_data, enable_web, is_subjective_answer,
             _skip_rag, _request_fetch_cache, cost, log, verbose,
+            domain=_memory_domain,
         )
 
         # semantic_grounding_score is diagnostic-only (feeds a single

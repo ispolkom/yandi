@@ -290,6 +290,7 @@ async def _process_one_claim(
     profile: Dict[str, Any],
     log,
     verbose: bool,
+    domain: Optional[str] = None,
 ) -> None:
     async with semaphore:
         active_counter["active"] += 1
@@ -349,7 +350,7 @@ async def _process_one_claim(
             # the final relation set alongside whatever PASS1/PASS2 find.
             try:
                 memory_evidence = await asyncio.to_thread(
-                    lookup_historical_evidence, claim, None, log, verbose,
+                    lookup_historical_evidence, claim, None, log, verbose, domain,
                 )
             except Exception:
                 memory_evidence = []
@@ -452,6 +453,7 @@ async def _run_async_claim_pipeline_impl(
     verbose: bool,
     profile: Dict[str, Any],
     coalesce_wait_s: float = 0.0,
+    domain: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     embedding_cache = EvidenceEmbeddingCache()
     evidence_lock = asyncio.Lock()
@@ -472,7 +474,7 @@ async def _run_async_claim_pipeline_impl(
             _process_one_claim(
                 claim, evidence_data, evidence_lock, embedding_cache,
                 nli_batcher, fetch_cache, enable_web, is_subjective_answer,
-                skip_rag, semaphore, active_counter, profile, log, verbose,
+                skip_rag, semaphore, active_counter, profile, log, verbose, domain,
             )
         )
         for claim in eligible_claims
@@ -536,6 +538,7 @@ def run_async_claim_pipeline(
     log,
     verbose: bool,
     coalesce_wait_s: float = NLI_COALESCE_WAIT_S,
+    domain: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Synchronous entry point (called from the still-synchronous
@@ -562,7 +565,7 @@ def run_async_claim_pipeline(
         _run_async_claim_pipeline_impl(
             claims_data, evidence_data, enable_web, is_subjective_answer,
             skip_rag, fetch_cache, log, verbose, profile,
-            coalesce_wait_s=coalesce_wait_s,
+            coalesce_wait_s=coalesce_wait_s, domain=domain,
         )
     )
 

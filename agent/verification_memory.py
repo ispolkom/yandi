@@ -316,21 +316,38 @@ def lookup_historical_evidence(
     exclude_trace_id: Optional[str] = None,
     log=None,
     verbose: bool = False,
+    domain: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    P5 LOAD entry point. content_hash EXACT match is the ONLY lookup
-    path this v1 actually performs at runtime (P4 §5's PRIMARY).
+    P5 LOAD entry point. content_hash EXACT match is the PRIMARY lookup
+    path (P4 §5) — cheap (a hash comparison, no model call), so it
+    always runs first and, on a hit, is never second-guessed by the
+    fallback below.
 
-    semantic_family_id is deliberately NOT used as a live fallback here,
-    despite find_claim_occurrences_by_family() existing and being able
-    to search by it: the CURRENT claim does not have a semantic_
-    family_id yet at this point in the pipeline (still only assigned
-    later, in orchestrator/claims/lifecycle.py's belief-update block —
-    well after PASS1/PASS2/this memory pass complete), and computing one
-    HERE would mean calling ClaimFamilyRegistry-style matching against
-    every persisted family (each comparison itself an embedding + LLM-
-    judge call) — exactly the "не вводить новый embedding lookup" this
-    v1 was told not to do.
+    2026-09 (owner mandate: reuse by MEANING, not only by near-identical
+    wording — "если смысл не изменился, оставляем", still always
+    re-verified, never a blind copy): when the exact match finds
+    NOTHING and a `domain` is given, this now ALSO tries the semantic
+    family the current claim belongs to — the SAME matching this
+    codebase already uses to decide whether two differently-worded
+    claims mean the same thing (agent.claim_family_registry.
+    ClaimFamilyRegistry.find_or_link_claim: embedding prefilter, then an
+    LLM judge on the close candidates only — never every claim against
+    every claim, the O(n²) cost this codebase has already paid for
+    elsewhere and moved away from). `find_or_link_claim` is idempotent
+    (family_member's own (family_id, claim_id) primary key + INSERT
+    IGNORE make a re-link of the same claim a safe no-op), so calling it
+    here — earlier than orchestrator/claims/lifecycle.py's own official
+    assign_claim_family_identity() call later in the same request — is
+    safe; the known, accepted cost is one extra embedding+LLM-judge
+    round trip per claim in the common no-exact-hit case, paid once
+    here and once more (as a cheap no-op re-link) later. No `domain` —
+    the fallback is skipped, exactly like before this change.
+
+    Whichever path found it, the reused evidence is fed into the SAME
+    Mapper -> NLI this claim's fresh evidence goes through — never a
+    verdict copied in as-is (see _reconstruct_evidence's own docstring:
+    no `relation` field is ever carried over).
 
     Returns [] on a memory miss — never fabricates a match.
     """
@@ -350,11 +367,39 @@ def lookup_historical_evidence(
             historical_evidence = repo.list_evidence_for_claim(conn, occ["claim_id"])
             results.extend(_reconstruct_evidence(historical_evidence, claim_id, claim_text))
 
+    match_kind = "exact" if results else "none"
+    family_occurrences: List[Dict[str, Any]] = []
+
+    if not results and domain:
+        from agent.claim_family_registry import get_claim_family_registry
+        try:
+            family_id = get_claim_family_registry().find_or_link_claim(
+                claim_text, claim_id, domain, log=log, verbose=verbose,
+            )
+        except Exception as exc:  # noqa: BLE001 — a memory-fallback failure must never break verification itself
+            family_id = None
+            if verbose and log:
+                log(f"[VerificationMemory] family lookup failed for claim_id={claim_id}: {type(exc).__name__}: {exc}")
+
+        if family_id:
+            with get_connection() as conn:
+                family_occurrences = repo.find_claim_occurrences_by_family(conn, family_id)
+                family_occurrences = [
+                    occ for occ in family_occurrences
+                    if occ["claim_id"] != claim_id and occ["run_id"] != exclude_trace_id
+                ][:MAX_HISTORICAL_OCCURRENCES]
+                for occ in family_occurrences:
+                    historical_evidence = repo.list_evidence_for_claim(conn, occ["claim_id"])
+                    results.extend(_reconstruct_evidence(historical_evidence, claim_id, claim_text))
+            if results:
+                match_kind = "family"
+
     if verbose and log:
         log(
             f"[VerificationMemory] lookup claim_id={claim_id} "
             f"content_hash={(content_hash or '-')[:12]} "
-            f"hits={len(occurrences)} evidence_reconstructed={len(results)}"
+            f"match={match_kind} "
+            f"hits={len(occurrences) + len(family_occurrences)} evidence_reconstructed={len(results)}"
         )
 
     return results

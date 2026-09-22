@@ -252,17 +252,12 @@ check(
 )
 
 # ============================================================
-# E. FAMILY FALLBACK (storage-level only — no new classifier):
-#    "ТОЧКА НОЛЬ" v13 — vm.index_trace()/vm._query_index() (the old
-#    sqlite locator) are RETIRED entirely; family_id is now a real
-#    column on claim_occurrence (agent.db.sql.schema.py), populated by
+# E. FAMILY FALLBACK, storage layer: family_id is a real column on
+#    claim_occurrence (agent.db.sql.schema.py), populated by
 #    record_claims_and_evidence() and queryable via
-#    repo.find_claim_occurrences_by_family() — even though the LIVE
-#    lookup_historical_evidence() path deliberately does not call it
-#    yet (see that function's docstring — avoiding a new embedding
-#    lookup for v1). This proves the storage layer is wired correctly
-#    for a future stage to flip on, without building a new classifier
-#    here.
+#    repo.find_claim_occurrences_by_family(). Section E2 below proves
+#    lookup_historical_evidence() itself now uses this (2026-09, owner
+#    mandate: reuse by meaning, not only near-identical wording).
 # ============================================================
 
 conn_e = _fresh_fake()
@@ -286,6 +281,127 @@ check(
     "E: a non-matching family_id yields no rows (no fabricated match)",
     len(rows_by_wrong_family) == 0,
 )
+
+# ============================================================
+# E2. FAMILY FALLBACK, live in lookup_historical_evidence(): reuse by
+#     MEANING, not only near-identical wording (2026-09 owner mandate).
+#     find_or_link_claim() itself is scripted (embedding/LLM cost is
+#     not this test's concern) — everything downstream of the family_id
+#     it returns is the REAL storage-layer code.
+# ============================================================
+
+import agent.claim_family_registry as cfr_mod
+
+
+class _ScriptedRegistry:
+    """find_or_link_claim() returns whatever this test queued for the given claim_text, and records every call
+    it received (so a test can assert domain/claim_text/claim_id were passed through correctly)."""
+
+    def __init__(self, answers: dict):
+        self.answers = answers
+        self.calls = []
+
+    def find_or_link_claim(self, claim_text, claim_id, domain, log=None, verbose=False, stats=None):
+        self.calls.append({"claim_text": claim_text, "claim_id": claim_id, "domain": domain})
+        return self.answers.get(claim_text)
+
+
+def _with_registry(answers: dict):
+    return _ScriptedRegistry(answers)
+
+
+conn_e2 = _fresh_fake()
+
+# a PRIOR occurrence, worded differently from what will be asked next, already linked into fam_e2
+prior_e2 = {"claim_id": "cl_e2_prior", "claim_text": "Сруб из бревна ручной рубки стоит от 470000 рублей.",
+            "content_hash": compute_claim_content_hash("Сруб из бревна ручной рубки стоит от 470000 рублей."),
+            "evidence_relations": [{"evidence_id": "ev_e2", "relation": "supports", "method": "nli"}],
+            "semantic_family_id": "fam_e2"}
+evidence_e2 = [{"evidence_id": "ev_e2", "source_uri": "https://logcabin.example/price",
+               "content_excerpt": "Цена сруба ручной рубки — от 470 000 руб."}]
+_record(conn_e2, "t_e2_prior", [prior_e2], evidence_e2)
+
+# a DIFFERENTLY-WORDED new claim, same meaning: content_hash misses, family_id (scripted) hits.
+new_claim_e2 = {"claim_id": "cl_e2_new", "claim_text": "Стоимость ручной рубки сруба начинается от 470 тысяч.",
+                "content_hash": compute_claim_content_hash("Стоимость ручной рубки сруба начинается от 470 тысяч.")}
+
+registry_e2 = _with_registry({new_claim_e2["claim_text"]: "fam_e2"})
+with patch.object(cfr_mod, "get_claim_family_registry", lambda: registry_e2):
+    check("E2: content_hash alone finds nothing for a rephrased claim (proves the fallback is doing the work below)",
+          vm.lookup_historical_evidence(dict(new_claim_e2)) == [])
+    hits_no_domain = vm.lookup_historical_evidence(dict(new_claim_e2))
+    check("E2: with NO domain given, the family fallback does not fire (explicit opt-in, unchanged old behaviour)",
+          hits_no_domain == [] and registry_e2.calls == [])
+    hits = vm.lookup_historical_evidence(dict(new_claim_e2), domain="строительство")
+    check("E2: WITH a domain, a rephrased claim now finds the prior, differently-worded occurrence by meaning",
+          len(hits) == 1 and hits[0]["content_excerpt"] == "Цена сруба ручной рубки — от 470 000 руб.")
+    check("E2: the reused evidence is tagged local_memory/from_memory, owned by the NEW claim, same as exact-match reuse",
+          hits[0]["route"] == "local_memory" and hits[0]["from_memory"] is True and hits[0]["retrieval_claim_id"] == "cl_e2_new")
+    check("E2: no `relation` field — the historical verdict is never copied in as a ready-made answer",
+          "relation" not in hits[0])
+
+    # the registry was asked with the CURRENT claim's own text/id/domain, not the prior occurrence's
+    check("E2: find_or_link_claim was called with the new claim's own text, id and the given domain",
+          registry_e2.calls[-1] == {"claim_text": new_claim_e2["claim_text"], "claim_id": "cl_e2_new", "domain": "строительство"})
+
+# no family match at all (scripted None) -> still a clean miss, never an error
+with patch.object(cfr_mod, "get_claim_family_registry", lambda: _with_registry({})):
+    check("E2: no family match either -> [] (a genuine memory miss, not a fabricated one)",
+          vm.lookup_historical_evidence(dict(new_claim_e2), domain="строительство") == [])
+
+# the CURRENT claim's own occurrence (if it happens to already be in the family) is never "reused into itself" —
+# seeded WITH real evidence, so an empty result really does mean "excluded", not just "nothing was ever attached"
+conn_e2b = _fresh_fake()
+self_claim = {"claim_id": "cl_e2_self", "claim_text": "Само себя.", "content_hash": "h_self", "semantic_family_id": "fam_e2_self",
+              "evidence_relations": [{"evidence_id": "ev_self", "relation": "supports", "method": "nli"}]}
+_record(conn_e2b, "t_e2_self", [self_claim], [{"evidence_id": "ev_self", "source_uri": "https://x.example/self", "content_excerpt": "Self excerpt"}])
+with patch.object(cfr_mod, "get_claim_family_registry", lambda: _with_registry({"Само себя.": "fam_e2_self"})):
+    check("E2: a claim never reuses its OWN occurrence as if it were history",
+          vm.lookup_historical_evidence({"claim_id": "cl_e2_self", "claim_text": "Само себя.",
+                                          "content_hash": "h_self_different"}, domain="d") == [])
+
+# exclude_trace_id is respected on the family path too (same THIS-run exclusion as the exact-hash path); again
+# seeded WITH real evidence so the check is meaningful.
+conn_e2c = _fresh_fake()
+same_run = {"claim_id": "cl_e2_samerun", "claim_text": "В этом же запуске.", "content_hash": "h_samerun",
+            "semantic_family_id": "fam_e2_run", "evidence_relations": [{"evidence_id": "ev_samerun", "relation": "supports", "method": "nli"}]}
+_record(conn_e2c, "t_e2_thisrun", [same_run], [{"evidence_id": "ev_samerun", "source_uri": "https://x.example/samerun", "content_excerpt": "Same-run excerpt"}])
+with patch.object(cfr_mod, "get_claim_family_registry", lambda: _with_registry({"Другой текст, тот же запуск.": "fam_e2_run"})):
+    check("E2: an occurrence from the run being excluded (exclude_trace_id) is not reused even via the family path",
+          vm.lookup_historical_evidence({"claim_id": "cl_e2_x", "claim_text": "Другой текст, тот же запуск.",
+                                          "content_hash": "h_x"}, exclude_trace_id="t_e2_thisrun", domain="d") == [])
+
+# a failure inside the family lookup (e.g. registry itself raises) is caught, never breaks the memory pass — and,
+# whatever family_id the except branch ends up with, find_claim_occurrences_by_family must never even be CALLED.
+conn_e2d = _fresh_fake()
+
+
+class _RaisingRegistry:
+    def find_or_link_claim(self, *a, **k):
+        raise RuntimeError("embedding service down")
+
+
+with patch.object(cfr_mod, "get_claim_family_registry", lambda: _RaisingRegistry()), \
+     patch.object(repo, "find_claim_occurrences_by_family") as _spy_family_query:
+    check("E2: a family-lookup failure fails OPEN — [] instead of raising, verification is not broken by memory",
+          vm.lookup_historical_evidence({"claim_id": "cl_e2_fail", "claim_text": "Что угодно.",
+                                          "content_hash": "h_fail"}, domain="d") == [])
+    check("E2: …and the caught exception really did stop it — the family table is never even queried afterwards",
+          _spy_family_query.call_count == 0)
+
+# MAX_HISTORICAL_OCCURRENCES cap applies to the family path too
+conn_e2e = _fresh_fake()
+many = [{"claim_id": f"cl_e2_many{i}", "claim_text": f"Вариант формулировки {i}.", "content_hash": f"h_many{i}",
+         "semantic_family_id": "fam_e2_many", "evidence_relations": [{"evidence_id": f"ev_many{i}", "relation": "supports", "method": "nli"}]}
+        for i in range(3)]
+for i, c in enumerate(many):
+    _record(conn_e2e, f"t_e2_many{i}", [c], [{"evidence_id": f"ev_many{i}", "source_uri": f"https://x.example/{i}",
+                                              "content_excerpt": f"Excerpt {i}"}])
+with patch.object(cfr_mod, "get_claim_family_registry", lambda: _with_registry({"Новая формулировка того же самого.": "fam_e2_many"})):
+    hits_many = vm.lookup_historical_evidence({"claim_id": "cl_e2_newmany", "claim_text": "Новая формулировка того же самого.",
+                                                "content_hash": "h_newmany"}, domain="d")
+    check(f"E2: the family path is bounded by MAX_HISTORICAL_OCCURRENCES ({vm.MAX_HISTORICAL_OCCURRENCES}) out of 3 candidates, not every past occurrence",
+          0 < len(hits_many) <= vm.MAX_HISTORICAL_OCCURRENCES < 3)
 
 # ============================================================
 # F. REASSESSMENT: historical relation was 'supports'; current

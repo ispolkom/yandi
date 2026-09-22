@@ -182,3 +182,7 @@ Three layers, all offline and none touching the live database:
   (takes tens of minutes: many of them run the real-engine suite). Needs `YANDI_PYTHON` (a python with `cryptography` and `PyMySQL`).
 
 The Rust side: `yandi-keys core-key` is covered by `cargo test -p yandi-key-root` (prints exactly the key the node gives the Core, one line, nothing on stderr; refuses a terminal).
+
+## Semantic reuse of evidence (2026-09)
+
+`agent.verification_memory_regression_test` section E2 proves the family-matching fallback of `lookup_historical_evidence()`: a rephrased claim finds a differently-worded prior occurrence by meaning (registry scripted, no real embedding/LLM call), never fires without an explicit `domain`, never reuses the claim's own occurrence, respects `exclude_trace_id` and the historical-occurrence cap, and fails open — logged, not raised — if the classifier itself errors (five mutants, each caught).
