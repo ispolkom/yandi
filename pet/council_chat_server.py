@@ -1092,14 +1092,15 @@ ws.onmessage=(e)=>{
     panel.innerHTML="";
     d.messages.forEach(m=>addMsg(m,panel));
     _updateCopyChatBar();
-    setTurn(d.turn||"human");
+    // Строка состояния ("Ждём Claude…" и т.п.) относится к ОДНОЙ вкладке (Интернет-чат): чужая вкладка не должна её перебивать.
+    if((d.tab||"orch")===currentMode) setTurn(d.turn||"human");
     return;
   }
   if(d.type==="message"){
     // Роутим в панель по tab или по from
     const tab=d.tab||(["orchestrator"].includes(d.from)?"orch":"inet");
     addMsg(d, msgsElFor(tab));
-    setTurn(d.turn_next||"human");
+    if(tab===currentMode) setTurn(d.turn_next||"human");
     return;
   }
   if(d.type==="status")              {handleStatus(d);return}
@@ -1133,6 +1134,9 @@ async function switchMode(mode){
     if(el)el.style.display=mode===t?"":"none";
   });
   _updateCopyChatBar();
+  // Оркестратор никогда не оставляет "висящий" ход (каждое его сообщение заканчивается turn_next="human",
+  // pet/chat_orch.py): переключение на эту вкладку не должно показывать статус, оставшийся от Интернет-чата.
+  if(mode==="orch") setTurn("human");
   if(mode==="orch") _loadTabHistory("orch");
   if(mode==="inet") _loadTabHistory("inet");
   if(mode==="local"){_loadLocalHistory();_loadLocalModels();}
@@ -2030,11 +2034,13 @@ async def ws_endpoint(websocket: WebSocket, client_id: str):
 
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
 
-    # send orch history on connect (default tab)
+    # send orch history on connect (default tab). TURN_KEY belongs to the INET (browser-council-relay) tab only —
+    # every orchestrator message pet/chat_orch.py itself ever writes ends turn_next="human" (its flow is one request,
+    # not an async wait for a browser AI chat), so a stale "claude"/"gpt"/"deepseek" left over from an earlier,
+    # unrelated Интернет-чат session must never be shown as the orchestrator's own turn on page load/reconnect.
     raw   = await r.lrange(ORCH_MSGS_KEY, 0, 99)
     hist  = _loads_visible_messages(list(reversed(raw)))
-    turn  = await r.get(TURN_KEY) or "human"
-    await websocket.send_json({"type": "history", "tab": "orch", "messages": hist, "turn": turn})
+    await websocket.send_json({"type": "history", "tab": "orch", "messages": hist, "turn": "human"})
 
     # mark online + notify others
     await r.set(STATUS_PFX + client_id, "online", ex=300)
