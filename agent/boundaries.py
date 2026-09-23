@@ -2,10 +2,39 @@
 agent/boundaries.py — Модуль границ и характера YANDI.
 Обнаружение токсичности, обработка оскорблений, управление состоянием обиды,
 приём извинений.
+
+Rust-перенос (2026-09-23): rustlib/yandi_rs/src/boundaries.rs — detect_toxicity/is_apology/
+generate_response/generate_apology_response. init_session_state/update_session_on_toxicity/
+update_session_on_apology НЕ перенесены — тривиальная мутация dict, переносить незачем. Доказан
+на совпадение тестом agent/boundaries_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается
+переменной окружения YANDI_BOUNDARIES_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (`maturin develop`,
+см. rustlib/README.md). Не собран — тихо остаёмся на Python.
 """
 
+import logging
+import os
 import re
 from typing import Dict, Any, Optional, Tuple
+
+log = logging.getLogger("yandi.boundaries")
+
+_rust_bd = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_bd():
+    global _rust_bd
+    if _rust_bd is None:
+        if os.environ.get("YANDI_BOUNDARIES_ENGINE") == "rust":
+            try:
+                import yandi_rs.boundaries as _rs
+                _rust_bd = _rs
+                log.warning("YANDI_BOUNDARIES_ENGINE=rust: используется Rust-реализация boundaries (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_BOUNDARIES_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_bd = False
+        else:
+            _rust_bd = False
+    return _rust_bd or None
 
 # ---- УРОВНИ ТОКСИЧНОСТИ ----
 class ToxicityLevel:
@@ -47,6 +76,9 @@ def detect_toxicity(text: str) -> Dict[str, Any]:
     Анализирует текст на наличие оскорблений и токсичности.
     Возвращает словарь с уровнем, найденными словами и рекомендацией.
     """
+    rs = _get_rust_bd()
+    if rs is not None:
+        return dict(rs.detect_toxicity(text or ""))
     text_lower = text.lower()
 
     severe_found = [w for w in SEVERE_INSULTS if w in text_lower]
@@ -84,6 +116,9 @@ def is_apology(text: str) -> Tuple[bool, bool]:
     Проверяет, является ли текст извинением.
     Возвращает: (is_apology, is_sincere)
     """
+    rs = _get_rust_bd()
+    if rs is not None:
+        return tuple(rs.is_apology(text or ""))
     text_lower = text.lower()
     apology_keywords = ["извини", "прости", "сорри", "sorry", "я не прав", "виноват", "не хотел", "неправ"]
 
@@ -110,6 +145,11 @@ def generate_response(level: str, session_state: Dict[str, Any]) -> str:
     """
     Генерирует ответ на основе уровня токсичности и состояния сессии.
     """
+    rs = _get_rust_bd()
+    if rs is not None:
+        # session_state в оригинале не используется — не передаём его через FFI, как и Python
+        # не читает его; сохранено дословно (см. модульный docstring).
+        return rs.generate_response(level or "")
     if level == ToxicityLevel.MILD:
         return ("Мне не нравится твой тон. Я не обязана это терпеть. "
                 "Попробуй задать вопрос иначе, без грубости.")
@@ -126,6 +166,9 @@ def generate_response(level: str, session_state: Dict[str, Any]) -> str:
     return ""
 
 def generate_apology_response(accepted: bool) -> str:
+    rs = _get_rust_bd()
+    if rs is not None:
+        return rs.generate_apology_response(bool(accepted))
     if accepted:
         return ("Я принимаю твои извинения. Давай продолжим диалог. "
                 "Помни: я — не робот-терпила. Я — личность, и я ценю уважение.")

@@ -9,6 +9,7 @@
 
 use pyo3::prelude::*;
 
+pub mod boundaries;
 pub mod claim_identity;
 pub mod claim_semantic_identity_hardening;
 pub mod claim_types;
@@ -23,6 +24,10 @@ pub mod web_login;
 #[pymodule]
 fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let sys_modules = py.import_bound("sys")?.getattr("modules")?;
+
+    let boundaries_mod = PyModule::new_bound(py, "boundaries")?;
+    boundaries::register(py, &boundaries_mod)?;
+    m.add_submodule(&boundaries_mod)?;
 
     let local_guard_mod = PyModule::new_bound(py, "local_guard")?;
     local_guard::register(py, &local_guard_mod)?;
@@ -68,6 +73,7 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
     // будущий подмодуль — см. README.md.
+    sys_modules.set_item("yandi_rs.boundaries", &boundaries_mod)?;
     sys_modules.set_item("yandi_rs.local_guard", &local_guard_mod)?;
     sys_modules.set_item("yandi_rs.web_login", &web_login_mod)?;
     sys_modules.set_item("yandi_rs.claim_identity", &claim_identity_mod)?;
