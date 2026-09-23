@@ -44,14 +44,44 @@ matching only, not fuzzy matching):
 Multilingual text is NOT translated or otherwise unified — a Russian and
 an English statement of the same fact hash differently, deliberately (see
 "semantic identity" above).
+
+Rust-перенос (2026-09-23): rustlib/yandi_rs/src/claim_identity.rs — построчный перевод всех
+четырёх публичных функций этого модуля. Доказан на совпадение тестом
+agent/claim_identity_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается переменной окружения
+YANDI_CLAIM_IDENTITY_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (`maturin develop`, см.
+rustlib/README.md). Не собран — тихо остаёмся на Python.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
+import os
 import re
 import unicodedata
 from typing import List
+
+log = logging.getLogger("yandi.claim_identity")
+
+_rust_ci = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_ci():
+    """См. модульный docstring — необязательный Rust-движок для всех четырёх функций ниже."""
+    global _rust_ci
+    if _rust_ci is None:
+        if os.environ.get("YANDI_CLAIM_IDENTITY_ENGINE") == "rust":
+            try:
+                import yandi_rs.claim_identity as _rs
+                _rust_ci = _rs
+                log.warning("YANDI_CLAIM_IDENTITY_ENGINE=rust: используется Rust-реализация claim_identity (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_CLAIM_IDENTITY_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_ci = False
+        else:
+            _rust_ci = False
+    return _rust_ci or None
+
 
 _TRAILING_PUNCT_RE = re.compile(r"[\s.!?…]+$")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -137,6 +167,9 @@ def canonicalize_claim_text(claim_text: str) -> str:
     """Pure normalization step, exposed separately so tests (and any
     future caller that wants the canonical string itself, not just its
     hash) don't have to re-derive it from compute_claim_content_hash()."""
+    rs = _get_rust_ci()
+    if rs is not None:
+        return rs.canonicalize_claim_text(claim_text or "")
     if not claim_text:
         return ""
     text = unicodedata.normalize("NFC", claim_text)
@@ -150,6 +183,9 @@ def compute_claim_content_hash(claim_text: str) -> "str | None":
     """Deterministic sha256 hex digest of the canonicalized claim text,
     or None if the claim text is empty/whitespace-only after
     normalization (no fabricated identity for degenerate input)."""
+    rs = _get_rust_ci()
+    if rs is not None:
+        return rs.compute_claim_content_hash(claim_text or "")
     canonical = canonicalize_claim_text(claim_text)
     if not canonical:
         return None
@@ -181,6 +217,9 @@ def extract_subject_anchors(claim_text: str) -> List[str]:
     hardening.py's entity guard calls the SAME function — one
     implementation of subject-anchor extraction, not two.
     """
+    rs = _get_rust_ci()
+    if rs is not None:
+        return list(rs.extract_subject_anchors(claim_text or ""))
     text = (claim_text or "").strip()
 
     if not text:
@@ -329,6 +368,9 @@ def extract_content_anchors(text: str) -> List[str]:
     majority of scientific sources this system retrieves) is far less
     inflected and is largely unaffected.
     """
+    rs = _get_rust_ci()
+    if rs is not None:
+        return list(rs.extract_content_anchors(text or ""))
     text = (text or "").strip()
     if not text:
         return []

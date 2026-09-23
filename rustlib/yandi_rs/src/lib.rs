@@ -9,6 +9,7 @@
 
 use pyo3::prelude::*;
 
+pub mod claim_identity;
 pub mod local_guard;
 pub mod web_login;
 
@@ -24,11 +25,16 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     web_login::register(py, &web_login_mod)?;
     m.add_submodule(&web_login_mod)?;
 
+    let claim_identity_mod = PyModule::new_bound(py, "claim_identity")?;
+    claim_identity::register(py, &claim_identity_mod)?;
+    m.add_submodule(&claim_identity_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
     // будущий подмодуль — см. README.md.
     sys_modules.set_item("yandi_rs.local_guard", &local_guard_mod)?;
     sys_modules.set_item("yandi_rs.web_login", &web_login_mod)?;
+    sys_modules.set_item("yandi_rs.claim_identity", &claim_identity_mod)?;
     Ok(())
 }
