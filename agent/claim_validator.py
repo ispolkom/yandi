@@ -8,17 +8,46 @@ agent/claim_validator.py — Валидатор атомарных утверж�
 - служебная информация
 
 Оставляет только осмысленные утверждения о мире.
+
+Rust-перенос (2026-09-23): rustlib/yandi_rs/src/claim_validator.rs — построчный перевод
+normalize_claim_text()/validate() (+ _looks_like_fact()). Класс ClaimValidator (счётчики,
+filter_claims/get_stats/summary) остаётся в Python — это оркестрация состояния, не чистая
+логика. Доказан на совпадение тестом agent/claim_validator_rust_parity_test.py. По умолчанию
+ВЫКЛЮЧЕН; включается переменной окружения YANDI_CLAIM_VALIDATOR_ENGINE=rust ПОСЛЕ сборки
+rustlib/yandi_rs (`maturin develop`, см. rustlib/README.md). Не собран — тихо остаёмся на Python.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import sys
 from pathlib import Path
 BASE = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE))
 
 import re
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Tuple
+
+log = logging.getLogger("yandi.claim_validator")
+
+_rust_cv = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_cv():
+    global _rust_cv
+    if _rust_cv is None:
+        if os.environ.get("YANDI_CLAIM_VALIDATOR_ENGINE") == "rust":
+            try:
+                import yandi_rs.claim_validator as _rs
+                _rust_cv = _rs
+                log.warning("YANDI_CLAIM_VALIDATOR_ENGINE=rust: используется Rust-реализация claim_validator (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_CLAIM_VALIDATOR_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_cv = False
+        else:
+            _rust_cv = False
+    return _rust_cv or None
 
 
 class ClaimValidator:
@@ -174,6 +203,9 @@ class ClaimValidator:
 
         Форматирование не должно определять epistemic судьбу claim.
         """
+        rs = _get_rust_cv()
+        if rs is not None:
+            return rs.normalize_claim_text(claim_text or "")
         text = (claim_text or "").strip()
 
         # Markdown bullets.
@@ -206,8 +238,12 @@ class ClaimValidator:
         Проверить claim.
         Возвращает: (is_valid, reason)
         """
+        rs = _get_rust_cv()
+        if rs is not None:
+            ok, reason = rs.validate(claim_text or "")
+            return bool(ok), str(reason)
         text = self.normalize_claim_text(claim_text)
-        
+
         # 1. Слишком короткие
         if len(text) < 20:
             return False, "too_short"

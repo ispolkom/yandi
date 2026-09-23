@@ -11,6 +11,7 @@ use pyo3::prelude::*;
 
 pub mod claim_identity;
 pub mod claim_semantic_identity_hardening;
+pub mod claim_validator;
 pub mod local_guard;
 pub mod source_quality;
 pub mod web_login;
@@ -39,6 +40,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     source_quality::register(py, &source_quality_mod)?;
     m.add_submodule(&source_quality_mod)?;
 
+    let claim_validator_mod = PyModule::new_bound(py, "claim_validator")?;
+    claim_validator::register(py, &claim_validator_mod)?;
+    m.add_submodule(&claim_validator_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -48,5 +53,6 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.claim_identity", &claim_identity_mod)?;
     sys_modules.set_item("yandi_rs.claim_semantic_identity_hardening", &hardening_mod)?;
     sys_modules.set_item("yandi_rs.source_quality", &source_quality_mod)?;
+    sys_modules.set_item("yandi_rs.claim_validator", &claim_validator_mod)?;
     Ok(())
 }
