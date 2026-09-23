@@ -25,12 +25,40 @@ FAIL-OPEN BY DESIGN: a missing or malformed tag means "nothing to
 record" (neutral IntensityResult, ok=False) and the ENTIRE original
 text is returned as the visible reply untouched — never truncate or
 hide part of a real reply because the tag parsing failed.
+
+Rust-перенос (2026-09-23): rustlib/yandi_rs/src/message_intensity.rs — построчный перевод
+parse_self_report()/_parse_structured()/_strip_all_markers()/intensity_from_state(). Доказан на
+совпадение тестом agent/message_intensity_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается
+переменной окружения YANDI_MESSAGE_INTENSITY_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs
+(`maturin develop`, см. rustlib/README.md). Не собран — тихо остаёмся на Python.
 """
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 from dataclasses import dataclass
+
+log = logging.getLogger("yandi.message_intensity")
+
+_rust_mi = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_mi():
+    global _rust_mi
+    if _rust_mi is None:
+        if os.environ.get("YANDI_MESSAGE_INTENSITY_ENGINE") == "rust":
+            try:
+                import yandi_rs.message_intensity as _rs
+                _rust_mi = _rs
+                log.warning("YANDI_MESSAGE_INTENSITY_ENGINE=rust: используется Rust-реализация message_intensity (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_MESSAGE_INTENSITY_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_mi = False
+        else:
+            _rust_mi = False
+    return _rust_mi or None
 from typing import Tuple
 
 STATE_MARKER = "###YANDI_STATE###"
@@ -101,6 +129,10 @@ def intensity_from_state(state: object, *, error: str = "") -> IntensityResult:
     responsible for separating visible reply from internal state before
     PET calls this function.
     """
+    rs = _get_rust_mi()
+    if rs is not None:
+        d = rs.intensity_from_state(state, error)
+        return IntensityResult(**d, spans=())
     if not isinstance(state, dict):
         return _neutral("semantic state missing or not an object")
     try:
@@ -161,6 +193,10 @@ def parse_self_report(raw: str) -> Tuple[str, IntensityResult]:
     docstring); falls through to the original free-text + trailing
     "###YANDI_STATE###"-family tag parsing, UNCHANGED, for anything that
     doesn't parse as that structured shape."""
+    rs = _get_rust_mi()
+    if rs is not None:
+        visible, d = rs.parse_self_report(raw or "")
+        return visible, IntensityResult(**d, spans=())
     stripped = raw.strip()
     if stripped.startswith("{"):
         try:
