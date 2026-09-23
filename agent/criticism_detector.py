@@ -1,10 +1,37 @@
 """
 agent/criticism_detector.py — Различение критики и оскорбления с учётом контекста.
+
+Rust-перенос (2026-09-23): rustlib/yandi_rs/src/criticism_detector.rs — построчный перевод
+analyze()/get_response_template(). По умолчанию ВЫКЛЮЧЕН; включается переменной окружения
+YANDI_CRITICISM_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (`maturin develop`, см.
+rustlib/README.md). Не собран — тихо остаёмся на Python.
 """
 
+import logging
+import os
 import re
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
+
+log = logging.getLogger("yandi.criticism_detector")
+
+_rust_cd = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_cd():
+    global _rust_cd
+    if _rust_cd is None:
+        if os.environ.get("YANDI_CRITICISM_ENGINE") == "rust":
+            try:
+                import yandi_rs.criticism_detector as _rs
+                _rust_cd = _rs
+                log.warning("YANDI_CRITICISM_ENGINE=rust: используется Rust-реализация criticism_detector (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_CRITICISM_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_cd = False
+        else:
+            _rust_cd = False
+    return _rust_cd or None
 
 
 @dataclass
@@ -90,6 +117,10 @@ class CriticismDetector:
         Анализирует текст с учётом контекста.
         context: {trust, irritation, respect, history_insults, history_criticism}
         """
+        rs = _get_rust_cd()
+        if rs is not None:
+            d = rs.analyze(text or "", context)
+            return CriticismAnalysis(**d)
         context = context or {}
         text_lower = text.lower()
         result = CriticismAnalysis()
@@ -260,6 +291,12 @@ class CriticismDetector:
         return min(0.5, score)
     
     def get_response_template(self, analysis: CriticismAnalysis, context: dict = None) -> dict:
+        rs = _get_rust_cd()
+        if rs is not None:
+            return dict(rs.get_response_template(
+                analysis.is_insult, analysis.target, analysis.is_constructive,
+                analysis.is_criticism, analysis.is_feedback, context,
+            ))
         context = context or {}
         trust = context.get("trust", 50)
         irritation = context.get("irritation", 10)
