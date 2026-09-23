@@ -9,13 +9,42 @@ agent/source_quality.py — единая оценка качества исто�
 - Source Quality Gate определяет пригодность источника как evidence.
 
 Логическое отношение source -> claim определяется отдельно через NLI.
+
+Rust-перенос (2026-09-23): rustlib/yandi_rs/src/source_quality.rs — построчный перевод
+evaluate_source_quality() и её приватных помощников (evaluate_evidence_directness() НЕ
+перенесена — она делает настоящий embedding-вызов, не чистая функция). Доказан на совпадение
+тестом agent/source_quality_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается переменной
+окружения YANDI_SOURCE_QUALITY_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (`maturin develop`,
+см. rustlib/README.md). Не собран — тихо остаёмся на Python.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass, field
 from typing import List
 from urllib.parse import urlparse
+
+log = logging.getLogger("yandi.source_quality")
+
+_rust_sq = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_sq():
+    global _rust_sq
+    if _rust_sq is None:
+        if os.environ.get("YANDI_SOURCE_QUALITY_ENGINE") == "rust":
+            try:
+                import yandi_rs.source_quality as _rs
+                _rust_sq = _rs
+                log.warning("YANDI_SOURCE_QUALITY_ENGINE=rust: используется Rust-реализация source_quality (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_SOURCE_QUALITY_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_sq = False
+        else:
+            _rust_sq = False
+    return _rust_sq or None
 
 
 @dataclass
@@ -359,6 +388,12 @@ def evaluate_source_quality(
     Это исключительно оценка пригодности самого источника
     как потенциального evidence.
     """
+    rs = _get_rust_sq()
+    if rs is not None:
+        # url/title/text: оригинал терпит None (внутренние "or ''"); source_type — НЕТ
+        # (падает на .lower()), поэтому здесь source_type передаём как есть, не подстилаем "web".
+        d = rs.evaluate_source_quality(url or "", title or "", text or "", source_type)
+        return SourceQualityResult(**d)
 
     reasons: List[str] = []
 
