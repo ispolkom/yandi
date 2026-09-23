@@ -9,10 +9,22 @@ agent/epistemic_router.py — Epistemic Classifier v4.2.
 
 ДОБАВЛЕНО v4.2:
 - Расширены маркеры для доменов religious и media_interpretation.
+
+Rust-перенос (2026-09-23): rustlib/yandi_rs/src/epistemic_router.rs — все "детекторные" функции
+(_detect_domain, _detect_hypothetical, _detect_negative_claim, _detect_testability,
+_detect_knowledge_stability, _get_answer_mode, _determine_analysis_depth,
+get_trust_cap_for_testability, get_trust_label_for_epistemic, get_response_mode_description,
+get_objectivity_score). classify_claim() НЕ перенесена — она лишь собирает
+EpistemicClassification из результатов этих функций плюс констант, переносить там нечего.
+Доказан на совпадение тестом agent/epistemic_router_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН;
+включается переменной окружения YANDI_EPISTEMIC_ROUTER_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs
+(`maturin develop`, см. rustlib/README.md). Не собран — тихо остаёмся на Python.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import sys
 import re
 from pathlib import Path
@@ -22,6 +34,26 @@ from enum import Enum
 
 BASE = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE))
+
+log = logging.getLogger("yandi.epistemic_router")
+
+_rust_er = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_er():
+    global _rust_er
+    if _rust_er is None:
+        if os.environ.get("YANDI_EPISTEMIC_ROUTER_ENGINE") == "rust":
+            try:
+                import yandi_rs.epistemic_router as _rs
+                _rust_er = _rs
+                log.warning("YANDI_EPISTEMIC_ROUTER_ENGINE=rust: используется Rust-реализация epistemic_router (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_EPISTEMIC_ROUTER_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_er = False
+        else:
+            _rust_er = False
+    return _rust_er or None
 
 from agent.claim_types import (
     ClaimType,
@@ -190,6 +222,9 @@ _DOMAIN_MARKERS = {
 
 
 def _detect_domain(q: str) -> Tuple[str, str, float]:
+    rs = _get_rust_er()
+    if rs is not None:
+        return tuple(rs.detect_domain(q or ""))
     scores = {}
     for domain, data in _DOMAIN_MARKERS.items():
         words = data.get("words", [])
@@ -214,6 +249,9 @@ def _detect_domain(q: str) -> Tuple[str, str, float]:
 
 
 def _detect_hypothetical(query: str) -> bool:
+    rs = _get_rust_er()
+    if rs is not None:
+        return bool(rs.detect_hypothetical(query or ""))
     markers = [
         "гипотеза", "теория", "предположительно", "возможно",
         "существовал", "могла", "не доказано", "гипотетический",
@@ -242,6 +280,9 @@ def _detect_negative_claim(query: str) -> bool:
     claim_evidence_retriever.py::_is_absence_claim (та же лексика,
     но применяется к отдельным claims, а не к целому query).
     """
+    rs = _get_rust_er()
+    if rs is not None:
+        return bool(rs.detect_negative_claim(query or ""))
     markers = [
         "не обнаружен", "не найден", "не зафиксирован",
         "не выявлен", "не установлен", "нет доказательств",
@@ -253,6 +294,9 @@ def _detect_negative_claim(query: str) -> bool:
 
 
 def _detect_testability(q: str, domain: str) -> Tuple[str, float]:
+    rs = _get_rust_er()
+    if rs is not None:
+        return tuple(rs.detect_testability(q or "", domain or ""))
     if domain in ["mathematical"]:
         return "fully_testable", 0.7
     if domain in ["procedural"]:
@@ -275,6 +319,9 @@ def _detect_testability(q: str, domain: str) -> Tuple[str, float]:
 
 
 def _detect_knowledge_stability(q: str, domain: str, testability: str) -> Tuple[str, float, str]:
+    rs = _get_rust_er()
+    if rs is not None:
+        return tuple(rs.detect_knowledge_stability(q or "", domain or "", testability or ""))
     q_lower = q.lower()
     markers = {
         "stable": ["доказано", "установлено", "известно", "факт", "закон", "аксиома", "константа"],
@@ -294,6 +341,9 @@ def _detect_knowledge_stability(q: str, domain: str, testability: str) -> Tuple[
 
 
 def _get_answer_mode(domain: str, testability: str) -> str:
+    rs = _get_rust_er()
+    if rs is not None:
+        return rs.get_answer_mode(domain or "", testability or "")
     if testability in ["interpretive", "non_falsifiable"]:
         return "pluralistic_contextual"
     if domain in ["scientific", "historical", "religious", "philosophical", 
@@ -304,6 +354,9 @@ def _get_answer_mode(domain: str, testability: str) -> str:
 
 
 def _determine_analysis_depth(domain: str, testability: str) -> str:
+    rs = _get_rust_er()
+    if rs is not None:
+        return rs.determine_analysis_depth(domain or "", testability or "")
     full_domains = {
         "religious", "philosophical", "historical", "axiological",
         "normative", "media_interpretation", "metaphysical",
@@ -315,6 +368,9 @@ def _determine_analysis_depth(domain: str, testability: str) -> str:
 
 
 def get_trust_cap_for_testability(testability: str) -> str:
+    rs = _get_rust_er()
+    if rs is not None:
+        return rs.get_trust_cap_for_testability(testability or "")
     return "PARTIALLY_SUPPORTED"
 
 
@@ -324,6 +380,9 @@ def get_objectivity_score(
     knowledge_stability: str,
     is_hypothetical: bool = False,
 ) -> Tuple[float, str, bool]:
+    rs = _get_rust_er()
+    if rs is not None:
+        return tuple(rs.get_objectivity_score(testability or "", domain or "", knowledge_stability or "", bool(is_hypothetical)))
     base_score = 0.1
 
     if domain in ["procedural"]:
@@ -436,10 +495,16 @@ def classify_claim(query: str, intent: str = "", confidence: float = 0.5) -> Epi
 
 
 def get_trust_label_for_epistemic(classification: EpistemicClassification) -> str:
+    rs = _get_rust_er()
+    if rs is not None:
+        return rs.get_trust_label_for_epistemic()
     return "PARTIALLY_SUPPORTED"
 
 
 def get_response_mode_description(mode: str) -> str:
+    rs = _get_rust_er()
+    if rs is not None:
+        return rs.get_response_mode_description(mode or "")
     descriptions = {
         "factual": "отвечать фактами (но это гипотеза)",
         "qualified_factual": "отвечать с оговорками о неопределённости",

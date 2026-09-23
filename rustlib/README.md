@@ -52,7 +52,8 @@ rustlib/
       claim_validator.rs          # перенос normalize_claim_text()/validate() (кусок 6, 2026-09-23)
       criticism_detector.rs        # перенос analyze()/get_response_template() (кусок 7, 2026-09-23)
       claim_types.rs                 # перенос всех 5 функций (кусок 8, 2026-09-23)
-      <следующий_модуль>.rs               # каждый новый перенос — один новый файл здесь
+      epistemic_router.rs             # перенос 11 детекторных функций (кусок 9, 2026-09-23)
+      <следующий_модуль>.rs                 # каждый новый перенос — один новый файл здесь
 ```
 
 **Почему один крейт `yandi_rs`, а не по крейту на модуль:** один скомпилированный `.so`, один
@@ -90,5 +91,6 @@ python -m pet.pet_local_guard_rust_parity_test   # доказательство 
 | `agent/claim_validator.py::ClaimValidator.normalize_claim_text/validate` (+ `_looks_like_fact`; фильтр мусорных claims — каждое извлечённое утверждение; сам класс со счётчиками остался в Python) | `yandi_rs/src/claim_validator.rs` | `YANDI_CLAIM_VALIDATOR_ENGINE=rust` | Собрано, 80 проверок + 2 внесённых мутанта пойманы (`agent/claim_validator_rust_parity_test.py`); та же символьная-vs-байтовая ловушка длины строки, что и в claim_identity.rs — уже знакомая, учтена сразу; в бою по умолчанию ВЫКЛЮЧЕНО |
 | `agent/criticism_detector.py::CriticismDetector.analyze/get_response_template` (критика vs оскорбление, каждое сообщение пользователя; своего regression-теста не было — сценарии выверены напрямую через реальный Python перед тем, как стать проверками, один пример из `__main__` модуля оказался НЕ тем, что подсказывала интуиция) | `yandi_rs/src/criticism_detector.rs` | `YANDI_CRITICISM_ENGINE=rust` | Собрано, 114 проверок + 1 внесённый мутант пойман массово (32 сценария) (`agent/criticism_detector_rust_parity_test.py`); в бою по умолчанию ВЫКЛЮЧЕНО |
 | `agent/claim_types.py` целиком (типы утверждений/режимы ответа; сами Enum-классы остались в Python — Rust работает со строковыми .value, Python-обёртка восстанавливает настоящий Enum) | `yandi_rs/src/claim_types.rs` | `YANDI_CLAIM_TYPES_ENGINE=rust` | Собрано, 61 проверка (включая явную проверку, что переключённая версия возвращает НАСТОЯЩИЙ Python Enum, не строку) + 1 внесённый мутант пойман (`agent/claim_types_rust_parity_test.py`); в бою по умолчанию ВЫКЛЮЧЕНО |
+| `agent/epistemic_router.py` — 11 детекторных функций (домен/гипотетичность/проверяемость/стабильность знания/объективность вопроса; `classify_claim()` сама НЕ перенесена — просто собирает датакласс из этих функций плюс констант) | `yandi_rs/src/epistemic_router.rs` | `YANDI_EPISTEMIC_ROUTER_ENGINE=rust` | Собрано, 779 проверок (включая полную интеграционную сверку `classify_claim()` целиком, все ~30 полей) + 1 внесённый мутант пойман (потребовалось усилить тест — первая версия не задевала домен `metaphysical` напрямую, ни один из примеров вопросов туда не попадал) (`agent/epistemic_router_rust_parity_test.py`); в бою по умолчанию ВЫКЛЮЧЕНО |
 
 **Переключатель — один env var на смысловую область**, не общий на весь `yandi_rs`: так владелец может включить один перенесённый кусок, не трогая остальные. Шаблон имени: `YANDI_<ОБЛАСТЬ>_ENGINE=rust` (`GUARD` — вход/охрана, `LOGIN` — сессии/пароль). Если однажды переключателей наберётся много и это станет неудобно — общий механизм можно ввести отдельным явным решением, не по умолчанию.
