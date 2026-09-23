@@ -1,9 +1,37 @@
 """
 agent/claim_types.py — Типы утверждений и режимы ответа для эпистемической классификации.
+
+Rust-перенос (2026-09-23): rustlib/yandi_rs/src/claim_types.rs — построчный перевод всех 5
+функций. Сами Enum-классы (ClaimType, ResponseMode, ...) остаются в Python — Rust работает с их
+строковыми .value, Python-обёртка восстанавливает настоящий Enum на выходе. По умолчанию
+ВЫКЛЮЧЕН; включается переменной окружения YANDI_CLAIM_TYPES_ENGINE=rust ПОСЛЕ сборки
+rustlib/yandi_rs (`maturin develop`, см. rustlib/README.md). Не собран — тихо остаёмся на Python.
 """
 
+import logging
+import os
 from enum import Enum
 from typing import Dict, List, Optional
+
+log = logging.getLogger("yandi.claim_types")
+
+_rust_ct = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_ct():
+    global _rust_ct
+    if _rust_ct is None:
+        if os.environ.get("YANDI_CLAIM_TYPES_ENGINE") == "rust":
+            try:
+                import yandi_rs.claim_types as _rs
+                _rust_ct = _rs
+                log.warning("YANDI_CLAIM_TYPES_ENGINE=rust: используется Rust-реализация claim_types (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_CLAIM_TYPES_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_ct = False
+        else:
+            _rust_ct = False
+    return _rust_ct or None
 
 
 class ClaimType(Enum):
@@ -64,11 +92,17 @@ CLAIM_TO_RESPONSE_MODE: Dict[ClaimType, ResponseMode] = {
 
 def get_response_mode(claim_type: ClaimType) -> ResponseMode:
     """Получить режим ответа для типа утверждения."""
+    rs = _get_rust_ct()
+    if rs is not None:
+        return ResponseMode(rs.get_response_mode(claim_type.value))
     return CLAIM_TO_RESPONSE_MODE.get(claim_type, ResponseMode.CONTEXTUAL)
 
 
 def should_use_web_for_type(claim_type: ClaimType) -> bool:
     """Определить, нужен ли веб-поиск для типа утверждения."""
+    rs = _get_rust_ct()
+    if rs is not None:
+        return bool(rs.should_use_web_for_type(claim_type.value))
     if claim_type in [ClaimType.PROCEDURAL, ClaimType.FACTUAL, ClaimType.DESCRIPTIVE_FACT]:
         return True
     if claim_type in [ClaimType.EMPIRICAL, ClaimType.THEORETICAL]:
@@ -80,6 +114,9 @@ def should_use_web_for_type(claim_type: ClaimType) -> bool:
 
 def guess_claim_type_by_text(text: str) -> ClaimType:
     """Угадать тип утверждения по тексту."""
+    rs = _get_rust_ct()
+    if rs is not None:
+        return ClaimType(rs.guess_claim_type_by_text(text or ""))
     text_lower = text.lower()
     
     # Метафизические маркеры
@@ -115,6 +152,9 @@ def guess_claim_type_by_text(text: str) -> ClaimType:
 
 def get_trust_cap_for_testability(testability: str) -> str:
     """Получить максимальный trust для уровня проверяемости."""
+    rs = _get_rust_ct()
+    if rs is not None:
+        return rs.get_trust_cap_for_testability(testability or "")
     caps = {
         "fully_testable": "STRONGLY_SUPPORTED",
         "partially_testable": "SUPPORTED",
@@ -139,4 +179,7 @@ RESPONSE_MODE_DESCRIPTIONS: Dict[ResponseMode, str] = {
 
 def get_response_mode_description(mode: ResponseMode) -> str:
     """Получить описание режима ответа."""
+    rs = _get_rust_ct()
+    if rs is not None:
+        return rs.get_response_mode_description(mode.value)
     return RESPONSE_MODE_DESCRIPTIONS.get(mode, "Стандартный режим")
