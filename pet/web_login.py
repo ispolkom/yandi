@@ -17,10 +17,17 @@ pet/web_login.py — вход по паролю во ВТОРУЮ веб-мор�
 Программы на этом же компьютере (агент, скрипты, curl) этого заголовка не шлют и проходят как раньше: для них вход по паролю не
 подходит, пока они не переехали за ноду (docs/STORAGE_PROTECTION.md, «Honest limits»). Расширение Firefox проходит только на своих
 адресах, как и раньше (pet/local_guard.py).
+
+Rust-перенос (2026-09-23): rustlib/yandi_rs/src/web_login.rs — построчный перевод классов Sessions/Throttle (сами определения
+классов здесь, в Python, остаются — их сабклассит pet_web_login_regression_test.py для собственных тестовых дублей; переносится
+то, что встаёт ВМЕСТО экземпляров-одиночек `sessions`/`throttle`). Доказан на совпадение тестом
+pet/pet_web_login_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается переменной окружения YANDI_LOGIN_ENGINE=rust ПОСЛЕ
+сборки rustlib/yandi_rs (`maturin develop`, см. rustlib/README.md). Не собран — тихо остаёмся на Python, сервер не падает.
 """
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
 import subprocess
@@ -32,6 +39,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from pet.local_guard import EXTENSION_ORIGIN_RE, is_extension_path
+
+log = logging.getLogger("yandi.web_login")
 
 COOKIE = "yandi_pet_session"                    # не совпадает с cookie ноды (cookie не различают порты одного адреса)
 SESSION_SECS = 12 * 3600
@@ -181,8 +190,36 @@ class Throttle:
         self.failures = 0
 
 
-sessions = Sessions()
-throttle = Throttle()
+# ── необязательный Rust-движок (см. модульный docstring выше) ────────────────
+def _make_sessions() -> "Sessions":
+    """Обычно Python Sessions(); если YANDI_LOGIN_ENGINE=rust и rustlib/yandi_rs собран — Rust-класс
+    с тем же публичным API (create/valid/end/clear/_clock). Отдельная функция (не инлайн), чтобы
+    pet_web_login_rust_parity_test.py могла вызвать её напрямую с любым состоянием окружения,
+    не полагаясь на то, что происходило при первом импорте модуля."""
+    if os.environ.get("YANDI_LOGIN_ENGINE") == "rust":
+        try:
+            from yandi_rs.web_login import Sessions as _RustSessions
+            log.warning("YANDI_LOGIN_ENGINE=rust: используется Rust-реализация Sessions (rustlib/yandi_rs)")
+            return _RustSessions()
+        except ImportError as e:
+            log.warning("YANDI_LOGIN_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python Sessions", e)
+    return Sessions()
+
+
+def _make_throttle() -> "Throttle":
+    """Sessions-аналог для Throttle — см. _make_sessions."""
+    if os.environ.get("YANDI_LOGIN_ENGINE") == "rust":
+        try:
+            from yandi_rs.web_login import Throttle as _RustThrottle
+            log.warning("YANDI_LOGIN_ENGINE=rust: используется Rust-реализация Throttle (rustlib/yandi_rs)")
+            return _RustThrottle()
+        except ImportError as e:
+            log.warning("YANDI_LOGIN_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python Throttle", e)
+    return Throttle()
+
+
+sessions = _make_sessions()
+throttle = _make_throttle()
 
 
 def reset_state() -> None:

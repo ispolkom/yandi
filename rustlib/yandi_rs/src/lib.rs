@@ -10,17 +10,25 @@
 use pyo3::prelude::*;
 
 pub mod local_guard;
+pub mod web_login;
 
 #[pymodule]
 fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let sys_modules = py.import_bound("sys")?.getattr("modules")?;
+
     let local_guard_mod = PyModule::new_bound(py, "local_guard")?;
     local_guard::register(py, &local_guard_mod)?;
     m.add_submodule(&local_guard_mod)?;
-    // Чтобы `import yandi_rs.local_guard` и `from yandi_rs.local_guard import x` тоже работали
-    // (без этого подмодуль виден только как атрибут yandi_rs.local_guard, но не как отдельный
-    // элемент sys.modules, что ломает некоторые формы импорта).
-    py.import_bound("sys")?
-        .getattr("modules")?
-        .set_item("yandi_rs.local_guard", &local_guard_mod)?;
+
+    let web_login_mod = PyModule::new_bound(py, "web_login")?;
+    web_login::register(py, &web_login_mod)?;
+    m.add_submodule(&web_login_mod)?;
+
+    // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
+    // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
+    // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
+    // будущий подмодуль — см. README.md.
+    sys_modules.set_item("yandi_rs.local_guard", &local_guard_mod)?;
+    sys_modules.set_item("yandi_rs.web_login", &web_login_mod)?;
     Ok(())
 }
