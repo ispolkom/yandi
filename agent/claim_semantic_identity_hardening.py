@@ -37,14 +37,42 @@ It can only ever DOWNGRADE equivalent -> different (fail toward safety,
 per the plan: "Recall может быть ниже. Лучше UNKNOWN/NOT_EQUIVALENT и
 дубликат, чем ложное объединение"). It never upgrades anything to
 equivalent, and never touches "contradicts" or "different" verdicts.
+
+Rust-перенос (2026-09-23): rustlib/yandi_rs/src/claim_semantic_identity_hardening.rs —
+построчный перенос hardening_guard() и всех паттернов. Доказан на совпадение тестом
+agent/claim_semantic_identity_hardening_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается
+переменной окружения YANDI_HARDENING_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (`maturin develop`,
+см. rustlib/README.md). Не собран — тихо остаёмся на Python.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 from typing import Optional
 
 from agent.claim_identity import extract_subject_anchors
+
+log = logging.getLogger("yandi.claim_semantic_identity_hardening")
+
+_rust_hardening = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_hardening():
+    global _rust_hardening
+    if _rust_hardening is None:
+        if os.environ.get("YANDI_HARDENING_ENGINE") == "rust":
+            try:
+                import yandi_rs.claim_semantic_identity_hardening as _rs
+                _rust_hardening = _rs
+                log.warning("YANDI_HARDENING_ENGINE=rust: используется Rust-реализация hardening_guard (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_HARDENING_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_hardening = False
+        else:
+            _rust_hardening = False
+    return _rust_hardening or None
 
 # Each dimension pair: (name, pattern_x, pattern_y). If text A matches
 # pattern_x but not pattern_y, and text B matches pattern_y but not
@@ -159,6 +187,11 @@ def hardening_guard(claim_a: str, claim_b: str) -> Optional[str]:
     equivalent, regardless of what the embedding+LLM judge said), or None
     if no guard fires.
     """
+    rs = _get_rust_hardening()
+    if rs is not None:
+        # Намеренно БЕЗ "or ''": оригинал тоже падает на None (re.search(None) -> TypeError),
+        # а не тихо трактует его как пустую строку — здесь поведение не меняем даже в мелочи.
+        return rs.hardening_guard(claim_a, claim_b)
     for name, pattern_x, pattern_y in _DIMENSION_PAIRS:
         side_a = _asymmetric(claim_a, pattern_x, pattern_y)
         side_b = _asymmetric(claim_b, pattern_x, pattern_y)

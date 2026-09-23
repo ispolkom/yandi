@@ -47,6 +47,7 @@ rustlib/
       local_guard.rs          # перенос pet/local_guard.py (кусок 1, 2026-09-23)
       web_login.rs             # перенос pet/web_login.py::Sessions/Throttle (кусок 2, 2026-09-23)
       claim_identity.rs         # перенос agent/claim_identity.py целиком (кусок 3, 2026-09-23)
+      claim_semantic_identity_hardening.rs  # перенос hardening_guard() (кусок 4, 2026-09-23)
       <следующий_модуль>.rs      # каждый новый перенос — один новый файл здесь
 ```
 
@@ -80,5 +81,6 @@ python -m pet.pet_local_guard_rust_parity_test   # доказательство 
 | `pet/local_guard.py` (только чистая логика решения; ASGI-обвязка осталась в Python) | `yandi_rs/src/local_guard.rs` | `YANDI_GUARD_ENGINE=rust` | Собрано, 68 сценариев + 2 внесённых мутанта пойманы (`pet/pet_local_guard_rust_parity_test.py`); в бою по умолчанию ВЫКЛЮЧЕНО |
 | `pet/web_login.py::Sessions, Throttle` (сессии + замедление подбора пароля; сами определения классов и маршруты остались в Python) | `yandi_rs/src/web_login.rs` | `YANDI_LOGIN_ENGINE=rust` | Собрано, полный временной сценарий + 2 внесённых мутанта пойманы (`pet/pet_web_login_rust_parity_test.py`); переставляемые часы (`_clock`) перенесены как настоящий Python-вызываемый объект — иначе существующие тесты, подменяющие время, перестали бы работать; в бою по умолчанию ВЫКЛЮЧЕНО |
 | `agent/claim_identity.py` целиком (canonicalize_claim_text, compute_claim_content_hash, extract_subject_anchors, extract_content_anchors — горячий путь, каждое извлечённое утверждение) | `yandi_rs/src/claim_identity.rs` | `YANDI_CLAIM_IDENTITY_ENGINE=rust` | Собрано, 200 проверок + 3 внесённых мутанта пойманы (`agent/claim_identity_rust_parity_test.py`); две реальные ловушки переноса задокументированы прямо в файле — символьная vs байтовая длина строки (кириллица), lookbehind/lookahead из Python `re` (крейт `regex` их не поддерживает — заменено ручным посимвольным поиском границы слова); в бою по умолчанию ВЫКЛЮЧЕНО |
+| `agent/claim_semantic_identity_hardening.py::hardening_guard` (regex-guard против ложного объединения разных claim'ов; переиспользует уже перенесённый extract_subject_anchors напрямую из Rust, не через Python) | `yandi_rs/src/claim_semantic_identity_hardening.rs` | `YANDI_HARDENING_ENGINE=rust` | Собрано, 127+ проверок (включая обратный порядок аргументов) + 3 внесённых мутанта пойманы (`agent/claim_semantic_identity_hardening_rust_parity_test.py`); реальная ошибка транскрипции найдена и исправлена ДО этого теста — пропущенный `(?i)` на одном из 14 паттернов, пойман собственным Rust-юнит-тестом; в бою по умолчанию ВЫКЛЮЧЕНО |
 
 **Переключатель — один env var на смысловую область**, не общий на весь `yandi_rs`: так владелец может включить один перенесённый кусок, не трогая остальные. Шаблон имени: `YANDI_<ОБЛАСТЬ>_ENGINE=rust` (`GUARD` — вход/охрана, `LOGIN` — сессии/пароль). Если однажды переключателей наберётся много и это станет неудобно — общий механизм можно ввести отдельным явным решением, не по умолчанию.
