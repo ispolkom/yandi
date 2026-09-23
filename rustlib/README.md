@@ -45,6 +45,7 @@ rustlib/
     src/
       lib.rs                 # регистрация подмодулей PyO3 — точка входа, почти не меняется
       boundaries.rs            # перенос agent/boundaries.py (кусок 11, 2026-09-23)
+      claim_answer_linker.rs    # перенос link_answer_to_claims() (кусок 12, 2026-09-23)
       local_guard.rs          # перенос pet/local_guard.py (кусок 1, 2026-09-23)
       web_login.rs             # перенос pet/web_login.py::Sessions/Throttle (кусок 2, 2026-09-23)
       claim_identity.rs         # перенос agent/claim_identity.py целиком (кусок 3, 2026-09-23)
@@ -97,5 +98,7 @@ python -m pet.pet_local_guard_rust_parity_test   # доказательство 
 | `agent/message_intensity.py::parse_self_report` (+ `intensity_from_state`, `_parse_structured`, `_strip_all_markers`; разбирает собственный "самоотчёт" модели о накале разговора — каждый ответ локальной модели) | `yandi_rs/src/message_intensity.rs` | `YANDI_MESSAGE_INTENSITY_ENGINE=rust` | Собрано, 113 проверок (включая точное совпадение диагностических сообщений об ошибках, не только поведения) + 1 внесённый мутант пойман (`agent/message_intensity_rust_parity_test.py`); Python `bool(x)`-truthiness любого JSON-значения воспроизведена явно (`json_truthy`), не Rust bool-каст; в бою по умолчанию ВЫКЛЮЧЕНО |
 
 | `agent/boundaries.py::detect_toxicity/is_apology/generate_response/generate_apology_response` (границы/токсичность/извинения; init_session_state и мутаторы состояния НЕ перенесены — тривиальная мутация dict) | `yandi_rs/src/boundaries.rs` | `YANDI_BOUNDARIES_ENGINE=rust` | Собрано, 52 проверки + 1 внесённый мутант пойман (`agent/boundaries_rust_parity_test.py`); та же символьная-vs-байтовая ловушка длины строки (в этот раз в `is_apology`'s искренность-по-длине); в бою по умолчанию ВЫКЛЮЧЕНО |
+
+| `agent/claim_answer_linker.py::ClaimAnswerLinker.link_answer_to_claims` (+ `_extract_key_phrases`/`_is_claim_supporting`; связывает финальный ответ с подкрепляющими claims — источник supporting_claim_ids в трейсе) | `yandi_rs/src/claim_answer_linker.rs` | `YANDI_CLAIM_ANSWER_LINKER_ENGINE=rust` | Собрано, 46 проверок + 1 внесённый мутант пойман (`agent/claim_answer_linker_rust_parity_test.py`); та же символьная-vs-байтовая ловушка длины строки (четвёртый раз подряд — систематический паттерн, проверяется теперь заранее в каждом новом куске); claim_id возвращается тем же Python-объектом, что был на входе (не приведён к строке); в бою по умолчанию ВЫКЛЮЧЕНО |
 
 **Переключатель — один env var на смысловую область**, не общий на весь `yandi_rs`: так владелец может включить один перенесённый кусок, не трогая остальные. Шаблон имени: `YANDI_<ОБЛАСТЬ>_ENGINE=rust` (`GUARD` — вход/охрана, `LOGIN` — сессии/пароль). Если однажды переключателей наберётся много и это станет неудобно — общий механизм можно ввести отдельным явным решением, не по умолчанию.

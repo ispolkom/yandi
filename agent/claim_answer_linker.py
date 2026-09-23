@@ -5,10 +5,19 @@ agent/claim_answer_linker.py — Связь ответа с claims для YANDI 
 В трейсе появляется supporting_claim_ids.
 
 Цель: каждое важное утверждение в ответе имеет происхождение.
+
+Rust-перенос (2026-09-23): rustlib/yandi_rs/src/claim_answer_linker.rs — _extract_key_phrases()/
+_is_claim_supporting()/link_answer_to_claims(). ClaimAnswerLinker как класс (linked_claims,
+get_summary, enrich_trace) остаётся в Python. Доказан на совпадение тестом
+agent/claim_answer_linker_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается переменной
+окружения YANDI_CLAIM_ANSWER_LINKER_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (`maturin develop`,
+см. rustlib/README.md). Не собран — тихо остаёмся на Python.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import sys
 from pathlib import Path
 BASE = Path(__file__).parent.parent
@@ -16,6 +25,26 @@ sys.path.insert(0, str(BASE))
 
 import re
 from typing import List, Dict, Any, Optional, Tuple
+
+log = logging.getLogger("yandi.claim_answer_linker")
+
+_rust_cal = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_cal():
+    global _rust_cal
+    if _rust_cal is None:
+        if os.environ.get("YANDI_CLAIM_ANSWER_LINKER_ENGINE") == "rust":
+            try:
+                import yandi_rs.claim_answer_linker as _rs
+                _rust_cal = _rs
+                log.warning("YANDI_CLAIM_ANSWER_LINKER_ENGINE=rust: используется Rust-реализация claim_answer_linker (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_CLAIM_ANSWER_LINKER_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_cal = False
+        else:
+            _rust_cal = False
+    return _rust_cal or None
 
 
 class ClaimAnswerLinker:
@@ -33,9 +62,12 @@ class ClaimAnswerLinker:
     ) -> Tuple[str, List[str]]:
         """
         Связать ответ с claims.
-        
+
         Возвращает: (answer, supporting_claim_ids)
         """
+        rs = _get_rust_cal()
+        if rs is not None:
+            return tuple(rs.link_answer_to_claims(answer or "", claims or []))
         if not claims:
             return answer, []
         
