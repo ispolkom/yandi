@@ -37,7 +37,21 @@ run_one() {
 }
 export -f run_one
 
-find agent pet llm_gateway contract -name '*_test.py' | sed 's/\.py$//; s#/#.#g' | sort | xargs -P "$JOBS" -I{} bash -c 'run_one {}'
+ALL_SUITES="$(find agent pet llm_gateway contract -name '*_test.py' | sed 's/\.py$//; s#/#.#g' | sort)"
+
+# A handful of suites start their OWN throwaway redis-server on a FIXED port (6379 — dictated by
+# pet/shared.py's hardcoded REDIS_URL, no per-test override exists), same as production. Run
+# side-by-side under -P "$JOBS" they can race for that one port and fail with nothing wrong in
+# either suite (confirmed 2026-09-23: each passes standalone and on a clean rerun). Serialize just
+# this small subset; everything else keeps running fully in parallel.
+PORT6379_SUITES="$(printf '%s\n' "$ALL_SUITES" | while read -r m; do
+  f="$(echo "$m" | tr '.' '/').py"
+  grep -q '"--port", "6379"' "$f" 2>/dev/null && echo "$m"
+done)"
+OTHER_SUITES="$(comm -23 <(printf '%s\n' "$ALL_SUITES") <(printf '%s\n' "$PORT6379_SUITES"))"
+
+[ -n "$PORT6379_SUITES" ] && printf '%s\n' "$PORT6379_SUITES" | xargs -P 1 -I{} bash -c 'run_one {}'
+[ -n "$OTHER_SUITES" ] && printf '%s\n' "$OTHER_SUITES" | xargs -P "$JOBS" -I{} bash -c 'run_one {}'
 
 total="$(wc -l <"$OUT/results.txt")"
 failed="$(awk '$1!=0 {print $2}' "$OUT/results.txt" | sort)"
