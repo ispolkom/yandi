@@ -20,11 +20,19 @@ pet/local_guard.py — «только своя веб-морда» для все
 
 Порядок в pet/council_chat_server.py: LocalOnlyMiddleware — самая внешняя прослойка (CORS её не обходит), CORS отвечает
 только расширению (не «всем»).
+
+Rust-перенос (2026-09-23): rustlib/yandi_rs/src/local_guard.rs — построчный перевод is_allowed_request/
+is_local_request/is_extension_path/_host_name на Rust, доказанный на совпадение тестом
+pet/pet_local_guard_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН — сервер работает на этой, Python-реализации,
+как и раньше; включается переменной окружения YANDI_GUARD_ENGINE=rust ПОСЛЕ того, как rustlib/yandi_rs собран
+(`maturin develop`, см. rustlib/README.md) и владелец сам решил попробовать. Если переменная стоит, а модуль не
+собран — тихо остаёмся на Python (с предупреждением в лог), сервер не падает.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 
 from fastapi import HTTPException, Request
@@ -54,10 +62,46 @@ def is_extension_path(path: str) -> bool:
     return path in EXTENSION_PATHS or any(path.startswith(p) and len(path) > len(p) for p in EXTENSION_PATH_PREFIXES)
 
 
+# ── необязательный Rust-движок (см. модульный docstring выше) ────────────────
+_rust_guard = None          # None = ещё не пробовали; False = пробовали, не вышло/не запрошено; модуль = подключён
+
+
+def _get_rust_guard():
+    global _rust_guard
+    if _rust_guard is None:
+        if os.environ.get("YANDI_GUARD_ENGINE") == "rust":
+            try:
+                import yandi_rs.local_guard as _rs
+                _rust_guard = _rs
+                log.warning("YANDI_GUARD_ENGINE=rust: используется Rust-реализация local_guard (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_GUARD_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_guard = False
+        else:
+            _rust_guard = False
+    return _rust_guard or None
+
+
+def _rust_headers(headers, host: str) -> dict:
+    """headers для yandi_rs: ключ есть только если заголовок реально был (см. rustlib/yandi_rs/src/local_guard.rs)."""
+    d = {"host": host}
+    origin = headers.get("origin")
+    if origin is not None:
+        d["origin"] = origin
+    fetch_site = headers.get("sec-fetch-site")
+    if fetch_site is not None:
+        d["sec-fetch-site"] = fetch_site
+    return d
+
+
 def is_allowed_request(headers, path: str | None = None) -> tuple[bool, str]:
     """(allowed, reason) for a request's headers (a mapping with case-insensitive get) and, when known, its path.
     With no path the extension is never allowed (strict form, for endpoints that only the own page may use)."""
     host = headers.get("host", "")
+    rs = _get_rust_guard()
+    if rs is not None:
+        allowed, reason = rs.is_allowed_request(_rust_headers(headers, host), path)
+        return bool(allowed), str(reason)
     if _host_name(host) not in LOOPBACK_HOSTS:
         return False, "запрос адресован не локальному хосту"
     origin = headers.get("origin")

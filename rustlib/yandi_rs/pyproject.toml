@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "yandi_rs"
+version = "0.1.0"
+description = "Rust-переносы отдельных модулей YANDI, вызываемые из Python (см. rustlib/README.md)"
+requires-python = ">=3.9"
+
+[tool.maturin]
+module-name = "yandi_rs"
+# исходники крейта лежат в rustlib/yandi_rs/ (этот же каталог) — путь по умолчанию, manifest-path не нужен

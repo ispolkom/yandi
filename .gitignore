@@ -55,3 +55,4 @@ Thumbs.db
 /ai/
 /goodwin.su/
 /*.pdf
+rustlib/target/
