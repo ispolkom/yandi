@@ -198,6 +198,7 @@ def main() -> int:
             mod.__file__ = us.__file__
             sys.modules[mod.__name__] = mod
             exec(compile(src.replace(old, new), us.__file__, "exec"), mod.__dict__)
+            mod._rust_us = False        # мутант портит ПИТОНОВСКУЮ проверку: Rust-делегирование (YANDI_UI_SETTINGS_ENGINE) его обошло бы
             return mod
         m = mutated('if any(k in api_in for k in ("key", "api_key", "token", "secret")):', "if False:")
         try:

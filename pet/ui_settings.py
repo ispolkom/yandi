@@ -22,6 +22,27 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+# Rust-перенос (2026-09-24): rustlib/yandi_rs/src/ui_settings.rs — `validate`. Доказан тестом pet/pet_ui_settings_rust_parity_test.py. По умолчанию
+# ВЫКЛЮЧЕН; включается YANDI_UI_SETTINGS_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs. Файл/права/запись (`load`/`save`) остаются здесь.
+# Посторонние типы входа и одинокие суррогаты идут прежним Python-путём; делегирует, только пока константы не менялись.
+_rust_us = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+_DEFAULT_CONSTS = (("local", "remote", "api"), ("openai", "anthropic", "other"), r"[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,127}", r"https?://[^\s/$.?#][^\s]*", 1024)
+
+
+def _get_rust_us():
+    global _rust_us
+    if _rust_us is None:
+        if os.environ.get("YANDI_UI_SETTINGS_ENGINE") == "rust":
+            try:
+                import yandi_rs.ui_settings as _rs
+                _rust_us = _rs
+            except ImportError:
+                _rust_us = False
+        else:
+            _rust_us = False
+    return _rust_us or None
+
+
 KINDS = ("local", "remote", "api")
 SERVICES = ("openai", "anthropic", "other")
 _MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,127}")
@@ -56,6 +77,16 @@ def _text(value: Any, name: str, limit: int) -> str:
 
 def validate(doc: Any) -> dict[str, Any]:
     """Документ от формы -> проверенный документ; неизвестное и ключ API — ошибка, а не молчаливая правка."""
+    rs = _get_rust_us()
+    if rs is not None and (KINDS, SERVICES, _MODEL_RE.pattern, _ADDR_RE.pattern, MAX_PATH) == _DEFAULT_CONSTS:
+        try:
+            r = rs.validate(doc)
+        except UnicodeEncodeError:
+            r = None
+        if r is not None:
+            if r[0]:
+                return r[1]
+            raise SettingsError(r[1])
     if not isinstance(doc, dict):
         raise SettingsError("ожидался JSON-объект")
     unknown = set(doc) - {"voice", "advisors", "local", "remote", "api"}
