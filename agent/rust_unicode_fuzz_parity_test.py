@@ -67,6 +67,7 @@ def main() -> int:
     import agent.source_independence_prototype as sip
     import agent.source_quality as sq
     import agent.target_router as tr
+    import agent.tools.tool_shell as tshell
     import pet.local_guard as lg
     from agent.claim_validator import ClaimValidator
     from agent.criticism_detector import CriticismDetector
@@ -93,6 +94,7 @@ def main() -> int:
     import yandi_rs.source_clustering as r_sc
     import yandi_rs.source_quality as r_sq
     import yandi_rs.target_router as r_tr
+    import yandi_rs.tool_shell as r_tsh
 
     rng = random.Random(int(os.environ.get("FUZZ_SEED", "20260924")))
 
@@ -266,6 +268,8 @@ def main() -> int:
         secret = rng.choice(["sk-" + "a" * rng.randint(18, 24), "AKIA" + "A1" * rng.randint(7, 9), "hf_" + "b" * rng.randint(28, 33), "api_key = " + "k" * rng.randint(18, 24),
                              'password = "' + "p" * rng.randint(5, 8) + '"', "https://u:p@example.com", "-----BEGIN RSA PRIVATE KEY-----", "token='" + "t" * rng.randint(14, 18) + "'"])
         stext = t + rng.choice(["", " ", "_"]) + secret + rng.choice(["", " ", "_", "\u0301"]) + u
+        cmp("tool_shell.allowed", tshell._allowed, lambda c: r_tsh.allowed(c, False, False),
+            rng.choice(["ls", "python3", "cargo test", "echo", "rm", "ls |", "cat ..", "pwd"]) + rng.choice(TRICKY + ["", " "]) + t[:24])
         cmp("policy.scan_text", lambda x: pscan.scan_text(x), lambda x: [{"type": k, "match": m, "pos": p, "source": "<text>"} for k, m, p in r_pol.scan_text(x)], stext)
         cmp("policy.check_shell", peng.check_shell, lambda x: (lambda a, r, c: {"allowed": a, "reason": r, "cmd": c})(*r_pol.check_shell(x)),
             rng.choice(["ls", "rm -rf", "git status", "lsblk", ""]) + rng.choice(TRICKY + ["", " "]) + t[:20])

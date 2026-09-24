@@ -1,7 +1,13 @@
 """
 tool_shell.py — sandbox bash для агента.
 Только команды из белого списка. Рабочая директория — PROJECT_ROOT.
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/tool_shell.rs — охранный шлюз `_allowed` (выполнение — subprocess — остаётся
+здесь). Доказан тестом agent/tool_shell_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается переменной окружения
+YANDI_TOOL_SHELL_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (см. rustlib/README.md). Делегирует, только пока WHITELIST/BANNED
+не изменены; флаги AGENT_SHELL_FULL / AGENT_SHELL_NET читаются здесь при каждом вызове.
 """
+import logging
 import re
 import subprocess
 from pathlib import Path
@@ -32,7 +38,33 @@ BANNED = [
 ]
 
 
+_log = logging.getLogger("yandi.tool_shell")
+_rust_ts = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_ts():
+    global _rust_ts
+    if _rust_ts is None:
+        if _os_mod.environ.get("YANDI_TOOL_SHELL_ENGINE") == "rust":
+            try:
+                import yandi_rs.tool_shell as _rs
+                _rust_ts = _rs
+                _log.warning("YANDI_TOOL_SHELL_ENGINE=rust: используется Rust-реализация tool_shell (rustlib/yandi_rs)")
+            except ImportError as e:
+                _log.warning("YANDI_TOOL_SHELL_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_ts = False
+        else:
+            _rust_ts = False
+    return _rust_ts or None
+
+
+_DEFAULT_TABLES = (tuple(WHITELIST), tuple(BANNED))
+
+
 def _allowed(cmd: str) -> bool:
+    rs = _get_rust_ts()
+    if rs is not None and isinstance(cmd, str) and (tuple(WHITELIST), tuple(BANNED)) == _DEFAULT_TABLES:
+        return rs.allowed(cmd, bool(_os_mod.environ.get("AGENT_SHELL_FULL")), bool(_os_mod.environ.get("AGENT_SHELL_NET")))
     cmd = cmd.strip()
     # Полный доступ если разрешён
     if _os_mod.environ.get("AGENT_SHELL_FULL"):

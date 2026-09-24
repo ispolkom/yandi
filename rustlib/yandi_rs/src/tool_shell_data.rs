@@ -1,0 +1,4 @@
+//! АВТОГЕНЕРИРОВАНО rustlib/gen_tool_shell_data.py из agent/tools/tool_shell.py — не править руками.
+
+pub static WHITELIST: &[&str] = &[r##"^ls(\s|$)"##, r##"^find\s"##, r##"^cat\s"##, r##"^head\s"##, r##"^tail\s"##, r##"^grep\s"##, r##"^wc\s"##, r##"^echo\s"##, r##"^pwd$"##, r##"^date$"##, r##"^mkdir\s"##, r##"^touch\s"##, r##"^python(\d[\d.]*)?(\s|$)"##, r##"^python3(\s|$)"##, r##"^pytest(\s|$)"##, r##"^cargo\s(test|check|build|fmt|clippy)"##, r##"^redis-cli(\s|$)"##, r##"^systemctl\s(is-active|status)\s"##, r##"^du\s"##, r##"^df\s"##, r##"^free(\s|$)"##, r##"^ps\s"##];
+pub static BANNED: &[&str] = &[r##"\brm\b"##, r##"\bmv\b"##, r##"\bcp\b"##, r##"\bwget\b"##, r##"\bcurl\b"##, r##"\bchmod\b"##, r##"\bchown\b"##, r##"\bsudo\b"##, r##"\bsu\b"##, r##"\bkill\b"##, r##"\bpkill\b"##, r##"\breboot\b"##, r##"\bshutdown\b"##, r##"[|&;`$]"##, r##"\.\."##];

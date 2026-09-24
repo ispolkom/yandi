@@ -38,6 +38,7 @@ mod resolver_data;    // данные: таблицы object/entity resolver, с
 mod trust_data;       // данные: таблица рангов доверия, сгенерирована из Python
 mod fcc_data;         // данные: стоп-слова final_claim_coverage, сгенерированы из Python
 mod policy_data;      // данные: паттерны/списки политики безопасности, сгенерированы из Python
+mod tool_shell_data;  // данные: паттерны охранного шлюза shell, сгенерированы из Python
 mod py_icase_table;   // данные: группы IGNORECASE Python, см. gen_py_icase_table.py
 mod py_regex;         // транслятор паттернов Python re -> крейт regex
 mod py_decimal_table; // данные: цифры Unicode для py_float, см. gen_py_decimal_table.py
@@ -46,6 +47,7 @@ mod py_word_table; // данные (не подмодуль Python): точна�
 pub mod source_clustering;
 pub mod source_quality;
 pub mod target_router;
+pub mod tool_shell;
 pub mod trust_gate;
 pub mod web_login;
 
@@ -161,6 +163,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     policy::register(py, &policy_mod)?;
     m.add_submodule(&policy_mod)?;
 
+    let tool_shell_mod = PyModule::new_bound(py, "tool_shell")?;
+    tool_shell::register(py, &tool_shell_mod)?;
+    m.add_submodule(&tool_shell_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -179,6 +185,7 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.epistemic_router", &epistemic_router_mod)?;
     sys_modules.set_item("yandi_rs.message_intensity", &message_intensity_mod)?;
     sys_modules.set_item("yandi_rs.orch_risk", &orch_risk_mod)?;
+    sys_modules.set_item("yandi_rs.tool_shell", &tool_shell_mod)?;
     sys_modules.set_item("yandi_rs.policy", &policy_mod)?;
     sys_modules.set_item("yandi_rs.final_claim_coverage", &final_claim_coverage_mod)?;
     sys_modules.set_item("yandi_rs.canonical_trust", &canonical_trust_mod)?;
