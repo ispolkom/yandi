@@ -11,6 +11,7 @@ use pyo3::prelude::*;
 
 pub mod boundaries;
 pub mod claim_answer_linker;
+pub mod claim_evidence_retriever;
 pub mod claim_identity;
 pub mod claim_semantic_identity_hardening;
 pub mod claim_types;
@@ -41,6 +42,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let claim_answer_linker_mod = PyModule::new_bound(py, "claim_answer_linker")?;
     claim_answer_linker::register(py, &claim_answer_linker_mod)?;
     m.add_submodule(&claim_answer_linker_mod)?;
+
+    let claim_evidence_retriever_mod = PyModule::new_bound(py, "claim_evidence_retriever")?;
+    claim_evidence_retriever::register(py, &claim_evidence_retriever_mod)?;
+    m.add_submodule(&claim_evidence_retriever_mod)?;
 
     let claim_identity_mod = PyModule::new_bound(py, "claim_identity")?;
     claim_identity::register(py, &claim_identity_mod)?;
@@ -82,6 +87,7 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.claim_answer_linker", &claim_answer_linker_mod)?;
     sys_modules.set_item("yandi_rs.local_guard", &local_guard_mod)?;
     sys_modules.set_item("yandi_rs.web_login", &web_login_mod)?;
+    sys_modules.set_item("yandi_rs.claim_evidence_retriever", &claim_evidence_retriever_mod)?;
     sys_modules.set_item("yandi_rs.claim_identity", &claim_identity_mod)?;
     sys_modules.set_item("yandi_rs.claim_semantic_identity_hardening", &hardening_mod)?;
     sys_modules.set_item("yandi_rs.source_quality", &source_quality_mod)?;

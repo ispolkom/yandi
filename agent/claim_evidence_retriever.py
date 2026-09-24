@@ -20,11 +20,23 @@ Claim-specific evidence retrieval.
       -> EvidenceRecord-compatible dict
 
 Логическое отношение evidence -> claim позже определяет NLI.
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/claim_evidence_retriever.rs — ТОЛЬКО чистый
+подкластер existence-question/claim-role классификации (_is_absence_claim,
+_is_existence_question, _extract_existence_target, _target_overlap, _classify_claim_role).
+Остальной модуль делает реальный сетевой retrieval — не переносится и не портируется целиком.
+_claim_retrieval_priority() НЕ перенесена — она вызывает impure _query_relevance_score
+(embedding). Доказан на совпадение тестом agent/claim_evidence_retriever_rust_parity_test.py.
+По умолчанию ВЫКЛЮЧЕН; включается переменной окружения YANDI_CLAIM_EVIDENCE_RETRIEVER_ENGINE=rust
+ПОСЛЕ сборки rustlib/yandi_rs (`maturin develop`, см. rustlib/README.md). Не собран — тихо
+остаёмся на Python.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
+import logging
+import os
 import threading
 import time
 
@@ -32,6 +44,27 @@ import json
 import re
 import uuid
 from typing import Any, Dict, List
+
+log = logging.getLogger("yandi.claim_evidence_retriever")
+
+_rust_cer = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_cer():
+    global _rust_cer
+    if _rust_cer is None:
+        if os.environ.get("YANDI_CLAIM_EVIDENCE_RETRIEVER_ENGINE") == "rust":
+            try:
+                import yandi_rs.claim_evidence_retriever as _rs
+                _rust_cer = _rs
+                log.warning("YANDI_CLAIM_EVIDENCE_RETRIEVER_ENGINE=rust: используется Rust-реализация claim_evidence_retriever (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_CLAIM_EVIDENCE_RETRIEVER_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_cer = False
+        else:
+            _rust_cer = False
+    return _rust_cer or None
+
 
 from agent.orch_schemas import WebQueryResult
 from agent.orch_web_query import _call_ollama
@@ -1270,6 +1303,10 @@ def _is_absence_claim(claim_text: str) -> bool:
     Чисто лексическая эвристика (как и остальной priority scoring
     в этом модуле) — не LLM, не epistemic вывод.
     """
+    rs = _get_rust_cer()
+    if rs is not None:
+        return rs.is_absence_claim(claim_text or "")
+
     lower = (claim_text or "").lower()
 
     return any(
@@ -1347,6 +1384,9 @@ _EVIDENCE_INSTRUMENT_MARKERS = (
 
 def _is_existence_question(query: str) -> bool:
     """Query имеет структуру "есть ли X" — распознаётся без учёта предмета."""
+    rs = _get_rust_cer()
+    if rs is not None:
+        return rs.is_existence_question(query or "")
     return bool(_EXISTENCE_QUESTION_PATTERN.search(query or ""))
 
 
@@ -1361,6 +1401,10 @@ def _extract_existence_target(query: str) -> List[str]:
     Достаточно для сравнения claim-текстов лексическим
     перекрытием — большего здесь не требуется.
     """
+    rs = _get_rust_cer()
+    if rs is not None:
+        return list(rs.extract_existence_target(query or ""))
+
     query = (query or "").strip()
 
     m = _EXISTENCE_TARGET_PATTERN.search(query)
@@ -1390,6 +1434,10 @@ def _target_overlap(claim_lower: str, target_words: List[str]) -> bool:
     ~2 символа (обычно падежное окончание), но не короче 3 —
     работает и для 4-буквенных, и для длинных слов.
     """
+    rs = _get_rust_cer()
+    if rs is not None:
+        return rs.target_overlap(claim_lower, list(target_words))
+
     return any(
         word[:max(3, len(word) - 2)] in claim_lower
         for word in target_words
@@ -1415,6 +1463,10 @@ def _classify_claim_role(
         None                    — query не existence-question,
                                    role-логика не применяется
     """
+    rs = _get_rust_cer()
+    if rs is not None:
+        return dict(rs.classify_claim_role(claim_text or "", query or ""))
+
     if not _is_existence_question(query):
         return {
             "role": None,
