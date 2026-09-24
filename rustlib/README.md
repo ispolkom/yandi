@@ -132,6 +132,53 @@ python -m pet.pet_local_guard_rust_parity_test   # доказательство 
 
 **Переключатель — один env var на смысловую область**, не общий на весь `yandi_rs`: так владелец может включить один перенесённый кусок, не трогая остальные. Шаблон имени: `YANDI_<ОБЛАСТЬ>_ENGINE=rust` (`GUARD` — вход/охрана, `LOGIN` — сессии/пароль). Если однажды переключателей наберётся много и это станет неудобно — общий механизм можно ввести отдельным явным решением, не по умолчанию.
 
+## Что реально выгодно включать (замер 2026-09-24)
+
+`scripts/rust_bench.py` меряет Python и Rust через ПУБЛИЧНЫЙ Python-API (то есть с накладными расходами на вызов через
+границу PyO3 и обёртку) на реалистичных входах — один процесс, `maturin develop --release`, Python 3.11.2:
+
+| Функция | Python, мкс | Rust, мкс | Ускорение |
+|---|---:|---:|---:|
+| `claim_identity.canonicalize_claim_text` | 10.3 | 7.8 | ×1.3 |
+| `claim_identity.extract_subject_anchors` | 100.4 | 19.7 | ×5.1 |
+| `claim_validator.validate` | 73.2 | 8.2 | ×8.9 |
+| `hardening_guard` | 256.2 | 16.6 | ×15.4 |
+| `criticism_detector.analyze` | 9.0 | 7.2 | ×1.3 |
+| `boundaries.detect_toxicity` | 3.6 | 2.5 | ×1.4 |
+| `claim_answer_linker.link` | 27.8 | 29.0 | ≈ без разницы |
+| `claim_evidence_retriever.classify_role` | 7.7 | 7.4 | ≈ без разницы |
+| `source_quality.evaluate` | 22.9 | 32.1 | медленнее ×1.4 |
+| `epistemic_router.detect_domain` | 18.9 | 3.6 | ×5.2 |
+| `message_intensity.parse_self_report` | 12.5 | 4.0 | ×3.1 |
+| `orch_risk.assess_risk` | 3.2 | 2.3 | ×1.4 |
+| `intent_router.detect_intent` | 124.1 | 22.2 | ×5.6 |
+| `target_router.detect_target` | 11.5 | 2.5 | ×4.7 |
+| `personal_boundary.analyze` | 9.8 | 3.9 | ×2.5 |
+| `scene_builder.build` | 81.4 | 13.7 | ×5.9 |
+| `object_resolver.resolve` | 59.5 | 8.5 | ×7.0 |
+| `entity_resolver.resolve` | 4.6 | 3.2 | ×1.4 |
+| `claim_graph.extract_claims (4 evidence)` | 1,885.5 | 487.0 | ×3.9 |
+| `claim_graph._build_graph (30 утверждений)` | 3,717.1 | 670.8 | ×5.5 |
+| `trust_gate.apply_epistemic_trust_adjustment` | 4.1 | 5.7 | медленнее ×1.4 |
+| `trust_gate._calculate_delta_factors` | 2.4 | 2.1 | ×1.2 |
+| `canonical_trust.compute` | 0.8 | 0.8 | медленнее ×1.1 |
+| `local_guard.is_allowed_request` | 0.8 | 1.4 | медленнее ×1.7 |
+| `source_clustering.assign (30 источников)` | 132,779.2 | 10,792.6 | ×12.3 |
+| `source_clustering.assign (60 источников)` | 411,851.9 | 39,504.0 | ×10.4 |
+
+**Вывод (честный):**
+* **Стоит включать ради скорости** (ускорение ×5 и выше, на горячем пути каждого запроса или на больших наборах):
+  `YANDI_SOURCE_CLUSTERING_ENGINE` (×11–12, растёт с размером пула источников — 391 мс → 33 мс на 60 источниках),
+  `YANDI_CLAIM_GRAPH_ENGINE` (×6–7), `YANDI_HARDENING_ENGINE` (×12), `YANDI_CLAIM_VALIDATOR_ENGINE` (×10),
+  `YANDI_OBJECT_RESOLVER_ENGINE` (×8), `YANDI_INTENT_ROUTER_ENGINE` (×5), `YANDI_TARGET_ROUTER_ENGINE` (×4–5).
+* **Умеренно** (×2–4): `SCENE_BUILDER`, `CLAIM_IDENTITY` (якоря), `EPISTEMIC_ROUTER`, `MESSAGE_INTENSITY`.
+* **Разницы почти нет** (микросекунды; вызов через границу съедает выигрыш): `CRITICISM`, `BOUNDARIES`, `ANSWER_LINKER`,
+  `CLAIM_EVIDENCE_RETRIEVER`, `SOURCE_QUALITY`, `ORCH_RISK`, `ENTITY_RESOLVER`, `PERSONAL_BOUNDARY`.
+* **Не включать ради скорости** — на ~20% медленнее из-за накладных расходов на вызов: `TRUST_GATE`, `CANONICAL_TRUST`,
+  `GUARD` (`local_guard`). Они перенесены ради ЕДИНСТВЕННОГО источника правды при будущем ядре на Rust (и как отработанная
+  методика), а не ради скорости; `LOGIN` — по той же причине (безопасность/будущее ядро).
+* Правило «не менять Python по умолчанию» остаётся в силе: всё выключено, включает владелец сам, по одному переключателю.
+
 ## Ревизия точности срезов 1–15 (2026-09-24) — что нашли и исправили
 
 После 15-го среза я прогнал ВСЕ Rust-переключатели включёнными и сверил перенесённые модули с исходниками
