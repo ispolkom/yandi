@@ -70,12 +70,19 @@ Python как обычный нативный модуль (через [PyO3](ht
 `strip`/`repr`/`json.loads` (с ТОЧНЫМИ текстами ошибок) берутся из `yandi_rs`.
 
 Перенесено (чистая часть, без сети): `client._build_messages`/`_append_system_instruction`, `_contract_from_response_format`, `_strip_think_blocks`,
-`_looks_like_internal_state_fragment`, `_state_schema_prompt_hint` (со Скрытой странностью оригинала: `required` строкой = множество символов; Python-точное `str()` чисел —
+`_looks_like_internal_state_fragment`, `_state_schema_prompt_hint` (со странностью оригинала: `required` строкой = множество символов; Python-точное `str()` чисел —
 `1e-07`, `1e+16`), `_semantic_result_schema`, `_semantic_contract_from_target`, `_state_valid_for_requirement`, `_normalize_semantic_completion` (структурный и «маркерный»
 режимы, все ветки ошибок), `vector_space` (отпечаток, `compatible`). Проверено ~15,5 тыс. сравнений (по значению И порядку ключей) + **42 из 43 внесённых мутантов
 пойманы, 1 эквивалентен** (страховочное обнуление `state`, которое и так уже сделано выше по коду).
 Известные расхождения родного Rust с Python-объектами (не проверяются): JSON с NaN/Infinity или целыми вне i64 в `state`, одинокие суррогаты; невалидная схема с `required`
-числом (Python бросает TypeError). Дальше по плану: `remote_backend`/`llamacpp_backend`/`ollama_backend` (reqwest), `secure_store` (rusqlite + `crypto.rs`), `resolve_target`, `complete/embed`.
+числом (Python бросает TypeError). 
+**Срез 40 — удалённые бэкенды (`remote.rs`, `transport.rs`):** OpenAI chat completions, Anthropic Messages, OpenAI embeddings. Запрос строится и ответ разбирается ЧИСТЫМИ функциями;
+отправка — через `Transport` (блокирующий `reqwest`, env-прокси игнорируются, как `trust_env = False`). Дифференциальный тест `llm_gateway/native_remote_parity_test.py`: ОДИН локальный HTTP-сервер
+получает запрос и от Python (`requests`), и от Rust (`reqwest`); сравнивается то, ЧТО ушло (сырой путь, значимые заголовки, тело — значение и порядок ключей), и то, что вернулось (текст/метаданные или ошибка).
+233 сценария, включая точные тексты ошибок статусов HTTP (`500 Server Error: … for url: …`), точный отказ Anthropic-embeddings, кривые тела, соединение отклонено, таймаут; **40 из 41 внесённого мутанта пойманы, 1 эквивалентен**.
+Расхождения, не считающиеся ошибкой: деталь ошибки СОЕДИНЕНИЯ/разбора JSON (текст Python-исключения не воспроизводится — сравнивается префикс `модель @ адрес: `); непустое НЕстроковое `content` в ответе OpenAI (Python отдаёт как есть, Rust — ошибка формата).
+Мост отпускает GIL на время сети (иначе тестовый сервер на Python в соседнем потоке не мог бы ответить). ПЕСОЧНИЦА: `maturin develop` для yandi_llm требует metadata со всеми платформами (крейты macOS не в кэше) — там сборка вручную `cargo build --release` + копия `.so`; у владельца (с сетью) обычный `maturin develop`.
+Дальше по плану: `llamacpp_backend`/`ollama_backend`, `secure_store` (rusqlite + `crypto.rs`), `resolve_target`, `complete/embed`.
 
 ## Структура (не меняется по мере роста)
 

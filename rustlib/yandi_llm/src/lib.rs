@@ -8,7 +8,9 @@
 
 pub mod messages;
 pub mod pyfmt;
+pub mod remote;
 pub mod semantic;
+pub mod transport;
 pub mod types;
 pub mod vector_space;
 

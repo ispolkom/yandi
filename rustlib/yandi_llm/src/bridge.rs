@@ -4,6 +4,8 @@ use pyo3::prelude::*;
 use serde_json::{json, Map, Value};
 
 use crate::messages::{append_system_instruction, build_messages, SystemArg};
+use crate::remote::{self, GenerateParams};
+use crate::transport::ReqwestTransport;
 use crate::semantic::*;
 use crate::types::*;
 use crate::vector_space::*;
@@ -73,14 +75,47 @@ fn dispatch(name: &str, args: &Value) -> Result<Value, String> {
             };
             json!(compatible(&conv(a("a"))?, &conv(a("b"))?))
         }
+        "remote_generate" => {
+            let msgs: Vec<Value> = match a("messages") {
+                Value::Array(m) => m,
+                _ => vec![],
+            };
+            let p = GenerateParams {
+                temperature: a("temperature").as_f64(),
+                max_tokens: a("max_tokens").as_i64(),
+                response_format: a("response_format").as_str().map(String::from),
+                stop: match a("stop") {
+                    Value::Array(x) => Some(x.iter().filter_map(|v| v.as_str().map(String::from)).collect()),
+                    _ => None,
+                },
+                timeout: a("timeout").as_u64().unwrap_or(0),
+            };
+            let t = ReqwestTransport::new();
+            match remote::generate(&t, &msgs, a("base_url").as_str().unwrap_or(""), a("protocol").as_str().unwrap_or(""), a("model").as_str().unwrap_or(""), a("api_key_env").as_str(), &p) {
+                Ok((text, meta)) => json!({"ok": {"text": text, "meta": meta}}),
+                Err(e) => json!({"error": e.0}),
+            }
+        }
+        "remote_embed" => {
+            let texts: Vec<String> = match a("texts") {
+                Value::Array(x) => x.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+                _ => vec![],
+            };
+            let t = ReqwestTransport::new();
+            match remote::embed(&t, &texts, a("base_url").as_str().unwrap_or(""), a("protocol").as_str().unwrap_or(""), a("model").as_str().unwrap_or(""), a("api_key_env").as_str(), a("timeout").as_u64().unwrap_or(0)) {
+                Ok((vectors, meta)) => json!({"ok": {"vectors": vectors, "meta": meta}}),
+                Err(e) => json!({"error": e.0}),
+            }
+        }
         other => return Err(format!("неизвестная функция {other}")),
     })
 }
 
 #[pyfunction]
-fn call(name: &str, args_json: &str) -> PyResult<String> {
+fn call(py: Python<'_>, name: &str, args_json: &str) -> PyResult<String> {
     let args: Value = serde_json::from_str(args_json).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    let out = dispatch(name, &args).map_err(pyo3::exceptions::PyValueError::new_err)?;
+    // GIL отпускается на время работы (сеть!): иначе тестовый HTTP-сервер на Python в соседнем потоке не сможет ответить
+    let out = py.allow_threads(|| dispatch(name, &args)).map_err(pyo3::exceptions::PyValueError::new_err)?;
     Ok(serde_json::to_string(&out).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?)
 }
 

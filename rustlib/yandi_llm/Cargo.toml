@@ -21,5 +21,7 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 regex = "1.10"
 once_cell = "1.19"
 sha2 = "0.10"
+# HTTP-клиент (блокирующий: шлюз вызывается синхронно; env-прокси игнорируются, как `trust_env = False` в оригинале). Набор возможностей — из кэша cargo.
+reqwest = { version = "0.12", features = ["blocking", "json"] }
 # Python-точные примитивы (strip, repr, json.loads с точными текстами ошибок) — из ядра переноса
 yandi_rs = { path = "../yandi_rs", default-features = false }
