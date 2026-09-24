@@ -97,6 +97,18 @@ def build_entries():
     from agent.claim_validator import ClaimValidator
     from agent.criticism_detector import CriticismDetector
 
+    import agent.db.sql.crypto as cr
+    import agent.orch_query_framer as qf
+    import agent.orch_tag_tree as tt
+    import agent.policy as pol
+    import agent.relationship_memory as rm
+    import agent.tools.tool_shell as tsh
+    import pet.commitment_verification as cv
+    import pet.core_lifecycle as cl
+    import pet.event_extraction as ee
+    import pet.fact_extraction as fe
+    import pet.ui_settings as us
+
     validator, detector, linker = ClaimValidator(), CriticismDetector(), cal.ClaimAnswerLinker()
     boundary, scene, objr, entr, graph = pb.PersonalBoundary(), sbm.SceneBuilder(), objm.ObjectResolver(), entm.EntityResolver(), cgm.ClaimGraph()
     claims = [{"claim_id": f"c{i}", "claim_text": CLAIM[i * 7:] + " " + str(i)} for i in range(6)]
@@ -128,7 +140,36 @@ def build_entries():
         g.claims = [cgm.Claim(claim_id=f"c{i}", text=t) for i, t in enumerate(texts30)]
         g._build_graph()
 
+    words120 = [(f"w{i}", i * 3, i * 3 + 2) for i in range(120)]
+    cand = {"type": "insult", "span": [2, 5], "severity": 0.7}
+    fact = {"span": [0, 3], "class": "preference", "statement": "любит чёрный кофе по утрам", "polarity": "affirmed", "time": "current", "stability": "stable",
+            "relation": "replaces", "target": 1}
+    known = [{"fact_id": f"f{i}", "statement": f"s{i}"} for i in range(10)]
+    frame = qf.QueryFrame(raw_query="q", enriched_query="q", domain="general", obj="двигатель", action="починить", constraints={"a": 1}, missing=["бюджет"])
+    settings = {"voice": "remote", "advisors": ["local", "api"], "local": {"path": "/m/model.gguf"}, "remote": {"address": "http://192.168.1.5:8080", "model": "qwen-14b"},
+                "api": {"service": "openai", "model": "gpt-x"}}
+    enc_key = bytes(range(32))
+    enc_kw = dict(entity_type="question", entity_id=42, field_name="text")
+    blob = cr.encrypt_field(enc_key, CLAIM, **enc_kw)
+    unlock_key = "A" * 43 + "="
     return [
+        ("policy.scan_text (секреты)", lambda: pol.SecretScanner().scan_text("token sk-abcdefghijklmnopqrstuv and " + CLAIM)),
+        ("tool_shell._allowed", lambda: tsh._allowed("ls -la agent/")),
+        ("crypto.encrypt_field+decrypt_field (AES-GCM)", lambda: cr.decrypt_field(enc_key, cr.encrypt_field(enc_key, CLAIM, **enc_kw), **enc_kw)),
+        ("crypto.blind_index", lambda: cr.blind_index(enc_key, "question", QUERY)),
+        ("event_extraction.segment_words (120 слов)", lambda: ee.segment_words(" ".join(w for w, _, _ in words120))),
+        ("event_extraction._validate_candidate", lambda: ee._validate_candidate(cand, words120)),
+        ("fact_extraction._validate", lambda: fe._validate(fact, words120, known)),
+        ("fact_extraction.looks_secret", lambda: fe.looks_secret(LONG)),
+        ("commitment_verification.inside_quotation", lambda: cv.inside_quotation("он сказал «я всё сделал» и ушёл " * 5, 90)),
+        ("orch_tag_tree.lsh_entropy (30 запросов)", lambda: tt.lsh_entropy(texts30, 32)),
+        ("orch_tag_tree._tokenize", lambda: tt._tokenize(CLAIM)),
+        ("relationship_memory._stems", lambda: rm._stems("Извини, я назвал тебя дураком и не хотел обидеть " * 3, drop_non_content=True)),
+        ("orch_query_framer.decide_policy", lambda: qf.decide_policy(frame)),
+        ("orch_query_framer._auto_cq", lambda: qf._auto_cq(frame)),
+        ("ui_settings.validate", lambda: us.validate(settings)),
+        ("core_lifecycle._decode_key", lambda: cl._decode_key(unlock_key)),
+        ("core_lifecycle._validate (unlock)", lambda: cl._validate("unlock", {"key": unlock_key, "context": "yandi/core/v1"})),
         ("claim_identity.canonicalize_claim_text", lambda: ci.canonicalize_claim_text(CLAIM)),
         ("claim_identity.extract_subject_anchors", lambda: ci.extract_subject_anchors(CLAIM)),
         ("claim_validator.validate", lambda: validator.validate(CLAIM)),

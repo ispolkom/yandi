@@ -164,45 +164,63 @@ python -m pet.pet_local_guard_rust_parity_test   # доказательство 
 
 **Переключатель — один env var на смысловую область**, не общий на весь `yandi_rs`: так владелец может включить один перенесённый кусок, не трогая остальные. Шаблон имени: `YANDI_<ОБЛАСТЬ>_ENGINE=rust` (`GUARD` — вход/охрана, `LOGIN` — сессии/пароль). Если однажды переключателей наберётся много и это станет неудобно — общий механизм можно ввести отдельным явным решением, не по умолчанию.
 
-## Что реально выгодно включать (замер 2026-09-24)
+## Что реально выгодно включать (замер 2026-09-24, повторён после среза 36)
 
 `scripts/rust_bench.py` меряет Python и Rust через ПУБЛИЧНЫЙ Python-API (то есть с накладными расходами на вызов через
 границу PyO3 и обёртку) на реалистичных входах — один процесс, `maturin develop --release`, Python 3.11.2:
 
 | Функция | Python, мкс | Rust, мкс | Ускорение |
 |---|---:|---:|---:|
-| `claim_identity.canonicalize_claim_text` | 10.3 | 7.8 | ×1.3 |
-| `claim_identity.extract_subject_anchors` | 100.4 | 19.7 | ×5.1 |
-| `claim_validator.validate` | 73.2 | 8.2 | ×8.9 |
-| `hardening_guard` | 256.2 | 16.6 | ×15.4 |
-| `criticism_detector.analyze` | 9.0 | 7.2 | ×1.3 |
-| `boundaries.detect_toxicity` | 3.6 | 2.5 | ×1.4 |
-| `claim_answer_linker.link` | 27.8 | 29.0 | ≈ без разницы |
-| `claim_evidence_retriever.classify_role` | 7.7 | 7.4 | ≈ без разницы |
-| `source_quality.evaluate` | 22.9 | 32.1 | медленнее ×1.4 |
-| `epistemic_router.detect_domain` | 18.9 | 3.6 | ×5.2 |
-| `message_intensity.parse_self_report` | 12.5 | 4.0 | ×3.1 |
-| `orch_risk.assess_risk` | 3.2 | 2.3 | ×1.4 |
-| `intent_router.detect_intent` | 124.1 | 22.2 | ×5.6 |
-| `target_router.detect_target` | 11.5 | 2.5 | ×4.7 |
-| `personal_boundary.analyze` | 9.8 | 3.9 | ×2.5 |
-| `scene_builder.build` | 81.4 | 13.7 | ×5.9 |
-| `object_resolver.resolve` | 59.5 | 8.5 | ×7.0 |
-| `entity_resolver.resolve` | 4.6 | 3.2 | ×1.4 |
-| `claim_graph.extract_claims (4 evidence)` | 1,885.5 | 487.0 | ×3.9 |
-| `claim_graph._build_graph (30 утверждений)` | 3,717.1 | 670.8 | ×5.5 |
-| `trust_gate.apply_epistemic_trust_adjustment` | 4.1 | 5.7 | медленнее ×1.4 |
-| `trust_gate._calculate_delta_factors` | 2.4 | 2.1 | ×1.2 |
-| `canonical_trust.compute` | 0.8 | 0.8 | медленнее ×1.1 |
-| `local_guard.is_allowed_request` | 0.8 | 1.4 | медленнее ×1.7 |
-| `source_clustering.assign (30 источников)` | 132,779.2 | 10,792.6 | ×12.3 |
-| `source_clustering.assign (60 источников)` | 411,851.9 | 39,504.0 | ×10.4 |
+| `policy.scan_text (секреты)` | 23.3 | 11.5 | ×2.0 |
+| `tool_shell._allowed` | 13.7 | 3.2 | ×4.3 |
+| `crypto.encrypt_field+decrypt_field (AES-GCM)` | 10.1 | 11.4 | медленнее ×1.1 |
+| `crypto.blind_index` | 4.4 | 4.8 | медленнее ×1.1 |
+| `event_extraction.segment_words (120 слов)` | 49.2 | 30.2 | ×1.6 |
+| `event_extraction._validate_candidate` | 1.5 | 1.1 | ×1.4 |
+| `fact_extraction._validate` | 2.0 | 3.3 | медленнее ×1.6 |
+| `fact_extraction.looks_secret` | 41.7 | 8.3 | ×5.0 |
+| `commitment_verification.inside_quotation` | 10.4 | 0.6 | ×16.2 |
+| `orch_tag_tree.lsh_entropy (30 запросов)` | 1,075.3 | 291.1 | ×3.7 |
+| `orch_tag_tree._tokenize` | 6.4 | 8.3 | медленнее ×1.3 |
+| `relationship_memory._stems` | 126.8 | 21.5 | ×5.9 |
+| `orch_query_framer.decide_policy` | 1.7 | 1.2 | ×1.4 |
+| `orch_query_framer._auto_cq` | 0.7 | 1.6 | медленнее ×2.2 |
+| `ui_settings.validate` | 5.8 | 3.5 | ×1.7 |
+| `core_lifecycle._decode_key` | 0.8 | 0.4 | ×2.1 |
+| `core_lifecycle._validate (unlock)` | 2.0 | 0.9 | ×2.1 |
+| `claim_identity.canonicalize_claim_text` | 11.9 | 9.0 | ×1.3 |
+| `claim_identity.extract_subject_anchors` | 67.0 | 18.5 | ×3.6 |
+| `claim_validator.validate` | 82.4 | 7.1 | ×11.6 |
+| `hardening_guard` | 195.4 | 23.9 | ×8.2 |
+| `criticism_detector.analyze` | 15.3 | 6.7 | ×2.3 |
+| `boundaries.detect_toxicity` | 3.5 | 2.2 | ×1.6 |
+| `claim_answer_linker.link` | 26.7 | 27.3 | ≈ без разницы |
+| `claim_evidence_retriever.classify_role` | 9.9 | 6.4 | ×1.6 |
+| `source_quality.evaluate` | 21.5 | 36.0 | медленнее ×1.7 |
+| `epistemic_router.detect_domain` | 21.8 | 3.3 | ×6.6 |
+| `message_intensity.parse_self_report` | 12.4 | 4.4 | ×2.8 |
+| `orch_risk.assess_risk` | 3.7 | 3.8 | ≈ без разницы |
+| `intent_router.detect_intent` | 145.9 | 28.6 | ×5.1 |
+| `target_router.detect_target` | 13.1 | 4.0 | ×3.3 |
+| `personal_boundary.analyze` | 7.4 | 4.6 | ×1.6 |
+| `scene_builder.build` | 77.5 | 14.6 | ×5.3 |
+| `object_resolver.resolve` | 61.4 | 9.4 | ×6.5 |
+| `entity_resolver.resolve` | 4.0 | 4.3 | медленнее ×1.1 |
+| `claim_graph.extract_claims (4 evidence)` | 2,179.7 | 625.5 | ×3.5 |
+| `claim_graph._build_graph (30 утверждений)` | 6,429.1 | 966.6 | ×6.7 |
+| `trust_gate.apply_epistemic_trust_adjustment` | 7.3 | 8.3 | медленнее ×1.1 |
+| `trust_gate._calculate_delta_factors` | 3.8 | 3.6 | ×1.1 |
+| `canonical_trust.compute` | 1.4 | 0.9 | ×1.6 |
+| `local_guard.is_allowed_request` | 1.0 | 1.3 | медленнее ×1.4 |
+| `source_clustering.assign (30 источников)` | 119,659.2 | 12,585.6 | ×9.5 |
+| `source_clustering.assign (60 источников)` | 439,332.7 | 39,924.3 | ×11.0 |
 
 **Вывод (честный):**
 * **Стоит включать ради скорости** (ускорение ×5 и выше, на горячем пути каждого запроса или на больших наборах):
   `YANDI_SOURCE_CLUSTERING_ENGINE` (×11–12, растёт с размером пула источников — 391 мс → 33 мс на 60 источниках),
   `YANDI_CLAIM_GRAPH_ENGINE` (×6–7), `YANDI_HARDENING_ENGINE` (×12), `YANDI_CLAIM_VALIDATOR_ENGINE` (×10),
   `YANDI_OBJECT_RESOLVER_ENGINE` (×8), `YANDI_INTENT_ROUTER_ENGINE` (×5), `YANDI_TARGET_ROUTER_ENGINE` (×4–5).
+* **Новые срезы 27–36:** заметный выигрыш у `YANDI_PET_EXTRACTION_ENGINE` (`looks_secret` ×7, `inside_quotation` ×12, нарезка на слова ×3), `YANDI_RELATIONSHIP_MEMORY_ENGINE` (стеммер ×9), `YANDI_ORCH_TAG_TREE_ENGINE` (энтропия ×3), `YANDI_TOOL_SHELL_ENGINE` (×5), `YANDI_POLICY_ENGINE` (сканер секретов ×2); почти без разницы или чуть медленнее — `YANDI_CRYPTO_ENGINE` (AES-GCM ×1,6; `blind_index` ×0,8 — OpenSSL в Python и так быстр), `YANDI_UI_SETTINGS_ENGINE`, `YANDI_ORCH_QUERY_FRAMER_ENGINE`, `YANDI_CORE_LIFECYCLE_ENGINE` (микросекунды; ценны как общее ядро с узлом на Rust, а не скоростью).
 * **Умеренно** (×2–4): `SCENE_BUILDER`, `CLAIM_IDENTITY` (якоря), `EPISTEMIC_ROUTER`, `MESSAGE_INTENSITY`.
 * **Разницы почти нет** (микросекунды; вызов через границу съедает выигрыш): `CRITICISM`, `BOUNDARIES`, `ANSWER_LINKER`,
   `CLAIM_EVIDENCE_RETRIEVER`, `SOURCE_QUALITY`, `ORCH_RISK`, `ENTITY_RESOLVER`, `PERSONAL_BOUNDARY`.

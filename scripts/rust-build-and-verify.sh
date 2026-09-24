@@ -48,6 +48,10 @@ cat <<'TXT'
   export YANDI_OBJECT_RESOLVER_ENGINE=rust        # тип объекта запроса: ×8
   export YANDI_INTENT_ROUTER_ENGINE=rust          # тип запроса: ×5
   export YANDI_TARGET_ROUTER_ENGINE=rust          # адресат запроса: ×4–5
+  export YANDI_RELATIONSHIP_MEMORY_ENGINE=rust    # стеммер обид/извинений/личных фактов: ×9
+  export YANDI_PET_EXTRACTION_ENGINE=rust         # нарезка сообщения на слова, «похоже на секрет», «внутри цитаты»: ×3–12
+  export YANDI_TOOL_SHELL_ENGINE=rust             # охранный шлюз shell-команд агента: ×5
+  export YANDI_ORCH_TAG_TREE_ENGINE=rust          # энтропия дерева тегов: ×3
 Остальные переключатели (см. rustlib/README.md) дают мало скорости; их включать необязательно.
 Замер на вашей машине:  python scripts/rust_bench.py   (в том же окружении)
 TXT
