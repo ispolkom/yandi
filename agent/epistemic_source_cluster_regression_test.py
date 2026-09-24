@@ -100,7 +100,11 @@ error_pool = [
     _ev("ev_e1", "https://a.example.com/x", "Some title", "Some content excerpt here for testing purposes only."),
     _ev("ev_e2", "https://b.example.com/y", "Some title", "Some content excerpt here for testing purposes only."),
 ]
-with patch.object(clustering_mod, "title_similarity", side_effect=RuntimeError("simulated failure")):
+# Проверка целит в обработку исключений ПИТОНОВСКОГО сравнения (подменяем именно Python-функцию), поэтому
+# на время неё Rust-движок явно выключен (`_rust_sc = False`): чистая Rust-логика исключений бросить не
+# может, а реальный аналог — нестроковые данные — уходит на Python-путь (см. source_clustering_rust_parity_test.py, D90).
+with patch.object(clustering_mod, "title_similarity", side_effect=RuntimeError("simulated failure")), \
+        patch.object(clustering_mod, "_rust_sc", False):
     assign_source_clusters(error_pool)
 check(
     "comparison error -> NOT merged (fails open, never a confident-but-wrong merge)",

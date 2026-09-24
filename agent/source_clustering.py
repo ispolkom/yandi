@@ -23,10 +23,21 @@ raises an exception is treated as "not similar" (caught, never re-raised,
 never merged) — a confidently-wrong merge is categorically worse than a
 missed cluster per the audit's own emphasis, so failures bias toward
 NOT merging, never toward merging.
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/source_clustering.rs — ядро assign_source_clusters
+(попарное сравнение + union-find; канонизация/шинглы считаются один раз на источник, а не на
+каждую пару) вместе с difflib-подобным title_similarity и Жаккаром по шинглам. Доказан на
+совпадение (в т.ч. дифференциальным фаззингом против настоящего difflib и полной проверкой
+Python-`\w` по всем кодовым точкам) тестом agent/source_clustering_rust_parity_test.py.
+По умолчанию ВЫКЛЮЧЕН; включается переменной окружения YANDI_SOURCE_CLUSTERING_ENGINE=rust ПОСЛЕ
+сборки rustlib/yandi_rs (`maturin develop`, см. rustlib/README.md). Не собран, либо вход нестроковый /
+с одиночными суррогатами (PyO3 не принимает) — этот вызов выполняется прежним Python-путём.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from agent.source_independence_prototype import (
@@ -36,6 +47,27 @@ from agent.source_independence_prototype import (
     TITLE_SIM_THRESHOLD,
     CONTENT_FINGERPRINT_THRESHOLD,
 )
+
+
+_logger = logging.getLogger("yandi.source_clustering")   # НЕ `log`: так называется параметр функций ниже
+
+_rust_sc = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_sc():
+    global _rust_sc
+    if _rust_sc is None:
+        if os.environ.get("YANDI_SOURCE_CLUSTERING_ENGINE") == "rust":
+            try:
+                import yandi_rs.source_clustering as _rs
+                _rust_sc = _rs
+                _logger.warning("YANDI_SOURCE_CLUSTERING_ENGINE=rust: используется Rust-реализация source_clustering (rustlib/yandi_rs)")
+            except ImportError as e:
+                _logger.warning("YANDI_SOURCE_CLUSTERING_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_sc = False
+        else:
+            _rust_sc = False
+    return _rust_sc or None
 
 
 class _UnionFind:
@@ -101,21 +133,37 @@ def assign_source_clusters(
         )
 
     ids = list(candidates.keys())
-    uf = _UnionFind(ids)
 
-    for i in range(len(ids)):
-        for j in range(i + 1, len(ids)):
-            id_a, id_b = ids[i], ids[j]
-            if uf.find(id_a) == uf.find(id_b):
-                continue
-            if _similar(candidates[id_a], candidates[id_b], log=log if verbose else None):
-                uf.union(id_a, id_b)
+    root_of = None
+    rs = _get_rust_sc()
+    if rs is not None:
+        try:
+            idx_roots = rs.cluster_roots(
+                [candidates[i].title for i in ids],
+                [candidates[i].content_excerpt for i in ids],
+            )
+            root_of = {ids[k]: ids[r] for k, r in enumerate(idx_roots)}
+        except (TypeError, UnicodeError) as e:
+            # нестроковое поле / одиночный суррогат — PyO3 такое не принимает; исходный Python-путь
+            # для этого вызова (он "проваливает открыто" пару за парой, как и раньше)
+            _logger.warning("source_clustering: Rust-путь не принял вход (%s) — этот вызов на Python", e)
+
+    if root_of is None:
+        uf = _UnionFind(ids)
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                id_a, id_b = ids[i], ids[j]
+                if uf.find(id_a) == uf.find(id_b):
+                    continue
+                if _similar(candidates[id_a], candidates[id_b], log=log if verbose else None):
+                    uf.union(id_a, id_b)
+        root_of = {i: uf.find(i) for i in ids}
 
     for ev in evidence_data:
         ev_id = ev.get("evidence_id")
         if ev_id not in candidates:
             continue
-        ev["source_cluster_id"] = f"sc_{uf.find(ev_id)}"
+        ev["source_cluster_id"] = f"sc_{root_of[ev_id]}"
 
     cluster_sizes: Dict[str, int] = {}
     for ev in evidence_data:
