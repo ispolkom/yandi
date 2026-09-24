@@ -29,6 +29,7 @@ pub mod py_text;      // общие питоновские strip/split/\s/float 
 mod py_word_table; // данные (не подмодуль Python): точная копия Python-`\w`, см. gen_py_word_table.py
 pub mod source_clustering;
 pub mod source_quality;
+pub mod target_router;
 pub mod web_login;
 
 #[pymodule]
@@ -103,6 +104,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     intent_router::register(py, &intent_router_mod)?;
     m.add_submodule(&intent_router_mod)?;
 
+    let target_router_mod = PyModule::new_bound(py, "target_router")?;
+    target_router::register(py, &target_router_mod)?;
+    m.add_submodule(&target_router_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -121,6 +126,7 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.epistemic_router", &epistemic_router_mod)?;
     sys_modules.set_item("yandi_rs.message_intensity", &message_intensity_mod)?;
     sys_modules.set_item("yandi_rs.orch_risk", &orch_risk_mod)?;
+    sys_modules.set_item("yandi_rs.target_router", &target_router_mod)?;
     sys_modules.set_item("yandi_rs.intent_router", &intent_router_mod)?;
     sys_modules.set_item("yandi_rs.py_text", &py_text_mod)?;
     sys_modules.set_item("yandi_rs.source_clustering", &source_clustering_mod)?;

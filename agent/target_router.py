@@ -1,10 +1,38 @@
 """
 agent/target_router.py — Определяет адресата запроса.
 USER, AI, OBJECT, KNOWLEDGE
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/target_router.rs — detect_target, get_target_description
+(`\\b`-границы слов реализованы через таблицу Python-`\\w`, не regex-крейтом). Доказан на совпадение
+тестом agent/target_router_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается переменной окружения
+YANDI_TARGET_ROUTER_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (`maturin develop`, см. rustlib/README.md).
+Не собран — тихо остаёмся на Python.
 """
 
+import logging
+import os
 import re
 from typing import Tuple
+
+log = logging.getLogger("yandi.target_router")
+
+_rust_tr = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_tr():
+    global _rust_tr
+    if _rust_tr is None:
+        if os.environ.get("YANDI_TARGET_ROUTER_ENGINE") == "rust":
+            try:
+                import yandi_rs.target_router as _rs
+                _rust_tr = _rs
+                log.warning("YANDI_TARGET_ROUTER_ENGINE=rust: используется Rust-реализация target_router (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_TARGET_ROUTER_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_tr = False
+        else:
+            _rust_tr = False
+    return _rust_tr or None
 
 
 def detect_target(query: str) -> Tuple[str, float]:
@@ -12,6 +40,10 @@ def detect_target(query: str) -> Tuple[str, float]:
     Определяет, кому адресован запрос.
     Возвращает: (target, confidence)
     """
+    rs = _get_rust_tr()
+    if rs is not None and isinstance(query, str):
+        return tuple(rs.detect_target(query))
+
     q = query.lower().strip()
     
     # ---- СБРОС СЧЁТЧИКОВ ----
@@ -133,6 +165,9 @@ def detect_target(query: str) -> Tuple[str, float]:
 
 
 def get_target_description(target: str) -> str:
+    rs = _get_rust_tr()
+    if rs is not None and isinstance(target, str):
+        return rs.get_target_description(target)
     descriptions = {
         "ai": "вопрос адресован Янди",
         "user": "вопрос о пользователе",
