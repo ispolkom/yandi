@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use serde_json::{json, Map, Value};
 
 use crate::messages::{append_system_instruction, build_messages, SystemArg};
+use crate::ollama::{self, OllamaParams};
 use crate::remote::{self, GenerateParams};
 use crate::transport::ReqwestTransport;
 use crate::semantic::*;
@@ -93,6 +94,34 @@ fn dispatch(name: &str, args: &Value) -> Result<Value, String> {
             let t = ReqwestTransport::new();
             match remote::generate(&t, &msgs, a("base_url").as_str().unwrap_or(""), a("protocol").as_str().unwrap_or(""), a("model").as_str().unwrap_or(""), a("api_key_env").as_str(), &p) {
                 Ok((text, meta)) => json!({"ok": {"text": text, "meta": meta}}),
+                Err(e) => json!({"error": e.0}),
+            }
+        }
+        "ollama_generate" => {
+            let msgs: Vec<Value> = match a("messages") {
+                Value::Array(m) => m,
+                _ => vec![],
+            };
+            let p = OllamaParams {
+                temperature: a("temperature").as_f64(),
+                max_tokens: a("max_tokens").as_i64(),
+                timeout: a("timeout").as_u64().unwrap_or(0),
+                extra_options: match a("extra_options") {
+                    Value::Object(o) => Some(o),
+                    _ => None,
+                },
+                response_format: match a("response_format") {
+                    Value::Null => None,
+                    v => Some(v),
+                },
+                stop: match a("stop") {
+                    Value::Array(x) => Some(x.iter().filter_map(|v| v.as_str().map(String::from)).collect()),
+                    _ => None,
+                },
+            };
+            let t = ReqwestTransport::new();
+            match ollama::generate(&t, &msgs, a("model").as_str().unwrap_or(""), a("base_url").as_str().unwrap_or(""), &p) {
+                Ok((text, raw)) => json!({"ok": {"text": text, "raw": raw}}),
                 Err(e) => json!({"error": e.0}),
             }
         }

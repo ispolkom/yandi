@@ -7,6 +7,7 @@
 //! (`serde_json` с `preserve_order`) — он виден вызывающим при `json.dumps`/сравнении.
 
 pub mod messages;
+pub mod ollama;
 pub mod pyfmt;
 pub mod remote;
 pub mod semantic;

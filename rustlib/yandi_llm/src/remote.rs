@@ -44,7 +44,7 @@ fn err(model: &str, base_url: &str, detail: &str) -> RemoteBackendError {
 }
 
 /// `raise_for_status()` как у `requests`: "{code} Client Error: {reason} for url: {url}" / "Server Error".
-fn status_error(status: u16, reason: &str, url: &str) -> Option<String> {
+pub(crate) fn status_error(status: u16, reason: &str, url: &str) -> Option<String> {
     if (400..500).contains(&status) {
         Some(format!("{status} Client Error: {reason} for url: {url}"))
     } else if (500..600).contains(&status) {

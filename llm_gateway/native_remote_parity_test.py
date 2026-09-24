@@ -93,6 +93,7 @@ def main() -> int:
         print(f"SKIP: yandi_llm не собран ({e})")
         return 0
     from llm_gateway import remote_backend as rb
+    from llm_gateway import ollama_backend as ob
 
     srv = Server()
     n = 0
@@ -214,6 +215,60 @@ def main() -> int:
                     compare("C1 embeddings", 200, ok, {"texts": texts, "api_key_env": env}, kind="embed")
         compare("C2 embeddings anthropic", 200, {}, {"texts": ["a"]}, protocol="anthropic", kind="embed")
         compare("C3 embeddings неизвестный протокол", 200, {}, {"texts": ["a"]}, protocol="grpc", kind="embed")
+        # ---- Ollama /api/chat (полный сырой ответ возвращается как есть) ----
+        def ollama_case(label, status, payload, exact_error=True, **kw):
+            nonlocal n
+            srv.reply = (status, payload if isinstance(payload, bytes) else json.dumps(payload, ensure_ascii=False).encode("utf-8"), 0.0)
+            base = dict(model="m", base_url=srv.url, temperature=None, max_tokens=None, timeout=30, extra_options=None, response_format=None, stop=None)
+            base.update(kw)
+            msgs = base.pop("messages", MSGS[1])
+            b = len(srv.records)
+            try:
+                p = {"ok": list(ob.generate(msgs, **base))}
+            except ob.OllamaBackendError as e:
+                p = {"error": str(e)}
+            except (AttributeError, KeyError, TypeError) as e:
+                p = {"error": f"uncaught:{type(e).__name__}"}
+            py_sent = sent(b)
+            b = len(srv.records)
+            r = rs("ollama_generate", messages=msgs, **base)
+            rs_sent = sent(b)
+            if "ok" in p:
+                p = {"ok": {"text": p["ok"][0], "raw": p["ok"][1]}}
+            n += 1
+            same_req = [norm_req(x) for x in py_sent] == [norm_req(x) for x in rs_sent]
+            if "error" in p or "error" in r:
+                if p.get("error", "").startswith("uncaught:"):
+                    same_res = "error" in r
+                elif exact_error:
+                    same_res = p == r
+                else:
+                    same_res = "error" in p and "error" in r and p["error"].startswith("m: ") and r["error"].startswith("m: ")
+            else:
+                same_res = json.dumps(p, ensure_ascii=False) == json.dumps(r, ensure_ascii=False)
+            check(label, same_req and same_res, f"\n py_sent={[norm_req(x) for x in py_sent]}\n rs_sent={[norm_req(x) for x in rs_sent]}\n py={p}\n rs={r}")
+
+        OLL = [{"message": {"content": "ответ"}, "done": True, "done_reason": "stop", "eval_count": 5}, {"message": {"role": "assistant", "content": ""}}, {"message": {"content": "🌍\nx"}, "extra": [1, {"a": None}]}]
+        for ok in OLL:
+            for msgs in MSGS:
+                for extra in ({}, {"temperature": 0.0}, {"temperature": 0.3, "max_tokens": 64}, {"max_tokens": 0}, {"stop": ["a"]}, {"stop": []}, {"response_format": "json"},
+                              {"response_format": {"type": "object", "properties": {"a": {"type": "string"}}}}, {"extra_options": {"seed": 1, "repeat_penalty": 1.1}},
+                              {"extra_options": {}}, {"extra_options": {"temperature": 9}, "temperature": 0.5}, {"extra_options": {"seed": 7}, "stop": ["z"], "max_tokens": 3, "temperature": 1e-7}):
+                    ollama_case("H1 Ollama запрос/ответ", 200, ok, messages=msgs, **extra)
+        for status in (400, 404, 500, 503):
+            ollama_case(f"H2 Ollama HTTP {status}", status, {"error": "x"})
+        for body in (b"not json", b"[]", b"{}", b'{"message": {}}', b'{"message": null}', b"null", b""):
+            ollama_case("H3 Ollama кривое тело", 200, body, exact_error=False)
+        ollama_case("H4 Ollama без слэшей у адреса", 200, OLL[0], base_url=srv.url + "/")   # оригинал НЕ отрезает хвостовой слэш → путь "//api/chat"
+        # соединение отклонено: деталь исключения не воспроизводится, префикс "модель: " обязателен
+        for kw_ in ({}, {"timeout": 2}):
+            try:
+                pe = {"error": str(ob.generate(MSGS[0], model="m", base_url="http://127.0.0.1:1", temperature=None, max_tokens=None, timeout=kw_.get("timeout", 5), extra_options=None, response_format=None, stop=None))}
+            except ob.OllamaBackendError as e:
+                pe = {"error": str(e)}
+            re_ = rs("ollama_generate", messages=MSGS[0], model="m", base_url="http://127.0.0.1:1", timeout=kw_.get("timeout", 5))
+            n += 1
+            check("H5 Ollama соединение отклонено", "error" in pe and "error" in re_ and pe["error"].startswith("m: ") and re_["error"].startswith("m: "), f"{pe} {re_}")
         # ---- таймаут по умолчанию (180 с в оригинале) не должен срабатывать на медленном, но живом сервере ----
         compare("D0 таймаут по умолчанию", 200, OK[0], {"messages": MSGS[0]}, delay=1.6)
         compare("D0b таймаут по умолчанию (embeddings)", 200, EOKS[0], {"texts": ["a"]}, kind="embed", delay=1.6)
