@@ -17,10 +17,12 @@ pub mod claim_semantic_identity_hardening;
 pub mod claim_types;
 pub mod claim_validator;
 pub mod criticism_detector;
+pub mod entity_resolver;
 pub mod epistemic_router;
 pub mod intent_router;
 pub mod local_guard;
 pub mod message_intensity;
+pub mod object_resolver;
 pub mod orch_risk;
 pub mod personal_boundary;
 pub mod scene_builder;
@@ -28,6 +30,7 @@ mod py_json;          // точный json.loads Python (для message_intensit
 mod py_printable_table; // данные: isprintable() для repr
 mod py_case_table;    // данные: Lowercase/Uppercase/Titlecase для str.isupper(), см. gen_py_case_table.py
 mod scene_builder_data; // данные: паттерны SceneBuilder, сгенерированы из Python
+mod resolver_data;    // данные: таблицы object/entity resolver, сгенерированы из Python
 mod py_icase_table;   // данные: группы IGNORECASE Python, см. gen_py_icase_table.py
 mod py_regex;         // транслятор паттернов Python re -> крейт regex
 mod py_decimal_table; // данные: цифры Unicode для py_float, см. gen_py_decimal_table.py
@@ -122,6 +125,14 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     scene_builder::register(py, &scene_builder_mod)?;
     m.add_submodule(&scene_builder_mod)?;
 
+    let object_resolver_mod = PyModule::new_bound(py, "object_resolver")?;
+    object_resolver::register(py, &object_resolver_mod)?;
+    m.add_submodule(&object_resolver_mod)?;
+
+    let entity_resolver_mod = PyModule::new_bound(py, "entity_resolver")?;
+    entity_resolver::register(py, &entity_resolver_mod)?;
+    m.add_submodule(&entity_resolver_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -140,6 +151,8 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.epistemic_router", &epistemic_router_mod)?;
     sys_modules.set_item("yandi_rs.message_intensity", &message_intensity_mod)?;
     sys_modules.set_item("yandi_rs.orch_risk", &orch_risk_mod)?;
+    sys_modules.set_item("yandi_rs.object_resolver", &object_resolver_mod)?;
+    sys_modules.set_item("yandi_rs.entity_resolver", &entity_resolver_mod)?;
     sys_modules.set_item("yandi_rs.scene_builder", &scene_builder_mod)?;
     sys_modules.set_item("yandi_rs.personal_boundary", &personal_boundary_mod)?;
     sys_modules.set_item("yandi_rs.target_router", &target_router_mod)?;

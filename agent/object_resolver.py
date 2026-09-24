@@ -1,9 +1,37 @@
 """
 agent/object_resolver.py — Определяет тип объекта для субъективных запросов.
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/object_resolver.rs — ObjectResolver.resolve. Доказан на
+совпадение тестом agent/object_resolver_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается переменной
+окружения YANDI_OBJECT_RESOLVER_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (`maturin develop`, см.
+rustlib/README.md). Делегирует, только пока `self.patterns` экземпляра не изменён; иначе — Python.
 """
 
+import copy
+import logging
+import os
 import re
 from typing import Dict, Any, Tuple
+
+log = logging.getLogger("yandi.object_resolver")
+
+_rust_or = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_or():
+    global _rust_or
+    if _rust_or is None:
+        if os.environ.get("YANDI_OBJECT_RESOLVER_ENGINE") == "rust":
+            try:
+                import yandi_rs.object_resolver as _rs
+                _rust_or = _rs
+                log.warning("YANDI_OBJECT_RESOLVER_ENGINE=rust: используется Rust-реализация object_resolver (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_OBJECT_RESOLVER_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_or = False
+        else:
+            _rust_or = False
+    return _rust_or or None
 
 
 class ObjectResolver:
@@ -88,12 +116,17 @@ class ObjectResolver:
                 "analyzer": "GameAnalyzer"
             },
         }
+        self._default_patterns = copy.deepcopy(self.patterns)
 
     def resolve(self, query: str) -> Dict[str, Any]:
         """
         Определяет тип объекта в запросе.
         Возвращает: {type, confidence, analyzer, matched_pattern}
         """
+        rs = _get_rust_or()
+        if rs is not None and isinstance(query, str) and self.patterns == self._default_patterns:
+            return dict(rs.resolve(query))
+
         q = query.lower().strip()
         
         best_match = {

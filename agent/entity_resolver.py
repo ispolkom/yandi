@@ -1,14 +1,43 @@
 """
 agent/entity_resolver.py — Распознавание сущностей.
 Определяет, что именно ищет пользователь.
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/entity_resolver.rs — EntityResolver.resolve
+(get_search_strategy остаётся здесь). Доказан на совпадение тестом agent/entity_resolver_rust_parity_test.py.
+По умолчанию ВЫКЛЮЧЕН; включается переменной окружения YANDI_ENTITY_RESOLVER_ENGINE=rust ПОСЛЕ сборки
+rustlib/yandi_rs (`maturin develop`, см. rustlib/README.md). Делегирует, только пока словари экземпляра не
+изменены. ВАЖНО: в оригинале словари — `set` строк (порядок хеш-рандомизирован), поэтому поле `game` (когда
+совпало несколько игр) и порядок `categories` у Python-версии не фиксированы; Rust отдаёт порядок списков.
 """
 
+import logging
+import os
 import re
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
 BASE = Path(__file__).parent.parent
+
+log = logging.getLogger("yandi.entity_resolver")
+
+_rust_er = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_er():
+    global _rust_er
+    if _rust_er is None:
+        if os.environ.get("YANDI_ENTITY_RESOLVER_ENGINE") == "rust":
+            try:
+                import yandi_rs.entity_resolver as _rs
+                _rust_er = _rs
+                log.warning("YANDI_ENTITY_RESOLVER_ENGINE=rust: используется Rust-реализация entity_resolver (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_ENTITY_RESOLVER_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_er = False
+        else:
+            _rust_er = False
+    return _rust_er or None
 
 # Словари известных сущностей (можно расширять)
 KNOWN_GAMES = ["x3", "x3 terran conflict", "x3 albion prelude", "x4", "x4 foundations"]
@@ -21,6 +50,7 @@ class EntityResolver:
         self.known_games = set(KNOWN_GAMES)
         self.known_game_terms = set(KNOWN_GAME_TERMS)
         self.known_media = set(KNOWN_MEDIA)
+        self._default_sets = (set(self.known_games), set(self.known_game_terms), set(self.known_media))
 
     def resolve(self, query: str) -> Dict[str, Any]:
         """
@@ -35,6 +65,11 @@ class EntityResolver:
             "needs_exact_search": True/False
         }
         """
+        rs = _get_rust_er()
+        if (rs is not None and isinstance(query, str)
+                and (self.known_games, self.known_game_terms, self.known_media) == self._default_sets):
+            return dict(rs.resolve(query))
+
         q = query.strip()
         q_lower = q.lower()
 
