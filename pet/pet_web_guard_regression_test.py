@@ -184,6 +184,10 @@ def main() -> int:
         mod.__file__ = lg.__file__
         sys.modules[mod.__name__] = mod
         exec(compile(lg_src.replace(old, new), lg.__file__, "exec"), mod.__dict__)
+        # Мутант — это испорченный ПИТОНОВСКИЙ исходник правила; если в окружении включён Rust-движок
+        # (YANDI_GUARD_ENGINE=rust), делегирование в начале функций обошло бы порчу и мутант «выжил» бы.
+        # Поэтому мутанту явно выключаем Rust (Rust-мутанты проверяет pet_local_guard_rust_parity_test).
+        mod._rust_guard = False
         return mod
     mutants = {
         "M1 расширению открыт весь /api/": ('EXTENSION_PATH_PREFIXES = ("/api/ext/",)', 'EXTENSION_PATH_PREFIXES = ("/api/",)'),

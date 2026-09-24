@@ -386,8 +386,12 @@ def mutants() -> list:
         first = proc.stderr.decode().strip().splitlines()[:1]
         return proc.returncode, (first[0] if first else "").removeprefix("yandi-keys: ")
 
-    def sessions_never_expire(self, token):                                  # M10
-        return bool(token) and token in self._items
+    class NeverExpiringSessions(wl.Sessions):                                # M10: sessions never expire
+        # Подменяем ОБЪЕКТ wl.sessions (как M5/M6), а не метод класса: при включённом Rust-движке
+        # (YANDI_LOGIN_ENGINE=rust) wl.sessions — Rust-объект, и порча метода питоновского класса его
+        # не задела бы. Rust-мутанты проверяет pet_web_login_rust_parity_test.
+        def valid(self, token):
+            return bool(token) and token in self._items
 
     class KeepsSessions(wl.Sessions):                                        # M6: a reset does not end old sessions
         def clear(self):
@@ -405,7 +409,7 @@ def mutants() -> list:
         ("M7 a missing key tool counts as a correct password", swapped(wl, "run_tool", tool_missing_is_ok)),
         ("M8 the extension may reach any path", swapped(wl, "_is_extension_request", lambda headers, path: bool(headers.get("origin", "").startswith("moz-extension://")))),
         ("M9 the password is given to the tool on its command line", swapped(wl, "run_tool", password_in_argv)),
-        ("M10 sessions never expire", swapped(wl.Sessions, "valid", sessions_never_expire)),
+        ("M10 sessions never expire", swapped(wl, "sessions", NeverExpiringSessions())),
         ("M11 the browser test is forgeable (the header is not required)", swapped(wl, "_is_browser", lambda headers: False)),
     ]
 
