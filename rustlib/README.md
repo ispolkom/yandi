@@ -61,6 +61,22 @@ Python как обычный нативный модуль (через [PyO3](ht
 (3) слой доступа к БД, (4) оркестратор запросов, (5) веб-сервер. Модули, работающие с объектами Python (`claim_status`, `pet_extraction` в части
 проверки словарей, `ui_settings`, `core_lifecycle`), получат «родные» версии над `serde_json::Value` при переносе оркестратора.
 
+## Родной шлюз к моделям `rustlib/yandi_llm` (срез 39, 2026-09-24)
+
+Первый КРУПНЫЙ процесс единого бинарника: перенос `llm_gateway/`. В отличие от срезов 1–38 это не «Rust-ускоритель для Python», а
+РОДНАЯ библиотека без Python внутри (`--no-default-features`); мост PyO3 (`yandi_llm.call(имя, json) -> json`) существует ТОЛЬКО для
+дифференциальных тестов против Python-оригинала (`llm_gateway/native_parity_test.py`). Python-`llm_gateway` остаётся эталоном и боевым путём, пока не
+переехали вызывающие. Зависимости — только то, что есть в кэше cargo (`serde`, `serde_json` с `preserve_order`, `regex`, `sha2`); точные питоновские
+`strip`/`repr`/`json.loads` (с ТОЧНЫМИ текстами ошибок) берутся из `yandi_rs`.
+
+Перенесено (чистая часть, без сети): `client._build_messages`/`_append_system_instruction`, `_contract_from_response_format`, `_strip_think_blocks`,
+`_looks_like_internal_state_fragment`, `_state_schema_prompt_hint` (со Скрытой странностью оригинала: `required` строкой = множество символов; Python-точное `str()` чисел —
+`1e-07`, `1e+16`), `_semantic_result_schema`, `_semantic_contract_from_target`, `_state_valid_for_requirement`, `_normalize_semantic_completion` (структурный и «маркерный»
+режимы, все ветки ошибок), `vector_space` (отпечаток, `compatible`). Проверено ~15,5 тыс. сравнений (по значению И порядку ключей) + **42 из 43 внесённых мутантов
+пойманы, 1 эквивалентен** (страховочное обнуление `state`, которое и так уже сделано выше по коду).
+Известные расхождения родного Rust с Python-объектами (не проверяются): JSON с NaN/Infinity или целыми вне i64 в `state`, одинокие суррогаты; невалидная схема с `required`
+числом (Python бросает TypeError). Дальше по плану: `remote_backend`/`llamacpp_backend`/`ollama_backend` (reqwest), `secure_store` (rusqlite + `crypto.rs`), `resolve_target`, `complete/embed`.
+
 ## Структура (не меняется по мере роста)
 
 ```

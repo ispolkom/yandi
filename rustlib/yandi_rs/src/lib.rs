@@ -31,7 +31,7 @@ pub mod orch_risk;
 pub mod personal_boundary;
 pub mod policy;
 pub mod scene_builder;
-mod py_json;          // точный json.loads Python (для message_intensity)
+pub mod py_json;      // точный json.loads Python (message_intensity, yandi_llm)
 mod py_printable_table; // данные: isprintable() для repr
 mod orch_query_framer_data; // данные: таблицы query framer, сгенерированы из Python (gen_orch_query_framer_data.py)
 mod relationship_memory_data; // данные: таблицы стеммера, сгенерированы из Python (gen_relationship_memory_data.py)

@@ -1,0 +1,25 @@
+[package]
+name = "yandi_llm"
+version = "0.1.0"
+edition = "2021"
+description = "Родной Rust-шлюз к языковым моделям (перенос llm_gateway/): контракты вывода, разбор «реплика + состояние», эмбеддинги, бэкенды. Без Python; Python-мост — только для дифференциальных тестов против оригинала."
+license = "MIT"
+
+[lib]
+name = "yandi_llm"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `python` — мост PyO3 для дифференциальных тестов (JSON внутрь → JSON наружу); без него — чистая библиотека для узла.
+default = ["python"]
+python = ["dep:pyo3"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+regex = "1.10"
+once_cell = "1.19"
+sha2 = "0.10"
+# Python-точные примитивы (strip, repr, json.loads с точными текстами ошибок) — из ядра переноса
+yandi_rs = { path = "../yandi_rs", default-features = false }
