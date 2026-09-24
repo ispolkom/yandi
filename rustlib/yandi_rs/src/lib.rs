@@ -49,6 +49,7 @@ pub mod source_quality;
 pub mod target_router;
 pub mod tool_shell;
 pub mod crypto;
+pub mod pet_extraction;
 pub mod trust_gate;
 pub mod web_login;
 
@@ -172,6 +173,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     crypto::register(py, &crypto_mod)?;
     m.add_submodule(&crypto_mod)?;
 
+    let pet_extraction_mod = PyModule::new_bound(py, "pet_extraction")?;
+    pet_extraction::register(py, &pet_extraction_mod)?;
+    m.add_submodule(&pet_extraction_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -192,6 +197,7 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.orch_risk", &orch_risk_mod)?;
     sys_modules.set_item("yandi_rs.tool_shell", &tool_shell_mod)?;
     sys_modules.set_item("yandi_rs.crypto", &crypto_mod)?;
+    sys_modules.set_item("yandi_rs.pet_extraction", &pet_extraction_mod)?;
     sys_modules.set_item("yandi_rs.policy", &policy_mod)?;
     sys_modules.set_item("yandi_rs.final_claim_coverage", &final_claim_coverage_mod)?;
     sys_modules.set_item("yandi_rs.canonical_trust", &canonical_trust_mod)?;

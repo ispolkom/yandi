@@ -41,10 +41,18 @@ was kept, and it contains no vocabulary of insults / apologies / promises: every
 string operation below is segmentation, offset validation, exact reconstruction
 or schema validation. Relational consequences stay with
 agent/relationship_memory.py, relationship_state.py and relationship_commitments.py.
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/pet_extraction.rs — чистые помощники этого модуля и его соседей
+(segment_words, подготовка текста к json.loads, _validate_candidate; у fact_extraction — _validate/looks_secret;
+у commitment_verification — inside_quotation). Доказан тестом pet/pet_extraction_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН;
+включается YANDI_PET_EXTRACTION_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs. Посторонние типы входа и одинокие суррогаты
+откатываются на исходный Python-код; константы Rust получает из Python при каждом вызове.
 """
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
@@ -65,6 +73,26 @@ ACCEPTED_ACTS = EVENT_TYPES
 # LLM callable: (chat messages) -> raw model text. Injected so the protocol is
 # testable without a model and the caller owns model/adapter selection.
 LlmCall = Callable[[List[Dict[str, str]]], str]
+
+_log = logging.getLogger("yandi.pet_extraction")
+_rust_pe = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_pe():
+    """Общий загрузчик для event_extraction / fact_extraction / commitment_verification."""
+    global _rust_pe
+    if _rust_pe is None:
+        if os.environ.get("YANDI_PET_EXTRACTION_ENGINE") == "rust":
+            try:
+                import yandi_rs.pet_extraction as _rs
+                _rust_pe = _rs
+                _log.warning("YANDI_PET_EXTRACTION_ENGINE=rust: используется Rust-реализация pet_extraction (rustlib/yandi_rs)")
+            except ImportError as e:
+                _log.warning("YANDI_PET_EXTRACTION_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_pe = False
+        else:
+            _rust_pe = False
+    return _rust_pe or None
 
 
 @dataclass(frozen=True)
@@ -131,6 +159,12 @@ _CHECK_SYSTEM = (
 
 def segment_words(message: str) -> List[Tuple[str, int, int]]:
     """(word, start_char, end_char) for every whitespace-separated word."""
+    rs = _get_rust_pe()
+    if rs is not None and type(message) is str:
+        try:
+            return rs.segment_words(message)
+        except UnicodeEncodeError:
+            pass        # одинокий суррогат: Rust строку не принимает — исходный код ниже
     return [(m.group(), m.start(), m.end()) for m in re.finditer(r"\S+", message)]
 
 
@@ -142,6 +176,18 @@ def _json_object(raw: object) -> Optional[dict]:
     """Strict JSON object parse; a surrounding code fence is the only leniency."""
     if not isinstance(raw, str):
         return None
+    rs = _get_rust_pe()
+    if rs is not None and type(raw) is str:
+        try:
+            text = rs.json_text(raw)
+        except UnicodeEncodeError:
+            text = None
+        if text is not None:
+            try:
+                value = json.loads(text)
+            except (ValueError, TypeError):
+                return None
+            return value if isinstance(value, dict) else None
     text = raw.strip()
     if text.startswith("```"):
         text = text.strip("`")
@@ -164,6 +210,14 @@ def _in_unit_range(value: object) -> bool:
 
 def _validate_candidate(item: object, words: List[Tuple[str, int, int]]) -> Tuple[Optional[Tuple[str, int, int, float, float]], str]:
     """Return ((type, first_word, last_word, severity, sincerity), "") or (None, reason)."""
+    rs = _get_rust_pe()
+    if rs is not None and type(words) is list:
+        try:
+            r = rs.validate_candidate(item, len(words), EVENT_TYPES, INSULT, APOLOGY, MAX_SPAN_WORDS)
+        except UnicodeEncodeError:
+            r = None
+        if r is not None:
+            return r
     if not isinstance(item, dict):
         return None, "candidate is not an object"
     kind = item.get("type")

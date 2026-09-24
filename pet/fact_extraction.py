@@ -50,7 +50,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from pet.event_extraction import _is_int, _json_object, segment_words
+from pet.event_extraction import _get_rust_pe, _is_int, _json_object, segment_words
 
 FACT_CLASSES = ("possession", "relationship", "project", "preference", "life_fact", "location", "skill_interest",
                 "other_stable")
@@ -77,6 +77,12 @@ _SECRET_SHAPE = re.compile(
 
 
 def looks_secret(text: str) -> bool:
+    rs = _get_rust_pe()
+    if rs is not None and type(text) is str:
+        try:
+            return rs.looks_secret(text)
+        except UnicodeEncodeError:
+            pass
     return bool(_SECRET_SHAPE.search(text or ""))
 
 
@@ -189,6 +195,15 @@ def _linked_block(cand: dict, known: Sequence[dict]) -> str:
 
 
 def _validate(item: object, words: List[Tuple[str, int, int]], known: Sequence[dict]) -> Tuple[Optional[dict], str]:
+    rs = _get_rust_pe()
+    if rs is not None and type(words) is list:
+        try:
+            r = rs.validate_fact(item, len(words), known, list(FACT_CLASSES), SECRET_CLASS, list(POLARITIES), list(TIMES),
+                                 list(RELATIONS), MAX_SPAN_WORDS, MAX_KNOWN, STATEMENT_MIN, STATEMENT_MAX)
+        except UnicodeEncodeError:
+            r = None
+        if r is not None:
+            return r
     if not isinstance(item, dict):
         return None, "candidate is not an object"
     span = item.get("span")

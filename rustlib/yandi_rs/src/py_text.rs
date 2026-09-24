@@ -55,7 +55,7 @@ pub fn py_regex(pattern: &str) -> Regex {
     crate::py_regex::compile(pattern)
 }
 
-fn py_decimal_value(c: char) -> Option<u32> {
+pub(crate) fn py_decimal_value(c: char) -> Option<u32> {
     let cp = c as u32;
     // серии по 10 подряд; таблица отсортирована — ищем последний ноль <= cp
     let idx = PY_DECIMAL_ZEROS.partition_point(|&z| z <= cp);

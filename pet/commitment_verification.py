@@ -55,7 +55,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from pet.event_extraction import CLAIM, PROMISE, _is_int, _json_object, segment_words
+from pet.event_extraction import CLAIM, PROMISE, _get_rust_pe, _is_int, _json_object, segment_words
 from agent.relationship_commitments import KIND_EXTERNAL, KIND_IN_CHAT, MAX_VERIFIABLE
 
 MAX_WORDS = 120
@@ -136,6 +136,13 @@ def inside_quotation(message: str, position: int) -> bool:
     """True if `position` of `message` lies inside a quotation (« », „ “, “ ” or "..."; an unclosed quote counts as open).
     Structure only, no vocabulary: what a person quotes is somebody's words, not their own delivery now. Fail closed: a
     person who quotes their OWN deliverable simply is not verified."""
+    rs = _get_rust_pe()
+    if (rs is not None and type(message) is str and type(position) is int and position >= 0
+            and _QUOTE_PAIRS == {"«": "»", "„": "“", "“": "”"}):
+        try:
+            return rs.inside_quotation(message, position)
+        except (UnicodeEncodeError, OverflowError):
+            pass
     stack: List[str] = []
     for ch in message[:position]:
         if stack and ch == stack[-1]:
