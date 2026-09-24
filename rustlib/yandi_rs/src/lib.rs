@@ -32,6 +32,7 @@ mod py_printable_table; // данные: isprintable() для repr
 mod py_case_table;    // данные: Lowercase/Uppercase/Titlecase для str.isupper(), см. gen_py_case_table.py
 mod scene_builder_data; // данные: паттерны SceneBuilder, сгенерированы из Python
 mod resolver_data;    // данные: таблицы object/entity resolver, сгенерированы из Python
+mod trust_data;       // данные: таблица рангов доверия, сгенерирована из Python
 mod py_icase_table;   // данные: группы IGNORECASE Python, см. gen_py_icase_table.py
 mod py_regex;         // транслятор паттернов Python re -> крейт regex
 mod py_decimal_table; // данные: цифры Unicode для py_float, см. gen_py_decimal_table.py
@@ -40,6 +41,7 @@ mod py_word_table; // данные (не подмодуль Python): точна�
 pub mod source_clustering;
 pub mod source_quality;
 pub mod target_router;
+pub mod trust_gate;
 pub mod web_login;
 
 #[pymodule]
@@ -138,6 +140,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     claim_graph::register(py, &claim_graph_mod)?;
     m.add_submodule(&claim_graph_mod)?;
 
+    let trust_gate_mod = PyModule::new_bound(py, "trust_gate")?;
+    trust_gate::register(py, &trust_gate_mod)?;
+    m.add_submodule(&trust_gate_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -156,6 +162,7 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.epistemic_router", &epistemic_router_mod)?;
     sys_modules.set_item("yandi_rs.message_intensity", &message_intensity_mod)?;
     sys_modules.set_item("yandi_rs.orch_risk", &orch_risk_mod)?;
+    sys_modules.set_item("yandi_rs.trust_gate", &trust_gate_mod)?;
     sys_modules.set_item("yandi_rs.claim_graph", &claim_graph_mod)?;
     sys_modules.set_item("yandi_rs.object_resolver", &object_resolver_mod)?;
     sys_modules.set_item("yandi_rs.entity_resolver", &entity_resolver_mod)?;

@@ -7,11 +7,44 @@ trust gates, belief-confidence gate).
 
 Structural extraction only: no epistemic semantics, thresholds, or ordering
 changed.
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/trust_gate.rs — _apply_trust_cap, _calculate_delta_factors и
+«решение» apply_epistemic_trust_adjustment (метка + причины); запись в trace и learning rules остаются здесь.
+Таблица _TRUST_ORDER здесь — единственный источник (Rust-таблица сгенерирована из неё: rustlib/gen_trust_data.py).
+Доказан на совпадение тестом agent/trust_gate_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается переменной
+окружения YANDI_TRUST_GATE_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (`maturin develop`, см. rustlib/README.md).
 """
 
+import logging
+import os
 from typing import Dict
 
 from agent.orch_registry_search import CONF_THRESHOLD
+
+log = logging.getLogger("yandi.trust_gate")
+
+_rust_tg = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_tg():
+    global _rust_tg
+    if _rust_tg is None:
+        if os.environ.get("YANDI_TRUST_GATE_ENGINE") == "rust":
+            try:
+                import yandi_rs.trust_gate as _rs
+                _rust_tg = _rs
+                log.warning("YANDI_TRUST_GATE_ENGINE=rust: используется Rust-реализация trust_gate (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_TRUST_GATE_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_tg = False
+        else:
+            _rust_tg = False
+    return _rust_tg or None
+
+
+def _is_num(x) -> bool:
+    """int/float (bool — тоже int) в пределах, где приведение к float безопасно и точно."""
+    return isinstance(x, (int, float)) and not (isinstance(x, int) and abs(x) > 2 ** 53)
 
 TRUST_STATES = {
     "GENERATED": "GENERATED",
@@ -72,6 +105,12 @@ def _calculate_delta_factors(
     consensus_agreement: int = 0,
     total_nodes: int = 0,
 ) -> Dict[str, float]:
+    rs = _get_rust_tg()
+    if (rs is not None and isinstance(verification_verdict, str) and _is_num(confidence)
+            and _is_num(consensus_agreement) and _is_num(total_nodes)):
+        return dict(rs.calculate_delta_factors(
+            verification_verdict, float(confidence), bool(has_sources), float(consensus_agreement), float(total_nodes)))
+
     verification_weight = {
         "VERIFIED": 0.5,
         "PARTIALLY_VERIFIED": 0.2,
@@ -102,6 +141,9 @@ def _calculate_delta_factors(
 
 
 def _apply_trust_cap(current_label: str, cap_label: str) -> str:
+    rs = _get_rust_tg()
+    if rs is not None and isinstance(current_label, str) and isinstance(cap_label, str):
+        return rs.apply_trust_cap(current_label, cap_label)
     current_order = _TRUST_ORDER.get(current_label, 0)
     cap_order = _TRUST_ORDER.get(cap_label, 0)
 
@@ -110,7 +152,7 @@ def _apply_trust_cap(current_label: str, cap_label: str) -> str:
     return current_label
 
 
-def apply_epistemic_trust_adjustment(
+def _compute_label_python(
     is_subjective_answer,
     epistemic_trust_label,
     epistemic_result,
@@ -118,25 +160,8 @@ def apply_epistemic_trust_adjustment(
     final_claim_coverage_score,
     support_grounding_score,
     belief_manager,
-    trace,
-    web_used,
-    claims_data,
-    search_result,
-    epistemic_grounding_score,
-    clarification_answered,
-    is_media_query,
-    supporting_ids,
-    coverage_report_data,
-    intent_result,
 ):
-    """
-    Computes the final trust label from the epistemic classification, the
-    trust cap, testability/domain adjustments, final-claim-coverage and
-    evidence-support grounding gates, and belief-manager confidence.
-
-    Mutates `trace` in place (trust, trust_reason, add_learning_rule calls,
-    _coverage) and returns the computed label.
-    """
+    """Исходная (Python) логика метки и причин из apply_epistemic_trust_adjustment — перенесена сюда ДОСЛОВНО."""
     label = "UNVERIFIED"
     trust_reasons = []
 
@@ -269,6 +294,90 @@ def apply_epistemic_trust_adjustment(
                     trust_reasons.append(f"средняя уверенность убеждений {avg_belief_conf:.2f}")
         except Exception:
             pass
+
+    return label, trust_reasons
+
+
+def _belief_average(belief_manager):
+    """Средняя уверенность активных убеждений (как в исходном try/except Exception) или None."""
+    if not belief_manager:
+        return None
+    try:
+        beliefs = belief_manager.get_all_active()
+        if beliefs:
+            return sum(b.confidence for b in beliefs) / len(beliefs)
+    except Exception:
+        pass
+    return None
+
+
+def _compute_label_rust(
+    rs,
+    is_subjective_answer,
+    epistemic_trust_label,
+    epistemic_result,
+    entity,
+    final_claim_coverage_score,
+    support_grounding_score,
+    belief_manager,
+):
+    """(label, reasons) через Rust или None, если типы входов не те, что знает Rust (тогда — Python-путь)."""
+    if not (isinstance(epistemic_trust_label, str) and _is_num(final_claim_coverage_score) and _is_num(support_grounding_score)):
+        return None
+    # атрибуты читаем ДО обращения к belief_manager — тот же порядок возможных ошибок, что и в оригинале
+    domain, testability = epistemic_result.domain, epistemic_result.testability
+    cap = epistemic_result.max_trust_cap
+    science = epistemic_result.is_science_as_model
+    if not (isinstance(domain, str) and isinstance(testability, str) and isinstance(cap, str)):
+        return None
+    avg = _belief_average(belief_manager)
+    if avg is not None and not _is_num(avg):
+        return None
+    label, reasons = rs.compute_trust_label(
+        bool(is_subjective_answer), epistemic_trust_label, domain, testability, cap, bool(science), bool(entity),
+        float(final_claim_coverage_score), float(support_grounding_score), None if avg is None else float(avg),
+    )
+    return label, list(reasons)
+
+
+def apply_epistemic_trust_adjustment(
+    is_subjective_answer,
+    epistemic_trust_label,
+    epistemic_result,
+    entity,
+    final_claim_coverage_score,
+    support_grounding_score,
+    belief_manager,
+    trace,
+    web_used,
+    claims_data,
+    search_result,
+    epistemic_grounding_score,
+    clarification_answered,
+    is_media_query,
+    supporting_ids,
+    coverage_report_data,
+    intent_result,
+):
+    """
+    Computes the final trust label from the epistemic classification, the
+    trust cap, testability/domain adjustments, final-claim-coverage and
+    evidence-support grounding gates, and belief-manager confidence.
+
+    Mutates `trace` in place (trust, trust_reason, add_learning_rule calls,
+    _coverage) and returns the computed label.
+    """
+    rs = _get_rust_tg()
+    computed = None
+    if rs is not None:
+        computed = _compute_label_rust(
+            rs, is_subjective_answer, epistemic_trust_label, epistemic_result, entity,
+            final_claim_coverage_score, support_grounding_score, belief_manager)
+    if computed is None:
+        computed = _compute_label_python(
+            is_subjective_answer, epistemic_trust_label, epistemic_result, entity,
+            final_claim_coverage_score, support_grounding_score, belief_manager)
+    label, trust_reasons = computed
 
     trace.trust = label
     trace.trust_reason = "; ".join(trust_reasons[:4])
