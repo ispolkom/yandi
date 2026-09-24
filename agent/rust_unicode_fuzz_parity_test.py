@@ -62,6 +62,7 @@ def main() -> int:
     import agent.message_intensity as mi
     import agent.orch_risk as orisk
     import agent.personal_boundary as pb
+    import agent.policy as polm
     import agent.scene_builder as sbm
     import agent.source_independence_prototype as sip
     import agent.source_quality as sq
@@ -87,6 +88,7 @@ def main() -> int:
     import yandi_rs.message_intensity as r_mi
     import yandi_rs.orch_risk as r_or
     import yandi_rs.personal_boundary as r_pb
+    import yandi_rs.policy as r_pol
     import yandi_rs.scene_builder as r_sb
     import yandi_rs.source_clustering as r_sc
     import yandi_rs.source_quality as r_sq
@@ -177,6 +179,7 @@ def main() -> int:
     bdry = pb.PersonalBoundary()
     sbld = sbm.SceneBuilder()
     objres = objm.ObjectResolver()
+    pscan, peng = polm.SecretScanner(), polm.PolicyEngine()
     cgraph = cgm.ClaimGraph()
     entres = entm.EntityResolver()
 
@@ -260,6 +263,14 @@ def main() -> int:
         cmp("epistemic.testability", er._detect_testability, lambda x, d: tuple(r_er.detect_testability(x, d)), ql, dom)
         cmp("claim_types.guess", lambda x: ct.guess_claim_type_by_text(x).value, r_ct.guess_claim_type_by_text, t)
         cmp("object_resolver", objres.resolve, lambda x: dict(r_obj.resolve(x)), t)
+        secret = rng.choice(["sk-" + "a" * rng.randint(18, 24), "AKIA" + "A1" * rng.randint(7, 9), "hf_" + "b" * rng.randint(28, 33), "api_key = " + "k" * rng.randint(18, 24),
+                             'password = "' + "p" * rng.randint(5, 8) + '"', "https://u:p@example.com", "-----BEGIN RSA PRIVATE KEY-----", "token='" + "t" * rng.randint(14, 18) + "'"])
+        stext = t + rng.choice(["", " ", "_"]) + secret + rng.choice(["", " ", "_", "\u0301"]) + u
+        cmp("policy.scan_text", lambda x: pscan.scan_text(x), lambda x: [{"type": k, "match": m, "pos": p, "source": "<text>"} for k, m, p in r_pol.scan_text(x)], stext)
+        cmp("policy.check_shell", peng.check_shell, lambda x: (lambda a, r, c: {"allowed": a, "reason": r, "cmd": c})(*r_pol.check_shell(x)),
+            rng.choice(["ls", "rm -rf", "git status", "lsblk", ""]) + rng.choice(TRICKY + ["", " "]) + t[:20])
+        cmp("policy.check_network", peng.check_network, lambda h: ({"allowed": True, "host": h} if r_pol.check_network(h) else {"allowed": False, "host": h, "reason": "not in network allowlist"}),
+            rng.choice(["pypi.org", "api.openai.com", "localhost", "x.huggingface.co"]) + rng.choice(["", ".", ":80"] + TRICKY[:8]))
         cmp("fcc.content_words", lambda x: sorted(fccm._content_words(x)), r_fcc.content_words, t)
         cmp("fcc.has_negation", fccm._has_negation, r_fcc.has_negation, t)
         cmp("fcc.lexical_overlap", fccm._lexical_overlap, r_fcc.lexical_overlap, t, u)

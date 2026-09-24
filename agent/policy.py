@@ -18,6 +18,8 @@ assistant/policy.py — Policy & Safety Layer для PET-системы.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import sys
 import time
@@ -96,10 +98,51 @@ _NETWORK_ALLOW: list[str] = [
 ]
 
 
+# ── Rust-перенос (2026-09-24) ────────────────────────────────────────────────
+# rustlib/yandi_rs/src/policy.rs — SecretScanner.scan_text, PolicyEngine.check_shell/check_network (паттерны и списки
+# СГЕНЕРИРОВАНЫ из этого файла: rustlib/gen_policy_data.py). Доказан тестом agent/policy_rust_parity_test.py. По умолчанию
+# ВЫКЛЮЧЕН; включается YANDI_POLICY_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (см. rustlib/README.md). Делегирует, только
+# пока таблицы этого модуля не изменены (иначе — Python).
+_log = logging.getLogger("yandi.policy")
+_rust_policy = None      # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_policy():
+    global _rust_policy
+    if _rust_policy is None:
+        if os.environ.get("YANDI_POLICY_ENGINE") == "rust":
+            try:
+                import yandi_rs.policy as _rs
+                _rust_policy = _rs
+                _log.warning("YANDI_POLICY_ENGINE=rust: используется Rust-реализация policy (rustlib/yandi_rs)")
+            except ImportError as e:
+                _log.warning("YANDI_POLICY_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_policy = False
+        else:
+            _rust_policy = False
+    return _rust_policy or None
+
+
+def _tables_snapshot():
+    return (tuple((n, p.pattern) for n, p in _SECRET_PATTERNS), frozenset(_SECRET_WHITELIST), frozenset(_SAFE_HOSTS),
+            tuple(_SHELL_ALLOWLIST), tuple(_SHELL_BLOCKLIST), tuple(_NETWORK_ALLOW))
+
+
+_DEFAULT_TABLES = _tables_snapshot()
+
+
+def _tables_unchanged() -> bool:
+    return _tables_snapshot() == _DEFAULT_TABLES
+
+
 # ── SecretScanner ─────────────────────────────────────────────────────────────
 
 class SecretScanner:
     def scan_text(self, text: str, source: str = "<text>") -> list[dict]:
+        rs = _get_rust_policy()
+        if rs is not None and isinstance(text, str) and _tables_unchanged():
+            return [{"type": kind, "match": matched, "pos": pos, "source": source}
+                    for kind, matched, pos in rs.scan_text(text)]
         findings = []
         for name, pattern in _SECRET_PATTERNS:
             for m in pattern.finditer(text):
@@ -154,6 +197,10 @@ class PolicyEngine:
             self._cfg = {}
 
     def check_shell(self, cmd: str) -> dict:
+        rs = _get_rust_policy()
+        if rs is not None and isinstance(cmd, str) and _tables_unchanged():
+            allowed, reason, stripped = rs.check_shell(cmd)
+            return {"allowed": allowed, "reason": reason, "cmd": stripped}
         cmd = cmd.strip()
         # Blocklist first
         for bad in _SHELL_BLOCKLIST:
@@ -166,6 +213,11 @@ class PolicyEngine:
         return {"allowed": False, "reason": "not in allowlist", "cmd": cmd}
 
     def check_network(self, host: str) -> dict:
+        rs = _get_rust_policy()
+        if rs is not None and isinstance(host, str) and _tables_unchanged():
+            if rs.check_network(host):
+                return {"allowed": True, "host": host}
+            return {"allowed": False, "host": host, "reason": "not in network allowlist"}
         for allowed in _NETWORK_ALLOW:
             if host == allowed or host.endswith("." + allowed):
                 return {"allowed": True, "host": host}
