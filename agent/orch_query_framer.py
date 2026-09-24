@@ -9,6 +9,8 @@ orch_query_framer.py — Матрица составляющих запроса 
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -68,8 +70,57 @@ _MISSING_TO_QUESTION = {
 }
 
 
+# Rust-перенос (2026-09-24): rustlib/yandi_rs/src/orch_query_framer.rs — `decide_policy`, `_auto_cq`, `_is_safe_domain`. Доказан тестом
+# agent/orch_query_framer_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается YANDI_ORCH_QUERY_FRAMER_ENGINE=rust ПОСЛЕ сборки
+# rustlib/yandi_rs. Делегирует, только пока таблицы (`_SAFE_DOMAINS`, `_GENERIC_OBJECTS`, `_MISSING_TO_QUESTION`) не изменены и поля кадра —
+# «родные» типы; иначе — исходный код ниже.
+_log = logging.getLogger("yandi.orch_query_framer")
+_rust_qf = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_qf():
+    global _rust_qf
+    if _rust_qf is None:
+        if os.environ.get("YANDI_ORCH_QUERY_FRAMER_ENGINE") == "rust":
+            try:
+                import yandi_rs.orch_query_framer as _rs
+                _rust_qf = _rs
+                _log.warning("YANDI_ORCH_QUERY_FRAMER_ENGINE=rust: используется Rust-реализация orch_query_framer (rustlib/yandi_rs)")
+            except ImportError as e:
+                _log.warning("YANDI_ORCH_QUERY_FRAMER_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_qf = False
+        else:
+            _rust_qf = False
+    return _rust_qf or None
+
+
+_TABLES_AT_IMPORT = (frozenset(_SAFE_DOMAINS), frozenset(_GENERIC_OBJECTS), tuple(_MISSING_TO_QUESTION.items()))
+
+
+def _rust_ok():
+    """Rust-ядро, если запрошено и таблицы не менялись с момента импорта."""
+    rs = _get_rust_qf()
+    if rs is None:
+        return None
+    snap = (frozenset(_SAFE_DOMAINS), frozenset(_GENERIC_OBJECTS), tuple(_MISSING_TO_QUESTION.items()))
+    return rs if snap == _TABLES_AT_IMPORT else None
+
+
 def _auto_cq(frame: QueryFrame) -> Optional[str]:
     """Генерирует уточняющий вопрос из missing-списка если LLM не дал своего."""
+    rs = _rust_ok()
+    if rs is not None and (frame.action is None or type(frame.action) is str):
+        miss = frame.missing
+        if not miss:
+            try:
+                return rs.auto_cq(None, frame.action)
+            except UnicodeEncodeError:
+                pass
+        elif type(miss) is list and type(miss[0]) is str:
+            try:
+                return rs.auto_cq(miss[0], frame.action)
+            except UnicodeEncodeError:
+                pass
     if not frame.missing:
         # Нет объекта и нет контекста — очень пустой запрос
         action_str = f"«{frame.action}»" if frame.action else "сделать"
@@ -82,11 +133,23 @@ def _auto_cq(frame: QueryFrame) -> Optional[str]:
 
 
 def _is_safe_domain(domain: str) -> bool:
+    rs = _rust_ok()
+    if rs is not None and type(domain) is str:
+        try:
+            return rs.is_safe_domain(domain)
+        except UnicodeEncodeError:
+            pass
     d = domain.lower()
     return any(s in d for s in _SAFE_DOMAINS)
 
 
 def decide_policy(frame: QueryFrame) -> str:
+    rs = _rust_ok()
+    if rs is not None and type(frame.domain) is str and (frame.obj is None or type(frame.obj) is str):
+        try:
+            return rs.decide_policy(frame.domain, frame.obj, bool(frame.action), bool(frame.constraints))
+        except UnicodeEncodeError:
+            pass
     real_obj  = bool(frame.obj) and frame.obj.lower() not in _GENERIC_OBJECTS
     has_ctx   = bool(frame.constraints)
 

@@ -32,6 +32,7 @@ pub mod policy;
 pub mod scene_builder;
 mod py_json;          // точный json.loads Python (для message_intensity)
 mod py_printable_table; // данные: isprintable() для repr
+mod orch_query_framer_data; // данные: таблицы query framer, сгенерированы из Python (gen_orch_query_framer_data.py)
 mod relationship_memory_data; // данные: таблицы стеммера, сгенерированы из Python (gen_relationship_memory_data.py)
 mod py_unassigned_table; // данные: не назначенные в Unicode Python кодовые точки, см. gen_py_unassigned_table.py
 mod py_casefold_table; // данные: одиночные отображения str.casefold() из Python, см. gen_py_casefold_table.py
@@ -58,6 +59,7 @@ pub mod orch_tag_tree;
 pub mod relationship_memory;
 pub mod core_lifecycle;
 pub mod ui_settings;
+pub mod orch_query_framer;
 pub mod trust_gate;
 pub mod web_login;
 
@@ -201,6 +203,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     ui_settings::register(py, &ui_settings_mod)?;
     m.add_submodule(&ui_settings_mod)?;
 
+    let orch_query_framer_mod = PyModule::new_bound(py, "orch_query_framer")?;
+    orch_query_framer::register(py, &orch_query_framer_mod)?;
+    m.add_submodule(&orch_query_framer_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -226,6 +232,7 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.relationship_memory", &relationship_memory_mod)?;
     sys_modules.set_item("yandi_rs.core_lifecycle", &core_lifecycle_mod)?;
     sys_modules.set_item("yandi_rs.ui_settings", &ui_settings_mod)?;
+    sys_modules.set_item("yandi_rs.orch_query_framer", &orch_query_framer_mod)?;
     sys_modules.set_item("yandi_rs.policy", &policy_mod)?;
     sys_modules.set_item("yandi_rs.final_claim_coverage", &final_claim_coverage_mod)?;
     sys_modules.set_item("yandi_rs.canonical_trust", &canonical_trust_mod)?;
