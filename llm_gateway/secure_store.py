@@ -253,6 +253,14 @@ def _is_genuinely_empty(conn: sqlite3.Connection) -> bool:
 
 
 def _entry_hash(integrity_key: bytes, seq: int, op: str, name_index: str, content_hash: bytes, prev_hash: bytes) -> bytes:
+    # Rust-перенос (2026-09-24): rustlib/yandi_rs/src/crypto.rs::entry_hash (YANDI_CRYPTO_ENGINE=rust, тот же переключатель, что у crypto.py).
+    rs = _crypto._get_rust_cr()
+    if (rs is not None and type(integrity_key) is bytes and type(seq) is int and 0 <= seq < 1 << 64 and type(op) is str
+            and type(name_index) is str and type(content_hash) is bytes and type(prev_hash) is bytes):
+        try:
+            return rs.entry_hash(integrity_key, seq, op, name_index, content_hash, prev_hash)
+        except UnicodeEncodeError:
+            pass        # одинокий суррогат — исходный код ниже (там UnicodeEncodeError тоже)
     msg = (
         seq.to_bytes(8, "big") + b"|" + op.encode("utf-8") + b"|"
         + name_index.encode("utf-8") + b"|" + content_hash + b"|" + prev_hash

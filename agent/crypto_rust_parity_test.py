@@ -236,6 +236,32 @@ def main() -> int:
             o2 = outcome(c.blind_index, *args)
             check("E5 blind_index трудные входы", o1[:2] == o2[:2], f"{o1[:2]} {o2[:2]}")
 
+        # ---- E2. journal entry hash из llm_gateway/secure_store.py ----------------------------------------------------------
+        from llm_gateway import secure_store as ss
+        for i in range(600):
+            ik = rb(rnd.choice([0, 1, 16, 32, 33, 64]))
+            seq = rnd.choice([0, 1, 2, 255, 256, 2 ** 32, 2 ** 63, 2 ** 64 - 1, 2 ** 64, -1, 10 ** 30, rnd.randrange(0, 10 ** 6)])
+            op = rnd.choice(["insert", "delete", "", "вставка", "a|b"])
+            ni = rnd.choice(["", "ab" * 32, "x|y", "имя", "🌍"])
+            ch = rb(rnd.choice([0, 1, 32]))
+            ph = rb(rnd.choice([0, 32]))
+            py_mode()
+            p = outcome(ss._entry_hash, ik, seq, op, ni, ch, ph)
+            rs_mode()
+            r = outcome(ss._entry_hash, ik, seq, op, ni, ch, ph)
+            check("E6 entry_hash журнала", p == r, f"{seq} {op!r} {ni!r}: {p[:2]} vs {r[:2]}")
+        for args in ((b"k", 1, "\ud800", "n", b"c", b"p"), (b"k", 1, "o", "\ud800", b"c", b"p"), (b"k", True, "o", "n", b"c", b"p"), (b"k", 1, "o", "n", "c", b"p"),
+                     (bytearray(b"k"), 1, "o", "n", b"c", b"p"), (b"k", 1.0, "o", "n", b"c", b"p"), (b"k", 1, None, "n", b"c", b"p")):
+            py_mode()
+            p = outcome(ss._entry_hash, *args)
+            rs_mode()
+            r = outcome(ss._entry_hash, *args)
+            check("E7 entry_hash трудные типы", p == r, f"{args!r}: {p[:2]} vs {r[:2]}")
+        # известный ответ: разделители и порядок полей (независимо от реализации)
+        want = _hmac.new(b"k", (7).to_bytes(8, "big") + b"|insert|ab|" + b"c" + b"|" + b"d", hashlib.sha256).digest()
+        rs_mode()
+        check("E8 entry_hash известный ответ", ss._entry_hash(b"k", 7, "insert", "ab", b"c", b"d") == want)
+
         # ---- F. HKDF ------------------------------------------------------------------------------------------------------
         for i in range(200):
             ikm = rb(rnd.choice([0, 1, 16, 32, 64, 100]))

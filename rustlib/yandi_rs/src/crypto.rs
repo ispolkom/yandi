@@ -98,6 +98,21 @@ pub fn blind_index(index_key: &[u8], namespace: &str, normalized_value: &str) ->
     s
 }
 
+/// llm_gateway/secure_store.py::_entry_hash: HMAC-SHA256(integrity_key, seq(8, big-endian) | op | name_index | content_hash | prev_hash) с разделителями «|».
+pub fn entry_hash(integrity_key: &[u8], seq: u64, op: &str, name_index: &str, content_hash: &[u8], prev_hash: &[u8]) -> [u8; 32] {
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(integrity_key).expect("HMAC принимает ключ любой длины");
+    mac.update(&seq.to_be_bytes());
+    mac.update(b"|");
+    mac.update(op.as_bytes());
+    mac.update(b"|");
+    mac.update(name_index.as_bytes());
+    mac.update(b"|");
+    mac.update(content_hash);
+    mac.update(b"|");
+    mac.update(prev_hash);
+    mac.finalize().into_bytes().into()
+}
+
 /// HKDF-SHA256, salt=None (как `HKDF(algorithm=SHA256, length=n, salt=None, info=...)` в keys.py). None — length слишком велик.
 pub fn hkdf_sha256(ikm: &[u8], info: &[u8], length: usize) -> Option<Vec<u8>> {
     let hk = Hkdf::<Sha256>::new(None, ikm);
@@ -161,6 +176,14 @@ fn py_blind_index(index_key: &[u8], namespace: &str, normalized_value: &str) -> 
 }
 
 #[pyfunction]
+#[pyo3(name = "entry_hash")]
+fn py_entry_hash<'py>(
+    py: Python<'py>, integrity_key: &[u8], seq: u64, op: &str, name_index: &str, content_hash: &[u8], prev_hash: &[u8],
+) -> Bound<'py, PyBytes> {
+    b(py, &entry_hash(integrity_key, seq, op, name_index, content_hash, prev_hash))
+}
+
+#[pyfunction]
 #[pyo3(name = "hkdf_sha256")]
 fn py_hkdf_sha256<'py>(py: Python<'py>, ikm: &[u8], info: &[u8], length: usize) -> Option<Bound<'py, PyBytes>> {
     hkdf_sha256(ikm, info, length).map(|v| b(py, &v))
@@ -174,6 +197,7 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_wrap, m)?)?;
     m.add_function(wrap_pyfunction!(py_unwrap, m)?)?;
     m.add_function(wrap_pyfunction!(py_blind_index, m)?)?;
+    m.add_function(wrap_pyfunction!(py_entry_hash, m)?)?;
     m.add_function(wrap_pyfunction!(py_hkdf_sha256, m)?)?;
     Ok(())
 }
@@ -222,6 +246,14 @@ mod tests {
         assert_eq!(unwrap(&KEY, &w, b"aad").unwrap(), vec![9u8; 32]);
         assert!(unwrap(&KEY, &w, b"aae").is_none());
         assert!(unwrap(&KEY, &w[..5], b"aad").is_none());
+    }
+
+    #[test]
+    fn entry_hash_shape() {
+        let h = entry_hash(b"k", 7, "insert", "ab", b"c", b"d");
+        assert_eq!(h.len(), 32);
+        assert_ne!(h, entry_hash(b"k", 8, "insert", "ab", b"c", b"d"));
+        assert_ne!(h, entry_hash(b"k", 7, "insert", "ab", b"cd", b""));
     }
 
     #[test]
