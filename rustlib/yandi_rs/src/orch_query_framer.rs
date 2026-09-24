@@ -5,6 +5,7 @@
 //! (`gen_orch_query_framer_data.py`; порядок `_MISSING_TO_QUESTION` важен — побеждает первое вхождение).
 
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use std::collections::HashSet;
 
@@ -60,24 +61,28 @@ pub fn auto_cq(first_missing: Option<&str>, action: Option<&str>) -> String {
     }
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "is_safe_domain")]
 fn py_is_safe_domain(domain: &str) -> bool {
     is_safe_domain(domain)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "decide_policy", signature = (domain, obj, action_present, has_ctx))]
 fn py_decide_policy(domain: &str, obj: Option<&str>, action_present: bool, has_ctx: bool) -> &'static str {
     decide_policy(domain, obj, action_present, has_ctx)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "auto_cq")]
 fn py_auto_cq(first_missing: Option<&str>, action: Option<&str>) -> String {
     auto_cq(first_missing, action)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_is_safe_domain, m)?)?;
     m.add_function(wrap_pyfunction!(py_decide_policy, m)?)?;

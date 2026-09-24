@@ -10,8 +10,11 @@
 //! а любой посторонний тип → функция возвращает None и Python-обёртка выполняет исходный код (ровно как раньше).
 //! Константы (типы событий, классы фактов…) передаются из Python при каждом вызове — единственный источник правды остаётся в Python.
 
+#[cfg(feature = "python")]
 use pyo3::exceptions::PyKeyError;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
 use crate::py_text::{is_py_space, py_decimal_value, py_strip};
@@ -135,6 +138,7 @@ pub fn inside_quotation(message: &str, position: usize) -> bool {
 
 // ---------- разбор «родных» типов из json.loads ----------
 
+#[cfg(feature = "python")]
 pub(crate) enum V<'py> {
     None,
     Bool,
@@ -145,6 +149,7 @@ pub(crate) enum V<'py> {
     Dict(Bound<'py, PyDict>),
 }
 
+#[cfg(feature = "python")]
 /// None = посторонний тип (подкласс, кортеж, Decimal…) → вызывающий откатывается на Python.
 /// Строка с одиноким суррогатом даёт Err(UnicodeEncodeError) — обёртка тоже откатывается.
 pub(crate) fn classify<'py>(o: &Bound<'py, PyAny>) -> PyResult<Option<V<'py>>> {
@@ -172,6 +177,7 @@ pub(crate) fn classify<'py>(o: &Bound<'py, PyAny>) -> PyResult<Option<V<'py>>> {
     Ok(None)
 }
 
+#[cfg(feature = "python")]
 /// Значение целого: Some(i64) либо None для огромного (тогда любое сравнение с диапазоном слов — «вне диапазона»).
 pub(crate) fn small_int(o: &Bound<'_, PyAny>) -> Option<i64> {
     o.extract::<i64>().ok()
@@ -184,6 +190,7 @@ enum SpanKind {
     NotTwoInts,
 }
 
+#[cfg(feature = "python")]
 fn parse_span(span: Option<Bound<'_, PyAny>>) -> PyResult<Option<SpanKind>> {
     let span = match span {
         None => return Ok(Some(SpanKind::NotTwoInts)),
@@ -223,6 +230,7 @@ fn span_in_range(a: Option<i64>, b: Option<i64>, nwords: usize) -> Option<(i64, 
     }
 }
 
+#[cfg(feature = "python")]
 /// `_in_unit_range` + `float()`: Some(значение) если int/float (не bool) в 0..1.
 fn unit_value(o: Option<Bound<'_, PyAny>>) -> PyResult<Result<Option<f64>, ()>> {
     // Ok(Ok(Some(v))) годно; Ok(Ok(None)) не годно; Ok(Err(())) посторонний тип → откат
@@ -242,10 +250,12 @@ fn unit_value(o: Option<Bound<'_, PyAny>>) -> PyResult<Result<Option<f64>, ()>> 
     }
 }
 
+#[cfg(feature = "python")]
 fn get<'py>(d: &Bound<'py, PyDict>, key: &str) -> PyResult<Option<Bound<'py, PyAny>>> {
     d.get_item(key)
 }
 
+#[cfg(feature = "python")]
 /// str_in: Some(true/false) либо None → откат. Значения не-строки никогда не равны строке из кортежа.
 fn str_in(o: &Option<Bound<'_, PyAny>>, allowed: &[String]) -> PyResult<Option<bool>> {
     let o = match o {
@@ -261,30 +271,35 @@ fn str_in(o: &Option<Bound<'_, PyAny>>, allowed: &[String]) -> PyResult<Option<b
 
 // ---------- PyO3 ----------
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "segment_words")]
 fn py_segment_words(message: &str) -> Vec<(String, usize, usize)> {
     segment_words(message)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "json_text")]
 fn py_json_text(raw: &str) -> String {
     json_text(raw)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "looks_secret")]
 fn py_looks_secret(text: &str) -> bool {
     looks_secret(text)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "inside_quotation")]
 fn py_inside_quotation(message: &str, position: usize) -> bool {
     inside_quotation(message, position)
 }
 
+#[cfg(feature = "python")]
 /// event_extraction._validate_candidate. Возвращает None, если пришёл посторонний тип (тогда выполняется Python).
 #[pyfunction]
 #[pyo3(name = "validate_candidate")]
@@ -338,6 +353,7 @@ fn py_validate_candidate(
     Ok(Some((cand, "").into_py(py)))
 }
 
+#[cfg(feature = "python")]
 /// fact_extraction._validate. Возвращает None, если пришёл посторонний тип.
 #[pyfunction]
 #[pyo3(name = "validate_fact")]
@@ -475,6 +491,7 @@ fn py_validate_fact(
     Ok(Some((out, "").into_py(py)))
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_segment_words, m)?)?;
     m.add_function(wrap_pyfunction!(py_json_text, m)?)?;

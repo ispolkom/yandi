@@ -7,7 +7,9 @@
 //!   * `check_key`   — HKDF-SHA256(salt=None, info="yandi/core/v1/check-value").
 //! Файлы, права, AES-GCM проверочного значения и сама жизненная логика остаются в Python.
 
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyBytes;
 
 use crate::pet_extraction::{classify, small_int, V};
@@ -69,24 +71,28 @@ pub fn id_match(kind: u8, s: &str) -> bool {
     }
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "decode_key")]
 fn py_decode_key<'py>(py: Python<'py>, text: &str) -> Option<Bound<'py, PyBytes>> {
     decode_key(text).map(|v| PyBytes::new_bound(py, &v))
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "id_match")]
 fn py_id_match(kind: u8, s: &str) -> bool {
     id_match(kind, s)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "check_key")]
 fn py_check_key<'py>(py: Python<'py>, derived: &[u8], info: &[u8]) -> Option<Bound<'py, PyBytes>> {
     crate::crypto::hkdf_sha256(derived, info, 32).map(|v| PyBytes::new_bound(py, &v))
 }
 
+#[cfg(feature = "python")]
 /// `_validate`: кортеж `(текст ошибки | None,)`; сам None — посторонний тип, выполнить Python.
 #[pyfunction]
 #[pyo3(name = "validate")]
@@ -166,6 +172,7 @@ fn py_validate(
     Ok(Some((Option::<String>::None,).into_py(py)))
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_decode_key, m)?)?;
     m.add_function(wrap_pyfunction!(py_id_match, m)?)?;

@@ -22,6 +22,7 @@
 use crate::py_text::PyLowerExt;
 use crate::py_text::{py_split_whitespace, py_strip};
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use regex::Regex;
 use std::collections::HashSet;
@@ -211,52 +212,62 @@ pub fn build_edges(texts: &[String]) -> Vec<(usize, usize, u8)> {
     edges
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "split_into_sentences")]
 fn py_split(text: &str) -> Vec<String> {
     split_into_sentences(text)
 }
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "clean_sentence")]
 fn py_clean(sent: &str) -> String {
     clean_sentence(sent)
 }
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "is_world_claim")]
 fn py_world(text: &str) -> bool {
     is_world_claim(text)
 }
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "determine_claim_type")]
 fn py_type(text: &str) -> &'static str {
     determine_claim_type(text)
 }
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "calculate_confidence")]
 fn py_conf(text: &str, relevance: f64) -> f64 {
     calculate_confidence(text, relevance)
 }
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "source_reliability")]
 fn py_rel(uri: &str, source_type: &str) -> f64 {
     source_reliability(uri, source_type)
 }
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "is_contradiction")]
 fn py_contra(t1: &str, t2: &str) -> bool {
     is_contradiction(t1, t2)
 }
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "is_support")]
 fn py_support(t1: &str, t2: &str) -> bool {
     is_support(t1, t2)
 }
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "build_edges")]
 fn py_edges(texts: Vec<String>) -> Vec<(usize, usize, u8)> {
     build_edges(&texts)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_split, m)?)?;
     m.add_function(wrap_pyfunction!(py_clean, m)?)?;

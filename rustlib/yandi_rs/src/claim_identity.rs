@@ -24,6 +24,7 @@
 
 use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -254,30 +255,35 @@ fn stable_dedup(items: Vec<String>) -> Vec<String> {
 
 // ── PyO3-обвязка ────────────────────────────────────────────────────────────
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "canonicalize_claim_text")]
 fn py_canonicalize_claim_text(claim_text: &str) -> String {
     canonicalize_claim_text(claim_text)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "compute_claim_content_hash")]
 fn py_compute_claim_content_hash(claim_text: &str) -> Option<String> {
     compute_claim_content_hash(claim_text)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "extract_subject_anchors")]
 fn py_extract_subject_anchors(claim_text: &str) -> Vec<String> {
     extract_subject_anchors(claim_text)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "extract_content_anchors")]
 fn py_extract_content_anchors(text: &str) -> Vec<String> {
     extract_content_anchors(text)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_canonicalize_claim_text, m)?)?;
     m.add_function(wrap_pyfunction!(py_compute_claim_content_hash, m)?)?;

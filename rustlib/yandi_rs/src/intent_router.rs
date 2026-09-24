@@ -18,6 +18,7 @@
 
 use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use regex::Regex;
 
@@ -201,36 +202,42 @@ pub fn get_intent_explanation(intent_type: &str) -> &'static str {
     }
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "detect_intent")]
 fn py_detect_intent(query: &str) -> (String, f64, String) {
     detect_intent(query)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "should_use_rag")]
 fn py_should_use_rag(intent_type: &str) -> bool {
     should_use_rag(intent_type)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "get_intent_action")]
 fn py_get_intent_action(intent_type: &str) -> &'static str {
     get_intent_action(intent_type)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "get_intent_description")]
 fn py_get_intent_description(intent_type: &str) -> &'static str {
     get_intent_description(intent_type)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "get_intent_explanation")]
 fn py_get_intent_explanation(intent_type: &str) -> &'static str {
     get_intent_explanation(intent_type)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_detect_intent, m)?)?;
     m.add_function(wrap_pyfunction!(py_should_use_rag, m)?)?;

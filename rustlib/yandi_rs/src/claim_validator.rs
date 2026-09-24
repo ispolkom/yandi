@@ -14,6 +14,7 @@
 //! ВЫКЛЮЧЕНО — переключатель YANDI_CLAIM_VALIDATOR_ENGINE=rust (см. agent/claim_validator.py).
 
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use regex::Regex;
 
@@ -133,12 +134,14 @@ pub fn validate(claim_text: &str) -> (bool, &'static str) {
 
 // ── PyO3-обвязка ────────────────────────────────────────────────────────────
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "normalize_claim_text")]
 fn py_normalize_claim_text(claim_text: &str) -> String {
     normalize_claim_text(claim_text)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "validate")]
 fn py_validate(claim_text: &str) -> (bool, String) {
@@ -146,6 +149,7 @@ fn py_validate(claim_text: &str) -> (bool, String) {
     (ok, reason.to_string())
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_normalize_claim_text, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate, m)?)?;

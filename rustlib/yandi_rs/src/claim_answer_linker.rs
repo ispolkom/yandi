@@ -17,7 +17,9 @@
 
 use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 use regex::Regex;
 
@@ -52,6 +54,7 @@ pub fn is_claim_supporting(claim_text: &str, key_phrases: &[String]) -> bool {
     false
 }
 
+#[cfg(feature = "python")]
 /// agent/claim_answer_linker.py::ClaimAnswerLinker.link_answer_to_claims — возвращает (answer,
 /// supporting_claim_ids). Чистая логика (extract_key_phrases + is_claim_supporting) через
 /// PyO3-функцию ниже, работающую напрямую со списком Python dict, чтобы claim_id вернулся тем
@@ -63,18 +66,21 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "extract_key_phrases")]
 fn py_extract_key_phrases(text: &str) -> Vec<String> {
     extract_key_phrases(text)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "is_claim_supporting")]
 fn py_is_claim_supporting(claim_text: &str, key_phrases: Vec<String>) -> bool {
     is_claim_supporting(claim_text, &key_phrases)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "link_answer_to_claims")]
 fn py_link_answer_to_claims<'py>(

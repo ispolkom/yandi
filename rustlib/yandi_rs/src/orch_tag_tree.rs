@@ -8,6 +8,7 @@
 //! `round(x, 4)` — через форматирование `{:.4}` (корректное округление, как в CPython); логарифм — тот же libm, что у `math.log`.
 
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use std::collections::HashSet;
 
@@ -103,24 +104,28 @@ pub fn lsh_entropy(queries: &[String], n_buckets: usize) -> f64 {
     entropy_from_counts(&counts, n_buckets).unwrap_or(0.0)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "tokenize")]
 fn py_tokenize(text: &str) -> Vec<String> {
     tokenize(text)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "lsh_bucket")]
 fn py_lsh_bucket(token: &str, n_buckets: u64) -> u64 {
     lsh_bucket(token, n_buckets)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "lsh_entropy")]
 fn py_lsh_entropy(queries: Vec<String>, n_buckets: usize) -> f64 {
     lsh_entropy(&queries, n_buckets)
 }
 
+#[cfg(feature = "python")]
 /// Энтропия узла по его гистограмме (`TagTree.update`): None — сумма 0, энтропия узла не меняется.
 #[pyfunction]
 #[pyo3(name = "entropy_from_hist")]
@@ -129,12 +134,14 @@ fn py_entropy_from_hist(counts: Vec<u64>) -> Option<f64> {
     entropy_from_counts(&counts, n)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "stopwords")]
 fn py_stopwords() -> Vec<String> {
     STOP.iter().map(|s| s.to_string()).collect()
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_tokenize, m)?)?;
     m.add_function(wrap_pyfunction!(py_lsh_bucket, m)?)?;

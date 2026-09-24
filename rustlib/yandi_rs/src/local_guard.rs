@@ -17,7 +17,9 @@
 
 use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyDict;
 use regex::Regex;
 use std::collections::HashSet;
@@ -129,18 +131,21 @@ pub fn is_local_request(
 
 // ── PyO3-обвязка ────────────────────────────────────────────────────────────
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "host_name")]
 fn py_host_name(host_header: &str) -> String {
     host_name(host_header)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "is_extension_path")]
 fn py_is_extension_path(path: &str) -> bool {
     is_extension_path(path)
 }
 
+#[cfg(feature = "python")]
 fn get_str(headers: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
     match headers.get_item(key)? {
         Some(v) => Ok(Some(v.extract::<String>()?)),
@@ -148,6 +153,7 @@ fn get_str(headers: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
     }
 }
 
+#[cfg(feature = "python")]
 /// headers: Python dict {"host": "...", "origin": "...", "sec-fetch-site": "..."} — ключ
 /// отсутствует, если заголовка не было (не кладите None значением, кладите отсутствие ключа).
 /// path: Optional[str]. Возвращает (allowed, reason) — тот же контракт, что и в pet/local_guard.py.
@@ -165,12 +171,14 @@ fn py_is_allowed_request(
     Ok((allowed, reason.to_string()))
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "is_local_request")]
 fn py_is_local_request(headers: &Bound<'_, PyDict>) -> PyResult<(bool, String)> {
     py_is_allowed_request(headers, None)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_host_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_is_extension_path, m)?)?;

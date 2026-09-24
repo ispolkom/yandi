@@ -14,7 +14,9 @@
 use crate::py_text::PyLowerExt;
 use crate::resolver_data::OBJECT_TYPES;
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyDict;
 use regex::Regex;
 
@@ -58,6 +60,7 @@ pub fn resolve(query: &str) -> Resolved {
     best
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "resolve")]
 fn py_resolve<'py>(py: Python<'py>, query: &str) -> PyResult<Bound<'py, PyDict>> {
@@ -70,6 +73,7 @@ fn py_resolve<'py>(py: Python<'py>, query: &str) -> PyResult<Bound<'py, PyDict>>
     Ok(d)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_resolve, m)?)?;
     Ok(())

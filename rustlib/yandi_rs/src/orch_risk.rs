@@ -20,6 +20,7 @@
 //! ВЫКЛЮЧЕНО — переключатель YANDI_ORCH_RISK_ENGINE=rust (см. agent/orch_risk.py).
 
 use crate::py_text::PyLowerExt;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 
 const CRITICAL_KW: &[&str] = &[
@@ -62,6 +63,7 @@ pub fn assess_risk(query: &str) -> Risk {
     Risk { risk_level: "low", mandatory_arbitrage: false, validator_model: "7b", nodes_required: 1 }
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "assess_risk")]
 fn py_assess_risk(query: &str) -> (String, bool, String, i64) {
@@ -69,6 +71,7 @@ fn py_assess_risk(query: &str) -> (String, bool, String, i64) {
     (r.risk_level.to_string(), r.mandatory_arbitrage, r.validator_model.to_string(), r.nodes_required)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_assess_risk, m)?)?;
     Ok(())

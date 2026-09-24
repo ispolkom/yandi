@@ -11,7 +11,9 @@
 //! ВЫКЛЮЧЕНО — переключатель YANDI_CANONICAL_TRUST_ENGINE=rust (см. agent/orchestrator/epistemic/canonical_trust.py).
 
 use crate::trust_gate::{apply_trust_cap, order};
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
 pub struct Canonical {
@@ -65,6 +67,7 @@ pub fn compute(final_trust: Option<String>, gate: Option<String>) -> Canonical {
     Canonical { canonical_trust: canonical, diverged: f != g, stricter_strand: stricter, reason }
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "compute_canonical_trust", signature = (final_trust=None, gate=None))]
 fn py_compute<'py>(py: Python<'py>, final_trust: Option<String>, gate: Option<String>) -> PyResult<Bound<'py, PyDict>> {
@@ -77,6 +80,7 @@ fn py_compute<'py>(py: Python<'py>, final_trust: Option<String>, gate: Option<St
     Ok(d)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_compute, m)?)?;
     Ok(())

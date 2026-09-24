@@ -12,6 +12,8 @@ license = "MIT"
 members = ["core_supervisor", "key_root"]
 
 [dependencies]
+# Перенесённая с Python логика ядра (rustlib/): чистая Rust-библиотека БЕЗ Python (default-features = false) — путь к единому бинарнику.
+yandi_rs = { path = "../rustlib/yandi_rs", default-features = false }
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
 

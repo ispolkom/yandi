@@ -5,6 +5,7 @@
 //! (не байт!); результат — множество (Python set). Таблицы сгенерированы ИЗ Python (`gen_relationship_memory_data.py`).
 
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use std::collections::HashSet;
 
@@ -58,18 +59,21 @@ pub fn stems(text: &str, drop_non_content: bool) -> HashSet<String> {
     out
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "stem")]
 fn py_stem(token: &str) -> String {
     stem(token)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "stems")]
 fn py_stems(text: &str, drop_non_content: bool) -> HashSet<String> {
     stems(text, drop_non_content)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_stem, m)?)?;
     m.add_function(wrap_pyfunction!(py_stems, m)?)?;

@@ -16,7 +16,9 @@
 
 use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyDictMethods};
 use regex::Regex;
 
@@ -315,6 +317,7 @@ pub fn get_response_template(
 
 // ── PyO3-обвязка ────────────────────────────────────────────────────────────
 
+#[cfg(feature = "python")]
 fn get_f64(d: &Bound<'_, PyDict>, key: &str, default: f64) -> PyResult<f64> {
     match d.get_item(key)? {
         Some(v) => v.extract::<f64>(),
@@ -322,6 +325,7 @@ fn get_f64(d: &Bound<'_, PyDict>, key: &str, default: f64) -> PyResult<f64> {
     }
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "analyze", signature = (text, context=None))]
 fn py_analyze<'py>(py: Python<'py>, text: &str, context: Option<&Bound<'py, PyDict>>) -> PyResult<Bound<'py, PyDict>> {
@@ -346,6 +350,7 @@ fn py_analyze<'py>(py: Python<'py>, text: &str, context: Option<&Bound<'py, PyDi
     Ok(d)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "get_response_template", signature = (is_insult, target, is_constructive, is_criticism, is_feedback, context=None))]
 fn py_get_response_template<'py>(
@@ -370,6 +375,7 @@ fn py_get_response_template<'py>(
     Ok(d)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_analyze, m)?)?;
     m.add_function(wrap_pyfunction!(py_get_response_template, m)?)?;

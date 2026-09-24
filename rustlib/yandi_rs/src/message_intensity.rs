@@ -15,7 +15,9 @@
 //! ВЫКЛЮЧЕНО — переключатель YANDI_MESSAGE_INTENSITY_ENGINE=rust (см. agent/message_intensity.py).
 
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyDict;
 use regex::Regex;
 
@@ -271,6 +273,7 @@ pub fn parse_self_report(raw: &str) -> (String, IntensityResult) {
 
 // ── PyO3-обвязка ────────────────────────────────────────────────────────────
 
+#[cfg(feature = "python")]
 fn stop_to_pyerr(s: Stop) -> PyErr {
     match s {
         Stop::Recursion => pyo3::exceptions::PyRecursionError::new_err("maximum recursion depth exceeded while decoding a JSON document"),
@@ -278,6 +281,7 @@ fn stop_to_pyerr(s: Stop) -> PyErr {
     }
 }
 
+#[cfg(feature = "python")]
 fn result_to_dict<'py>(py: Python<'py>, r: &IntensityResult) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new_bound(py);
     d.set_item("ok", r.ok)?;
@@ -292,12 +296,14 @@ fn result_to_dict<'py>(py: Python<'py>, r: &IntensityResult) -> PyResult<Bound<'
     Ok(d)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "strip_all_markers")]
 fn py_strip_all_markers(text: &str) -> String {
     strip_all_markers(text)
 }
 
+#[cfg(feature = "python")]
 /// state: любой Python-объект — сериализуется через json.dumps (тот же путь, каким реально
 /// приходят эти данные из распарсенного ответа модели), затем разбирается тем же точным
 /// json.loads-портом. Приближение (известное): значения, которые json.dumps не умеет, дают общий
@@ -318,6 +324,7 @@ fn py_intensity_from_state<'py>(py: Python<'py>, state: &Bound<'py, PyAny>, erro
     result_to_dict(py, &result)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "parse_self_report")]
 fn py_parse_self_report<'py>(py: Python<'py>, raw: &str) -> PyResult<(String, Bound<'py, PyDict>)> {
@@ -325,6 +332,7 @@ fn py_parse_self_report<'py>(py: Python<'py>, raw: &str) -> PyResult<(String, Bo
     Ok((visible, result_to_dict(py, &result)?))
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_strip_all_markers, m)?)?;
     m.add_function(wrap_pyfunction!(py_intensity_from_state, m)?)?;

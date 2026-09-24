@@ -7,6 +7,7 @@
 //! ...` в Python всегда зеркалит `from pet.xxx import ...`, и добавление следующего куска никогда
 //! не требует переделывать то, что уже есть.
 
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 
 pub mod boundaries;
@@ -57,13 +58,17 @@ pub mod crypto;
 pub mod pet_extraction;
 pub mod orch_tag_tree;
 pub mod relationship_memory;
+#[cfg(feature = "python")]
 pub mod core_lifecycle;
+#[cfg(feature = "python")]
 pub mod ui_settings;
 pub mod orch_query_framer;
+#[cfg(feature = "python")]
 pub mod claim_status;
 pub mod trust_gate;
 pub mod web_login;
 
+#[cfg(feature = "python")]
 #[pymodule]
 fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let sys_modules = py.import_bound("sys")?.getattr("modules")?;

@@ -30,6 +30,7 @@
 
 use crate::claim_identity::extract_subject_anchors;
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use regex::Regex;
 use std::collections::HashSet;
@@ -159,12 +160,14 @@ pub fn hardening_guard(claim_a: &str, claim_b: &str) -> Option<String> {
 
 // ── PyO3-обвязка ────────────────────────────────────────────────────────────
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "hardening_guard")]
 fn py_hardening_guard(claim_a: &str, claim_b: &str) -> Option<String> {
     hardening_guard(claim_a, claim_b)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_hardening_guard, m)?)?;
     Ok(())

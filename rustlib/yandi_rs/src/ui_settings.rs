@@ -8,7 +8,9 @@
 //! перебирает `set` строк (порядок зависит от хэш-рандомизации и не определён) и называет случайный; здесь порядок детерминирован
 //! (сначала голос, затем советники local→remote→api). Тест принимает любое из допустимых сообщений.
 
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
 use crate::pet_extraction::{classify, V};
@@ -29,6 +31,7 @@ impl From<String> for Out {
     }
 }
 
+#[cfg(feature = "python")]
 /// Значение `doc.get(key) or {}` → (dict | ошибка-тип). Возвращает Some(dict) если объект, None если «не dict».
 fn get_obj_or_empty<'py>(d: &Bound<'py, PyDict>, key: &str) -> Result<Result<Option<Bound<'py, PyDict>>, ()>, Out> {
     // Ok(Ok(Some(d))) — dict; Ok(Ok(None)) — falsy → пустой dict; Ok(Err(())) — truthy не-dict
@@ -85,6 +88,7 @@ fn get_obj_or_empty<'py>(d: &Bound<'py, PyDict>, key: &str) -> Result<Result<Opt
     }
 }
 
+#[cfg(feature = "python")]
 /// `_text(value, name, limit)`.
 fn text(v: Option<Bound<'_, PyAny>>, name: &str, limit: usize) -> Result<String, Out> {
     let v = match v {
@@ -141,6 +145,7 @@ fn model_ok(m: &str) -> bool {
     n <= 128
 }
 
+#[cfg(feature = "python")]
 /// Строка из `doc.get(key, default)` для сравнения с перечнем: Ok(Some(s)) — строка; Ok(None) — не строка (не равна ничему из перечня).
 fn str_or_other(v: Option<Bound<'_, PyAny>>, default: &str) -> Result<Option<String>, Out> {
     match v {
@@ -153,6 +158,7 @@ fn str_or_other(v: Option<Bound<'_, PyAny>>, default: &str) -> Result<Option<Str
     }
 }
 
+#[cfg(feature = "python")]
 fn run<'py>(py: Python<'py>, doc: &Bound<'py, PyAny>) -> Result<Bound<'py, PyDict>, Out> {
     let d = match classify(doc).map_err(|_| Out::Fallback)? {
         None => return Err(Out::Fallback),
@@ -299,6 +305,7 @@ fn run<'py>(py: Python<'py>, doc: &Bound<'py, PyAny>) -> Result<Bound<'py, PyDic
     Ok(out)
 }
 
+#[cfg(feature = "python")]
 /// `(True, dict)` — годный документ; `(False, текст)` — SettingsError; None — посторонний тип, выполнить Python.
 #[pyfunction]
 #[pyo3(name = "validate")]
@@ -310,6 +317,7 @@ fn py_validate(py: Python<'_>, doc: &Bound<'_, PyAny>) -> PyResult<Option<PyObje
     })
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate, m)?)?;
     Ok(())

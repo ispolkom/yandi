@@ -13,7 +13,9 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyBytes;
 use rand::RngCore;
 use sha2::Sha256;
@@ -121,16 +123,19 @@ pub fn hkdf_sha256(ikm: &[u8], info: &[u8], length: usize) -> Option<Vec<u8>> {
     Some(okm)
 }
 
+#[cfg(feature = "python")]
 fn b<'py>(py: Python<'py>, v: &[u8]) -> Bound<'py, PyBytes> {
     PyBytes::new_bound(py, v)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "build_aad")]
 fn py_build_aad<'py>(py: Python<'py>, entity_type: &str, entity_id: &str, field_name: &str, version: u8) -> Bound<'py, PyBytes> {
     b(py, &build_aad(entity_type, entity_id, field_name, version))
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "encrypt_field")]
 fn py_encrypt_field<'py>(
@@ -139,6 +144,7 @@ fn py_encrypt_field<'py>(
     encrypt_field(key, plaintext, entity_type, entity_id, field_name, version).map(|v| b(py, &v))
 }
 
+#[cfg(feature = "python")]
 /// Только для известных ответов в тестах: детерминированный nonce (12 байт).
 #[pyfunction]
 #[pyo3(name = "encrypt_field_with_nonce")]
@@ -149,6 +155,7 @@ fn py_encrypt_field_with_nonce<'py>(
     encrypt_field_with_nonce(key, &n, plaintext, entity_type, entity_id, field_name, version).map(|v| b(py, &v))
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "decrypt_field")]
 fn py_decrypt_field<'py>(
@@ -157,24 +164,28 @@ fn py_decrypt_field<'py>(
     decrypt_field(key, blob, entity_type, entity_id, field_name).map(|v| b(py, &v))
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "wrap")]
 fn py_wrap<'py>(py: Python<'py>, key: &[u8], data: &[u8], aad: &[u8]) -> Option<Bound<'py, PyBytes>> {
     wrap(key, data, aad).map(|v| b(py, &v))
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "unwrap")]
 fn py_unwrap<'py>(py: Python<'py>, key: &[u8], wrapped: &[u8], aad: &[u8]) -> Option<Bound<'py, PyBytes>> {
     unwrap(key, wrapped, aad).map(|v| b(py, &v))
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "blind_index")]
 fn py_blind_index(index_key: &[u8], namespace: &str, normalized_value: &str) -> String {
     blind_index(index_key, namespace, normalized_value)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "entry_hash")]
 fn py_entry_hash<'py>(
@@ -183,12 +194,14 @@ fn py_entry_hash<'py>(
     b(py, &entry_hash(integrity_key, seq, op, name_index, content_hash, prev_hash))
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "hkdf_sha256")]
 fn py_hkdf_sha256<'py>(py: Python<'py>, ikm: &[u8], info: &[u8], length: usize) -> Option<Bound<'py, PyBytes>> {
     hkdf_sha256(ikm, info, length).map(|v| b(py, &v))
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_build_aad, m)?)?;
     m.add_function(wrap_pyfunction!(py_encrypt_field, m)?)?;

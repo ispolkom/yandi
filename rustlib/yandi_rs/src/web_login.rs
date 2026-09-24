@@ -15,6 +15,7 @@
 //! Статус (2026-09-23): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_LOGIN_ENGINE=rust (см. pet/web_login.py).
 
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -28,6 +29,7 @@ const FREE_ATTEMPTS: i64 = 3;
 const BACKOFF_BASE: i64 = 2;
 const BACKOFF_MAX: i64 = 300;
 
+#[cfg(feature = "python")]
 fn read_clock(py: Python<'_>, clock: &Py<PyAny>) -> PyResult<f64> {
     clock.call0(py)?.extract::<f64>(py)
 }
@@ -50,6 +52,7 @@ fn system_now() -> f64 {
         .unwrap_or(0.0)
 }
 
+#[cfg(feature = "python")]
 /// pet/web_login.py::Sessions
 #[pyclass]
 pub struct Sessions {
@@ -58,6 +61,7 @@ pub struct Sessions {
     items: HashMap<String, f64>,
 }
 
+#[cfg(feature = "python")]
 #[pymethods]
 impl Sessions {
     #[new]
@@ -111,6 +115,7 @@ impl Sessions {
     }
 }
 
+#[cfg(feature = "python")]
 impl Sessions {
     fn purge(&mut self, py: Python<'_>) -> PyResult<()> {
         let now = read_clock(py, &self.clock)?;
@@ -119,6 +124,7 @@ impl Sessions {
     }
 }
 
+#[cfg(feature = "python")]
 /// pet/web_login.py::Throttle
 #[pyclass]
 pub struct Throttle {
@@ -130,6 +136,7 @@ pub struct Throttle {
     last: f64,
 }
 
+#[cfg(feature = "python")]
 #[pymethods]
 impl Throttle {
     #[new]
@@ -172,6 +179,7 @@ impl Throttle {
     }
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Sessions>()?;
     m.add_class::<Throttle>()?;
@@ -179,7 +187,7 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 // ── Юнит-тесты чистой логики (backoff_after — единственная часть без часов/Python) ──────────
-#[cfg(test)]
+#[cfg(all(test, feature = "python"))]
 mod tests {
     use super::*;
 

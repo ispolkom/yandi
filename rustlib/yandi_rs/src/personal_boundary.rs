@@ -19,7 +19,9 @@
 
 use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyDict;
 use regex::Regex;
 
@@ -207,6 +209,7 @@ pub fn get_response_template(
     ("neutral", "neutral", "Я готова продолжить разговор.")
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "analyze")]
 fn py_analyze<'py>(py: Python<'py>, query: &str) -> PyResult<Bound<'py, PyDict>> {
@@ -224,6 +227,7 @@ fn py_analyze<'py>(py: Python<'py>, query: &str) -> PyResult<Bound<'py, PyDict>>
     Ok(d)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "get_response_template")]
 #[allow(clippy::too_many_arguments)]
@@ -240,6 +244,7 @@ fn py_get_response_template(
     get_response_template(is_provocation, is_apology, is_sincere, is_personal, is_deep_question, is_social, trust, irritation)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_analyze, m)?)?;
     m.add_function(wrap_pyfunction!(py_get_response_template, m)?)?;

@@ -11,8 +11,14 @@ name = "yandi_rs"
 # юнит-тесты обычным образом, без сборки через maturin.
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# `python` (по умолчанию) = привязка к Python через PyO3; без неё (`--no-default-features`) собирается ЧИСТАЯ Rust-библиотека без Python —
+# её подключает узел (node/) и будущее ядро на Rust: единый бинарник без интерпретатора.
+default = ["python"]
+python = ["dep:pyo3"]
+
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
 regex = "1.10"
 once_cell = "1.19"
 rand = "0.8"

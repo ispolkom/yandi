@@ -23,7 +23,9 @@
 use crate::py_text::PyLowerExt;
 use crate::py_text::{py_isupper, py_split_whitespace, py_strip};
 use crate::resolver_data::{KNOWN_GAMES, KNOWN_GAME_TERMS, KNOWN_MEDIA};
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
 pub struct Entity {
@@ -88,6 +90,7 @@ pub fn resolve(query: &str) -> Entity {
     Entity { type_, game, canonical_name: q.to_string(), confidence, is_proper_name, needs_exact_search: confidence > 0.4, categories }
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "resolve")]
 fn py_resolve<'py>(py: Python<'py>, query: &str) -> PyResult<Bound<'py, PyDict>> {
@@ -103,6 +106,7 @@ fn py_resolve<'py>(py: Python<'py>, query: &str) -> PyResult<Bound<'py, PyDict>>
     Ok(d)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_resolve, m)?)?;
     Ok(())

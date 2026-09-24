@@ -31,7 +31,9 @@
 
 use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyDict;
 use regex::Regex;
 
@@ -235,30 +237,35 @@ pub fn classify_claim_role(claim_text: &str, query: &str) -> ClaimRole {
 
 // ── PyO3-обвязка ────────────────────────────────────────────────────────────
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "is_absence_claim")]
 fn py_is_absence_claim(claim_text: &str) -> bool {
     is_absence_claim(claim_text)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "is_existence_question")]
 fn py_is_existence_question(query: &str) -> bool {
     is_existence_question(query)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "extract_existence_target")]
 fn py_extract_existence_target(query: &str) -> Vec<String> {
     extract_existence_target(query)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "target_overlap")]
 fn py_target_overlap(claim_lower: &str, target_words: Vec<String>) -> bool {
     target_overlap(claim_lower, &target_words)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "classify_claim_role")]
 fn py_classify_claim_role<'py>(py: Python<'py>, claim_text: &str, query: &str) -> PyResult<Bound<'py, PyDict>> {
@@ -271,18 +278,21 @@ fn py_classify_claim_role<'py>(py: Python<'py>, claim_text: &str, query: &str) -
     Ok(d)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "anchor_hit")]
 fn py_anchor_hit(anchor: &str, haystack: &str) -> bool {
     anchor_hit(anchor, haystack)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "subject_fields")]
 fn py_subject_fields(anchors: Vec<String>, title: &str, url: &str, passage: &str) -> Vec<&'static str> {
     subject_fields(&anchors, title, url, passage)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_anchor_hit, m)?)?;
     m.add_function(wrap_pyfunction!(py_subject_fields, m)?)?;

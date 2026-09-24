@@ -14,7 +14,9 @@
 
 use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
 const MILD_INSULTS: &[&str] = &[
@@ -114,6 +116,7 @@ pub fn generate_apology_response(accepted: bool) -> &'static str {
 
 // ── PyO3-обвязка ────────────────────────────────────────────────────────────
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "detect_toxicity")]
 fn py_detect_toxicity<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyDict>> {
@@ -125,24 +128,28 @@ fn py_detect_toxicity<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, P
     Ok(d)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "is_apology")]
 fn py_is_apology(text: &str) -> (bool, bool) {
     is_apology(text)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "generate_response")]
 fn py_generate_response(level: &str) -> String {
     generate_response(level).to_string()
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "generate_apology_response")]
 fn py_generate_apology_response(accepted: bool) -> String {
     generate_apology_response(accepted).to_string()
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_detect_toxicity, m)?)?;
     m.add_function(wrap_pyfunction!(py_is_apology, m)?)?;

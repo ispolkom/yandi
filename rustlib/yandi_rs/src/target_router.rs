@@ -18,6 +18,7 @@
 use crate::py_text::PyLowerExt;
 use crate::py_text::{is_py_space, py_strip};
 use crate::source_clustering::is_py_word_char;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 
 /// `re.search(r'\bWORD\b', q)` для литерала WORD из словесных символов.
@@ -165,18 +166,21 @@ pub fn get_target_description(target: &str) -> &'static str {
     }
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "detect_target")]
 fn py_detect_target(query: &str) -> (&'static str, f64) {
     detect_target(query)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "get_target_description")]
 fn py_get_target_description(target: &str) -> &'static str {
     get_target_description(target)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_detect_target, m)?)?;
     m.add_function(wrap_pyfunction!(py_get_target_description, m)?)?;

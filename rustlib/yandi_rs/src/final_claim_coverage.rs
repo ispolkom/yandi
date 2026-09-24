@@ -18,6 +18,7 @@ use crate::py_text::PyLowerExt;
 use crate::fcc_data::STOPWORDS;
 use crate::py_text::py_strip;
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use regex::Regex;
 use std::collections::HashSet;
@@ -126,6 +127,7 @@ pub fn mandatory_matrix(finals: &[String], pipes: &[String], froles: &[Option<St
         .collect()
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "content_words")]
 fn py_content_words(text: &str) -> Vec<String> {
@@ -133,37 +135,44 @@ fn py_content_words(text: &str) -> Vec<String> {
     v.sort();
     v
 }
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "lexical_overlap")]
 fn py_lexical_overlap(a: &str, b: &str) -> f64 {
     lexical_overlap(a, b)
 }
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "has_negation")]
 fn py_has_negation(text: &str) -> bool {
     has_negation(text)
 }
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "shares_number")]
 fn py_shares_number(a: &str, b: &str) -> bool {
     shares_number(a, b)
 }
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "is_near_duplicate")]
 fn py_is_near_duplicate(a: &str, b: &str) -> bool {
     is_near_duplicate(a, b)
 }
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "mandatory_routing_reason", signature = (a, b, arole=None, brole=None))]
 fn py_reason(a: &str, b: &str, arole: Option<&str>, brole: Option<&str>) -> Option<&'static str> {
     mandatory_routing_reason(a, b, arole, brole)
 }
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "mandatory_matrix")]
 fn py_matrix(finals: Vec<String>, pipes: Vec<String>, froles: Vec<Option<String>>, proles: Vec<Option<String>>) -> Vec<Vec<Option<&'static str>>> {
     mandatory_matrix(&finals, &pipes, &froles, &proles)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_content_words, m)?)?;
     m.add_function(wrap_pyfunction!(py_lexical_overlap, m)?)?;

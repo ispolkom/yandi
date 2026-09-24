@@ -12,6 +12,7 @@
 
 use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use std::collections::HashMap;
 
@@ -112,36 +113,42 @@ pub fn get_response_mode_description(mode_value: &str) -> &'static str {
 
 // ── PyO3-обвязка ────────────────────────────────────────────────────────────
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "get_response_mode")]
 fn py_get_response_mode(claim_type_value: &str) -> String {
     get_response_mode(claim_type_value).to_string()
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "should_use_web_for_type")]
 fn py_should_use_web_for_type(claim_type_value: &str) -> bool {
     should_use_web_for_type(claim_type_value)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "guess_claim_type_by_text")]
 fn py_guess_claim_type_by_text(text: &str) -> String {
     guess_claim_type_by_text(text).to_string()
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "get_trust_cap_for_testability")]
 fn py_get_trust_cap_for_testability(testability: &str) -> String {
     get_trust_cap_for_testability(testability).to_string()
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "get_response_mode_description")]
 fn py_get_response_mode_description(mode_value: &str) -> String {
     get_response_mode_description(mode_value).to_string()
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_get_response_mode, m)?)?;
     m.add_function(wrap_pyfunction!(py_should_use_web_for_type, m)?)?;

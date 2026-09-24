@@ -24,6 +24,7 @@
 
 use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 
 type DomainMarker = (&'static str, &'static [&'static str], f64);
@@ -337,6 +338,7 @@ pub fn get_objectivity_score(testability: &str, domain: &str, knowledge_stabilit
 
 // ── PyO3-обвязка ────────────────────────────────────────────────────────────
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "detect_domain")]
 fn py_detect_domain(q: &str) -> (String, String, f64) {
@@ -344,18 +346,21 @@ fn py_detect_domain(q: &str) -> (String, String, f64) {
     (d.to_string(), s.to_string(), c)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "detect_hypothetical")]
 fn py_detect_hypothetical(query: &str) -> bool {
     detect_hypothetical(query)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "detect_negative_claim")]
 fn py_detect_negative_claim(query: &str) -> bool {
     detect_negative_claim(query)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "detect_testability")]
 fn py_detect_testability(q: &str, domain: &str) -> (String, f64) {
@@ -363,6 +368,7 @@ fn py_detect_testability(q: &str, domain: &str) -> (String, f64) {
     (t.to_string(), c)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "detect_knowledge_stability")]
 fn py_detect_knowledge_stability(q: &str, domain: &str, testability: &str) -> (String, f64, String) {
@@ -370,42 +376,49 @@ fn py_detect_knowledge_stability(q: &str, domain: &str, testability: &str) -> (S
     (s.to_string(), c, r.to_string())
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "get_answer_mode")]
 fn py_get_answer_mode(domain: &str, testability: &str) -> String {
     get_answer_mode(domain, testability).to_string()
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "determine_analysis_depth")]
 fn py_determine_analysis_depth(domain: &str, testability: &str) -> String {
     determine_analysis_depth(domain, testability).to_string()
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "get_trust_cap_for_testability")]
 fn py_get_trust_cap_for_testability(testability: &str) -> String {
     get_trust_cap_for_testability(testability).to_string()
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "get_trust_label_for_epistemic")]
 fn py_get_trust_label_for_epistemic() -> String {
     get_trust_label_for_epistemic().to_string()
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "get_response_mode_description")]
 fn py_get_response_mode_description(mode: &str) -> String {
     get_response_mode_description(mode).to_string()
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "get_objectivity_score", signature = (testability, domain, knowledge_stability, is_hypothetical=false))]
 fn py_get_objectivity_score(testability: &str, domain: &str, knowledge_stability: &str, is_hypothetical: bool) -> (f64, String, bool) {
     get_objectivity_score(testability, domain, knowledge_stability, is_hypothetical)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_detect_domain, m)?)?;
     m.add_function(wrap_pyfunction!(py_detect_hypothetical, m)?)?;

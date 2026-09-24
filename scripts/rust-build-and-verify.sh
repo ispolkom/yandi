@@ -19,7 +19,7 @@ command -v cargo >/dev/null || { echo "НЕ НАЙДЕН cargo (Rust). Уста�
 echo "cargo: $(cargo --version)   python: $($PY --version 2>&1)"
 
 say "2/4 сборка (cargo test + maturin develop --release) — несколько минут при первом запуске"
-( cd rustlib/yandi_rs && cargo test --lib 2>&1 | tail -3 ) || { echo "ОШИБКА: юнит-тесты Rust не прошли"; exit 1; }
+( cd rustlib/yandi_rs && cargo test --lib 2>&1 | tail -3 && cargo test --no-default-features --lib 2>&1 | tail -3 ) || { echo "ОШИБКА: юнит-тесты Rust не прошли (в обоих режимах: с Python и без)"; exit 1; }
 VENV_BIN="$(dirname "$("$PY" -c 'import sys;print(sys.executable)')")"
 export VIRTUAL_ENV="$(dirname "$VENV_BIN")"
 ( cd rustlib/yandi_rs && PATH="$VENV_BIN:$PATH" maturin develop --release 2>&1 | tail -3 ) || { echo "ОШИБКА: сборка не удалась"; exit 1; }

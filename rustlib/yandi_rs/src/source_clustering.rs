@@ -36,6 +36,7 @@
 //! Статус (2026-09-24): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_SOURCE_CLUSTERING_ENGINE=rust (см. agent/source_clustering.py).
 
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
 
@@ -264,12 +265,14 @@ pub fn cluster_roots(titles: &[String], contents: &[String]) -> Vec<usize> {
 
 // ── PyO3-обвязка ────────────────────────────────────────────────────────────
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "is_word_char")]
 fn py_is_word_char(codepoint: u32) -> bool {
     char::from_u32(codepoint).map(is_py_word_char).unwrap_or(false)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "sequence_ratio")]
 fn py_sequence_ratio(a: &str, b: &str) -> f64 {
@@ -277,24 +280,28 @@ fn py_sequence_ratio(a: &str, b: &str) -> f64 {
     sequence_ratio(&a, &b)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "title_similarity")]
 fn py_title_similarity(a: &str, b: &str) -> f64 {
     title_similarity(a, b)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "content_fingerprint_similarity")]
 fn py_content_fingerprint_similarity(a: &str, b: &str) -> f64 {
     content_fingerprint_similarity(a, b)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "similar")]
 fn py_similar(title_a: &str, title_b: &str, content_a: &str, content_b: &str) -> bool {
     similar(title_a, title_b, content_a, content_b)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "cluster_roots")]
 fn py_cluster_roots(titles: Vec<String>, contents: Vec<String>) -> PyResult<Vec<usize>> {
@@ -304,6 +311,7 @@ fn py_cluster_roots(titles: Vec<String>, contents: Vec<String>) -> PyResult<Vec<
     Ok(cluster_roots(&titles, &contents))
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_is_word_char, m)?)?;
     m.add_function(wrap_pyfunction!(py_sequence_ratio, m)?)?;

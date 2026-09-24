@@ -24,6 +24,7 @@ use crate::policy_data::*;
 use crate::py_text::py_strip;
 use crate::source_clustering::is_py_word_char;
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use regex::Regex;
 
@@ -139,24 +140,28 @@ pub fn check_network(host: &str) -> bool {
     NETWORK_ALLOW.iter().any(|a| host == *a || host.ends_with(&format!(".{a}")))
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "scan_text")]
 fn py_scan_text(text: &str) -> Vec<(String, String, usize)> {
     scan_text(text).into_iter().map(|f| (f.kind.to_string(), f.matched, f.pos)).collect()
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "check_shell")]
 fn py_check_shell(cmd: &str) -> (bool, String, String) {
     check_shell(cmd)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "check_network")]
 fn py_check_network(host: &str) -> bool {
     check_network(host)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_scan_text, m)?)?;
     m.add_function(wrap_pyfunction!(py_check_shell, m)?)?;

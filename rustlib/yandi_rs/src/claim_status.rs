@@ -13,16 +13,20 @@
 //! (`float("abc")`, нехэшируемый evidence_id…) → функция возвращает None БЕЗ единой записи, и Python выполняет исходный код
 //! (который сам бросит то же исключение). Сравнения/хэш/`float()`/истинность делаются средствами самого Python через PyO3 — семантика точная.
 
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyFloat, PyList, PySet, PyString};
 
 use crate::pet_extraction::{classify, V};
 
+#[cfg(feature = "python")]
 /// Родной тип? (иначе — откат)
 fn native(o: &Bound<'_, PyAny>) -> bool {
     matches!(classify(o), Ok(Some(_)))
 }
 
+#[cfg(feature = "python")]
 fn get_native<'py>(d: &Bound<'py, PyDict>, key: &str) -> Option<Option<Bound<'py, PyAny>>> {
     // Some(None) — ключа нет; Some(Some(v)) — родное значение; None — посторонний тип/ошибка → откат
     match d.get_item(key) {
@@ -38,6 +42,7 @@ fn get_native<'py>(d: &Bound<'py, PyDict>, key: &str) -> Option<Option<Bound<'py
     }
 }
 
+#[cfg(feature = "python")]
 fn eq_str(v: &Option<Bound<'_, PyAny>>, s: &str) -> bool {
     match v {
         Some(o) => o.eq(s).unwrap_or(false),
@@ -45,6 +50,7 @@ fn eq_str(v: &Option<Bound<'_, PyAny>>, s: &str) -> bool {
     }
 }
 
+#[cfg(feature = "python")]
 /// `float(rel.get("directness", 0.0) or 0.0)`; Err(()) — откат (посторонний тип или ошибка приведения).
 fn directness_f64(py: Python<'_>, rel: &Bound<'_, PyDict>) -> Result<f64, ()> {
     let d = get_native(rel, "directness").ok_or(())?;
@@ -61,6 +67,7 @@ fn directness_f64(py: Python<'_>, rel: &Bound<'_, PyDict>) -> Result<f64, ()> {
     }
 }
 
+#[cfg(feature = "python")]
 /// `_counts_toward_status(rel)`; Err(()) — откат.
 fn counts_toward(
     py: Python<'_>, rel: &Bound<'_, PyDict>, hard_blocked: &Bound<'_, PySet>, threshold: f64,
@@ -96,6 +103,7 @@ fn counts_toward(
     }
 }
 
+#[cfg(feature = "python")]
 /// `_distinct_cluster_count`; Err(()) — откат.
 fn distinct_cluster_count(
     py: Python<'_>, direct: &[Bound<'_, PyDict>], relation_type: &str, ev_by_id: &Bound<'_, PyAny>,
@@ -150,6 +158,7 @@ fn distinct_cluster_count(
     Ok(count)
 }
 
+#[cfg(feature = "python")]
 /// Один раз для утверждения. None — откат (ничего не записано). Иначе кортеж:
 /// (new_status, supports, contradicts, raw_supports, raw_contradicts, secondary, context, counted_rels).
 #[pyfunction]
@@ -279,6 +288,7 @@ fn py_classify_claim(
     Ok(Some((new_status, supports, contradicts, raw_s, raw_c, secondary, context, counted).into_py(py)))
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_classify_claim, m)?)?;
     register_gate(_py, m)?;
@@ -293,10 +303,12 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 // читают `answer`/`confidence`/`trust_level`, они не «родные» (answer — не str, confidence — не число, trust_level нехэшируем).
 // =====================================================================================================================
 
+#[cfg(feature = "python")]
 fn py_min<'py>(py: Python<'py>, a: &Bound<'py, PyAny>, b: f64) -> PyResult<Bound<'py, PyAny>> {
     py.import_bound("builtins")?.getattr("min")?.call1((a, b))
 }
 
+#[cfg(feature = "python")]
 fn trust_rank(v: &Bound<'_, PyAny>) -> Option<i32> {
     // trust_rank.get(current, 0): None = нехэшируемое/посторонний тип → откат
     match classify(v) {
@@ -314,12 +326,14 @@ fn trust_rank(v: &Bound<'_, PyAny>) -> Option<i32> {
     }
 }
 
+#[cfg(feature = "python")]
 fn is_number(v: &Bound<'_, PyAny>) -> bool {
     matches!(classify(v), Ok(Some(V::Int(_))) | Ok(Some(V::Float(_))) | Ok(Some(V::Bool)))
 }
 
 const WARN: &str = "⚠️";
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "evaluate_gate")]
 fn py_evaluate_gate(
@@ -512,6 +526,7 @@ fn py_evaluate_gate(
     Ok(Some((accepted, total, rejected)))
 }
 
+#[cfg(feature = "python")]
 pub fn register_gate(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_evaluate_gate, m)?)?;
     Ok(())

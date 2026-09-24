@@ -18,7 +18,9 @@
 
 use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyDict;
 use std::collections::HashSet;
 
@@ -476,6 +478,7 @@ pub fn evaluate_source_quality(url: &str, title: &str, text: &str, source_type: 
 // собрать ТОЧНО ТАКОЙ ЖЕ Python-объект, а не завести второй, отдельный тип с тем же именем.
 // Делегирующий код в agent/source_quality.py сам строит SourceQualityResult(**dict).
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "evaluate_source_quality", signature = (url, title="", text="", source_type="web"))]
 fn py_evaluate_source_quality<'py>(
@@ -498,12 +501,14 @@ fn py_evaluate_source_quality<'py>(
     Ok(d)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "hostname")]
 fn py_hostname(url: &str) -> String {
     hostname(url)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_evaluate_source_quality, m)?)?;
     m.add_function(wrap_pyfunction!(py_hostname, m)?)?;

@@ -23,7 +23,9 @@ use crate::py_text::PyLowerExt;
 use crate::py_text::py_isupper;
 use crate::scene_builder_data::*;
 use crate::target_router::has_word;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -376,6 +378,7 @@ pub fn build(text: &str, is_dialog: bool) -> Scene {
     }
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "build")]
 fn py_build<'py>(py: Python<'py>, text: &str, is_dialog: bool) -> PyResult<Bound<'py, PyDict>> {
@@ -404,6 +407,7 @@ fn py_build<'py>(py: Python<'py>, text: &str, is_dialog: bool) -> PyResult<Bound
     Ok(d)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_build, m)?)?;
     Ok(())

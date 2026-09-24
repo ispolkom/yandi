@@ -22,6 +22,7 @@ use crate::py_unassigned_table::PY_UNASSIGNED;
 use unicode_normalization::UnicodeNormalization;
 use crate::py_lower_table::{PY_LOWER_MAP, PY_SIGMA_CASED, PY_SIGMA_IGNORABLE};
 use crate::py_printable_table::PY_NONPRINTABLE_RANGES;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use regex::Regex;
 
@@ -318,36 +319,42 @@ pub fn py_float(s: &str) -> Option<f64> {
 
 // ── PyO3-обвязка: только чтобы parity-тест мог сверить подпорку с настоящим Python ──
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "is_space")]
 fn py_is_space(codepoint: u32) -> bool {
     char::from_u32(codepoint).map(is_py_space).unwrap_or(false)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "strip")]
 fn py_py_strip(s: &str) -> String {
     py_strip(s).to_string()
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "split")]
 fn py_py_split(s: &str) -> Vec<String> {
     py_split_whitespace(s).map(|p| p.to_string()).collect()
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "isupper")]
 fn py_py_isupper(s: &str) -> bool {
     py_isupper(s)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "repr_str")]
 fn py_py_repr_str(s: &str) -> String {
     py_repr_str(s)
 }
 
+#[cfg(feature = "python")]
 fn json_to_py(py: Python<'_>, v: &crate::py_json::PyJson) -> PyResult<PyObject> {
     use crate::py_json::PyJson;
     Ok(match v {
@@ -373,6 +380,7 @@ fn json_to_py(py: Python<'_>, v: &crate::py_json::PyJson) -> PyResult<PyObject> 
     })
 }
 
+#[cfg(feature = "python")]
 /// Только для проверки: json.loads-порт -> (True, объект[целые как float]) | (False, текст ошибки) |
 /// (None, "recursion").
 #[pyfunction]
@@ -385,36 +393,42 @@ fn py_json_loads(py: Python<'_>, s: &str) -> PyResult<(Option<bool>, PyObject)> 
     }
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "lower")]
 fn py_py_lower(s: &str) -> String {
     py_lower(s)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "casefold")]
 fn py_py_casefold(s: &str) -> String {
     py_casefold(s)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "nfc")]
 fn py_py_nfc(s: &str) -> String {
     py_nfc(s)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "nfkc")]
 fn py_py_nfkc(s: &str) -> String {
     py_nfkc(s)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "float")]
 fn py_py_float(s: &str) -> Option<f64> {
     py_float(s)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_is_space, m)?)?;
     m.add_function(wrap_pyfunction!(py_py_strip, m)?)?;

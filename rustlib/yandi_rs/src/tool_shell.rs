@@ -14,6 +14,7 @@
 use crate::py_text::py_strip;
 use crate::tool_shell_data::{BANNED, WHITELIST};
 use once_cell::sync::Lazy;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use regex::Regex;
 
@@ -37,12 +38,14 @@ pub fn allowed(cmd: &str, full: bool, net: bool) -> bool {
     WHITELIST_RE.iter().any(|re| re.is_match(cmd))
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "allowed")]
 fn py_allowed(cmd: &str, full: bool, net: bool) -> bool {
     allowed(cmd, full, net)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_allowed, m)?)?;
     Ok(())

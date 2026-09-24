@@ -19,7 +19,9 @@
 //! ВЫКЛЮЧЕНО — переключатель YANDI_TRUST_GATE_ENGINE=rust (см. agent/orchestrator/epistemic/trust_gate.py).
 
 use crate::trust_data::TRUST_ORDER;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
 pub fn order(label: &str) -> i64 {
@@ -189,12 +191,14 @@ pub fn compute_trust_label(
     (label, reasons)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "apply_trust_cap")]
 fn py_apply_trust_cap(current: &str, cap: &str) -> String {
     apply_trust_cap(current, cap)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "calculate_delta_factors")]
 fn py_calculate_delta_factors<'py>(
@@ -215,6 +219,7 @@ fn py_calculate_delta_factors<'py>(
     Ok(out)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "compute_trust_label")]
 #[allow(clippy::too_many_arguments)]
@@ -236,12 +241,14 @@ fn py_compute_trust_label(
     )
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "trust_order")]
 fn py_trust_order(label: &str) -> i64 {
     order(label)
 }
 
+#[cfg(feature = "python")]
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_apply_trust_cap, m)?)?;
     m.add_function(wrap_pyfunction!(py_calculate_delta_factors, m)?)?;
