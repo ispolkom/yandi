@@ -60,6 +60,7 @@ pub mod relationship_memory;
 pub mod core_lifecycle;
 pub mod ui_settings;
 pub mod orch_query_framer;
+pub mod claim_status;
 pub mod trust_gate;
 pub mod web_login;
 
@@ -207,6 +208,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     orch_query_framer::register(py, &orch_query_framer_mod)?;
     m.add_submodule(&orch_query_framer_mod)?;
 
+    let claim_status_mod = PyModule::new_bound(py, "claim_status")?;
+    claim_status::register(py, &claim_status_mod)?;
+    m.add_submodule(&claim_status_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -233,6 +238,7 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.core_lifecycle", &core_lifecycle_mod)?;
     sys_modules.set_item("yandi_rs.ui_settings", &ui_settings_mod)?;
     sys_modules.set_item("yandi_rs.orch_query_framer", &orch_query_framer_mod)?;
+    sys_modules.set_item("yandi_rs.claim_status", &claim_status_mod)?;
     sys_modules.set_item("yandi_rs.policy", &policy_mod)?;
     sys_modules.set_item("yandi_rs.final_claim_coverage", &final_claim_coverage_mod)?;
     sys_modules.set_item("yandi_rs.canonical_trust", &canonical_trust_mod)?;

@@ -56,6 +56,32 @@ HARD_BLOCKED_SOURCE_CLASSES = {
 # установленную в проекте отметку, не изобретаем новую.
 DIRECTNESS_SUPPORT_THRESHOLD = 0.60
 
+# Rust-перенос (2026-09-24): rustlib/yandi_rs/src/claim_status.rs — ЯДРО classify_claim_epistemic_status (отношения → статус утверждения,
+# независимые кластеры источников). Доказан тестом agent/claim_status_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается
+# YANDI_CLAIM_STATUS_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs. Журнал и сводка остаются здесь; посторонние типы полей и любая ошибка
+# приведения → откат на исходный код ниже (Rust к этому моменту ничего не записал). Константы Rust получает отсюда при каждом вызове.
+import logging as _logging
+import os as _os
+
+_log_cs = _logging.getLogger("yandi.claim_status")
+_rust_cs = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_cs():
+    global _rust_cs
+    if _rust_cs is None:
+        if _os.environ.get("YANDI_CLAIM_STATUS_ENGINE") == "rust":
+            try:
+                import yandi_rs.claim_status as _rs
+                _rust_cs = _rs
+                _log_cs.warning("YANDI_CLAIM_STATUS_ENGINE=rust: используется Rust-реализация claim_status (rustlib/yandi_rs)")
+            except ImportError as e:
+                _log_cs.warning("YANDI_CLAIM_STATUS_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_cs = False
+        else:
+            _rust_cs = False
+    return _rust_cs or None
+
 
 def _counts_toward_status(rel):
     """
@@ -180,6 +206,36 @@ def classify_claim_epistemic_status(claims_data, log, verbose, evidence_data=Non
         if current_status == "rejected":
             claim_status_counts["rejected"] += 1
             continue
+
+        rs = _get_rust_cs()
+        if (rs is not None and type(HARD_BLOCKED_SOURCE_CLASSES) is set and type(DIRECTNESS_SUPPORT_THRESHOLD) is float
+                and type(evidence_by_id) is dict):
+            info = rs.classify_claim(claim, evidence_by_id, HARD_BLOCKED_SOURCE_CLASSES, DIRECTNESS_SUPPORT_THRESHOLD, bool(verbose))
+            if info is not None:
+                (new_status, supports_count, contradicts_count, supports_count_raw_relations, contradicts_count_raw_relations,
+                 secondary_count, context_count, counted_rels) = info
+                if verbose:
+                    for rel in counted_rels:
+                        log(
+                            "[Claim Support Decision] "
+                            f"claim={claim.get('claim_id')} "
+                            f"ev={rel.get('evidence_id')} "
+                            f"relation={rel.get('relation')} "
+                            f"via={rel.get('counted_via')} "
+                            f"directness={float(rel.get('directness', 0.0) or 0.0):.3f} "
+                            f"counted=True"
+                        )
+                    log(
+                        f"[Claim Status] "
+                        f"claim={claim.get('claim_id')} "
+                        f"{current_status}->{new_status} "
+                        f"supports={supports_count} (raw_relations={supports_count_raw_relations}) "
+                        f"contradicts={contradicts_count} (raw_relations={contradicts_count_raw_relations}) "
+                        f"secondary={secondary_count} "
+                        f"context={context_count}"
+                    )
+                claim_status_counts[new_status] += 1
+                continue
 
         relations = list(
             claim.get("evidence_relations", []) or []
