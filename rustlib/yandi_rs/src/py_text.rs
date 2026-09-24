@@ -14,9 +14,6 @@
 //!    py_decimal_table.rs, из самого Python), допускает одиночные `_` между цифрами (PEP 515).
 //!    Rust `parse::<f64>` — только ASCII, без `_`. Здесь: `py_float`.
 //!
-//! НЕ решено этим файлом (известное остаточное расхождение, задокументировано в README): `\w`/`\b` в
-//! паттернах крейта `regex` определяются иначе, чем в Python (напр. '²', комбинирующие знаки);
-//! точная замена потребовала бы lookaround. Затрагивает только экзотические символы.
 
 use crate::py_case_table::{PY_LOWER_RANGES, PY_TITLE_RANGES, PY_UPPER_RANGES};
 use crate::py_decimal_table::PY_DECIMAL_ZEROS;
@@ -52,44 +49,10 @@ pub fn py_split_whitespace(s: &str) -> impl Iterator<Item = &str> {
     s.split(is_py_space).filter(|p| !p.is_empty())
 }
 
-/// Переписывает `\s` в паттерне под питоновский набор пробелов. `\S` не поддерживается (нигде не
-/// используется; паника — чтобы не пропустить молча).
-pub fn rewrite_py_space(pattern: &str) -> String {
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut out = String::with_capacity(pattern.len() + 16);
-    let mut depth = 0usize;
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '\\' && i + 1 < chars.len() {
-            let n = chars[i + 1];
-            match n {
-                's' if depth == 0 => out.push_str(r"[\s\x1c-\x1f]"),
-                's' => out.push_str(r"\s\x1c-\x1f"),
-                'S' => panic!("\\S не поддерживается py_regex: {pattern}"),
-                _ => {
-                    out.push('\\');
-                    out.push(n);
-                }
-            }
-            i += 2;
-            continue;
-        }
-        if c == '[' {
-            depth += 1;
-        } else if c == ']' && depth > 0 {
-            depth -= 1;
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
-}
-
-/// Regex с питоновским `\s`.
+/// Regex с точной питоновской семантикой (`\s`, `\w`, `\b`, `$`, IGNORECASE) — см. py_regex.rs.
+/// ТОЛЬКО для проверок «есть ли совпадение» (is_match/search) рядом с `\b`.
 pub fn py_regex(pattern: &str) -> Regex {
-    let rewritten = rewrite_py_space(pattern);
-    Regex::new(&rewritten).unwrap_or_else(|e| panic!("статический паттерн должен быть валиден: {pattern}: {e}"))
+    crate::py_regex::compile(pattern)
 }
 
 fn py_decimal_value(c: char) -> Option<u32> {
@@ -316,14 +279,6 @@ mod tests {
     fn strip_and_split() {
         assert_eq!(py_strip("\u{1f} a b \u{1c}"), "a b");
         assert_eq!(py_split_whitespace("a\u{1c}b  c\u{3000}d").collect::<Vec<_>>(), vec!["a", "b", "c", "d"]);
-    }
-
-    #[test]
-    fn rewrite_handles_class_and_outside() {
-        assert_eq!(rewrite_py_space(r"a\s+b"), r"a[\s\x1c-\x1f]+b");
-        assert_eq!(rewrite_py_space(r"[_\s.-]x"), r"[_\s\x1c-\x1f.-]x");
-        assert_eq!(rewrite_py_space(r"\\s"), r"\\s"); // экранированный обратный слэш + 's'
-        assert!(py_regex(r"не\s+найден").is_match("не\u{1c}найден"));
     }
 
     #[test]

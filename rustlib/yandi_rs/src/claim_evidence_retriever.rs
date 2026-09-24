@@ -58,14 +58,22 @@ static ABSENCE_MARKERS: Lazy<Vec<Regex>> = Lazy::new(|| {
     .collect()
 });
 
-static BARE_NET_PREFIX_RE: Lazy<Regex> = Lazy::new(|| re(r"\bнет\s+"));
-
 /// Ручная замена паттерна `\bнет\s+(?!сомнени)[а-яё]` (негативный lookahead не поддержан
-/// крейтом `regex`). Перебирает все вхождения "нет" + пробел(ы) и для каждого проверяет: остаток
-/// НЕ начинается с "сомнени", и следующий символ — строчная кириллица а-я/ё.
+/// крейтом `regex`, а «съедающая» граница слова здесь сместила бы позиции). Для каждого вхождения "нет"
+/// с несловесным символом (или началом строки) слева и хотя бы одним питоновским пробелом справа:
+/// после ВСЕЙ серии пробелов остаток НЕ начинается с "сомнени" и следующий символ — строчная кириллица а-я/ё.
+/// (Только полная серия пробелов может дать совпадение: при более короткой `[а-яё]` попал бы на пробел.)
 fn matches_bare_net(lower: &str) -> bool {
-    for m in BARE_NET_PREFIX_RE.find_iter(lower) {
-        let rest = &lower[m.end()..];
+    for (idx, _) in lower.match_indices("нет") {
+        let before_ok = lower[..idx].chars().next_back().map_or(true, |c| !crate::source_clustering::is_py_word_char(c));
+        if !before_ok {
+            continue;
+        }
+        let after = &lower[idx + "нет".len()..];
+        let rest = after.trim_start_matches(crate::py_text::is_py_space);
+        if rest.len() == after.len() {
+            continue; // нужен хотя бы один пробел
+        }
         if rest.starts_with("сомнени") {
             continue;
         }

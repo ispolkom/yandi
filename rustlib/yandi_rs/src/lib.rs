@@ -28,6 +28,8 @@ mod py_json;          // точный json.loads Python (для message_intensit
 mod py_printable_table; // данные: isprintable() для repr
 mod py_case_table;    // данные: Lowercase/Uppercase/Titlecase для str.isupper(), см. gen_py_case_table.py
 mod scene_builder_data; // данные: паттерны SceneBuilder, сгенерированы из Python
+mod py_icase_table;   // данные: группы IGNORECASE Python, см. gen_py_icase_table.py
+mod py_regex;         // транслятор паттернов Python re -> крейт regex
 mod py_decimal_table; // данные: цифры Unicode для py_float, см. gen_py_decimal_table.py
 pub mod py_text;      // общие питоновские strip/split/\s/float — см. файл (+ подмодуль yandi_rs.py_text для проверки)
 mod py_word_table; // данные (не подмодуль Python): точная копия Python-`\w`, см. gen_py_word_table.py
