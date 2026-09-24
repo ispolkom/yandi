@@ -54,6 +54,12 @@ class KeyMissingError(KeyStorageError):
     (raise), never fall back to plaintext (mandate §20/§40)."""
 
 
+def _rust_crypto():
+    """Rust-ядро (YANDI_CRYPTO_ENGINE=rust) или None. Загрузчик живёт в crypto.py; импорт ленивый — crypto сам импортирует keys."""
+    from agent.db.sql.crypto import _get_rust_cr
+    return _get_rust_cr()
+
+
 def generate_kek() -> bytes:
     """A fresh, random 256-bit key. NOT auto-called by bootstrap.py —
     key generation is a deliberate, one-time operator action (mandate
@@ -121,6 +127,11 @@ def wrap_dek(kek: bytes, dek: bytes) -> bytes:
     """Wraps (encrypts) a DEK under the KEK. The output IS safe to
     store in SQL (a future key_metadata table) — the KEK itself never
     is (mandate §20)."""
+    rs = _rust_crypto()
+    if rs is not None and type(kek) is bytes and len(kek) == 32 and type(dek) is bytes:
+        out = rs.wrap(kek, dek, b"YANDI|DEK_WRAP|v1")
+        if out is not None:
+            return out
     aesgcm = AESGCM(kek)
     nonce = os.urandom(12)
     wrapped = aesgcm.encrypt(nonce, dek, b"YANDI|DEK_WRAP|v1")
@@ -128,6 +139,13 @@ def wrap_dek(kek: bytes, dek: bytes) -> bytes:
 
 
 def unwrap_dek(kek: bytes, wrapped: bytes) -> bytes:
+    rs = _rust_crypto()
+    if rs is not None and type(kek) is bytes and len(kek) == 32 and type(wrapped) is bytes and len(wrapped) >= 12:
+        out = rs.unwrap(kek, wrapped, b"YANDI|DEK_WRAP|v1")
+        if out is None:
+            from cryptography.exceptions import InvalidTag
+            raise InvalidTag()
+        return out
     aesgcm = AESGCM(kek)
     nonce, ciphertext = wrapped[:12], wrapped[12:]
     return aesgcm.decrypt(nonce, ciphertext, b"YANDI|DEK_WRAP|v1")
@@ -139,6 +157,11 @@ def derive_integrity_key(kek: bytes) -> bytes:
     encryption key"). Rotating the KEK naturally rotates this too —
     intended: the integrity key's lifecycle is tied to the KEK's, not
     to any individual DEK's."""
+    rs = _rust_crypto()
+    if rs is not None and type(kek) is bytes:
+        out = rs.hkdf_sha256(kek, b"YANDI|integrity-key|v1", 32)
+        if out is not None:
+            return out
     hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"YANDI|integrity-key|v1")
     return hkdf.derive(kek)
 
@@ -147,6 +170,11 @@ def derive_blind_index_key(kek: bytes) -> bytes:
     """Same HKDF derivation pattern, a DISTINCT info label — a separate
     purpose from both encryption DEKs and the integrity key (mandate
     §19: independent purposes, one key per purpose)."""
+    rs = _rust_crypto()
+    if rs is not None and type(kek) is bytes:
+        out = rs.hkdf_sha256(kek, b"YANDI|blind-index-key|v1", 32)
+        if out is not None:
+            return out
     hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"YANDI|blind-index-key|v1")
     return hkdf.derive(kek)
 
@@ -157,5 +185,10 @@ def derive_node_config_key(kek: bytes) -> bytes:
     secure_store, per-node, local SQLite — not the shared MySQL
     epistemic memory this module was originally built for; the key
     hierarchy discipline is engine-agnostic and reused as-is here)."""
+    rs = _rust_crypto()
+    if rs is not None and type(kek) is bytes:
+        out = rs.hkdf_sha256(kek, b"YANDI|node-config-key|v1", 32)
+        if out is not None:
+            return out
     hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"YANDI|node-config-key|v1")
     return hkdf.derive(kek)

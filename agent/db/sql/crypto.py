@@ -22,20 +22,61 @@ plaintext or a placeholder when a key is missing or verification fails
 — nothing in production calls them yet (see SECURITY_ARCHITECTURE.md
 §21 for why wiring is a deliberate follow-up, not part of this
 commit).
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/crypto.rs — ядро AES-256-GCM / blind index / HKDF (RustCrypto, не самописное).
+Формат блоба и AAD байт-в-байт те же; совместимость доказана в обе стороны с `cryptography`
+(agent/crypto_rust_parity_test.py). По умолчанию ВЫКЛЮЧЕН; включается YANDI_CRYPTO_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs.
+Проверки ключа/длины/версии, исключения (KeyMissingError, ValueError, InvalidTag) и .decode остаются здесь, в Python.
+Делегирует только для 32-байтового ключа типа bytes; иначе — прежний Python-путь.
 """
 from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 from typing import Union
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from agent.db.sql.keys import KeyMissingError
 
 NONCE_SIZE = 12
 CURRENT_VERSION = 1
+
+_log = logging.getLogger("yandi.crypto")
+_rust_cr = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_cr():
+    global _rust_cr
+    if _rust_cr is None:
+        if os.environ.get("YANDI_CRYPTO_ENGINE") == "rust":
+            try:
+                import yandi_rs.crypto as _rs
+                _rust_cr = _rs
+                _log.warning("YANDI_CRYPTO_ENGINE=rust: используется Rust-реализация crypto (rustlib/yandi_rs)")
+            except ImportError as e:
+                _log.warning("YANDI_CRYPTO_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_cr = False
+        else:
+            _rust_cr = False
+    return _rust_cr or None
+
+
+def _rust_key_ok(key) -> bool:
+    return type(key) is bytes and len(key) == 32
+
+
+def _rust_eid(entity_id):
+    """entity_id в f-строке AAD: для str и int результат совпадает с str(); прочие типы — в Python-путь."""
+    t = type(entity_id)
+    if t is str:
+        return entity_id
+    if t is int:
+        return str(entity_id)
+    return None
 
 
 def build_aad(entity_type: str, entity_id: Union[str, int], field_name: str, version: int = CURRENT_VERSION) -> bytes:
@@ -59,6 +100,13 @@ def encrypt_field(
     if not 0 <= version <= 255:
         raise ValueError(f"version must fit in one byte (0-255), got {version}")
 
+    rs = _get_rust_cr()
+    if (rs is not None and _rust_key_ok(key) and type(plaintext) is str and type(entity_type) is str
+            and type(field_name) is str and type(version) is int and _rust_eid(entity_id) is not None):
+        blob = rs.encrypt_field(key, plaintext, entity_type, _rust_eid(entity_id), field_name, version)
+        if blob is not None:
+            return blob
+
     aesgcm = AESGCM(key)
     nonce = os.urandom(NONCE_SIZE)
     aad = build_aad(entity_type, entity_id, field_name, version)
@@ -81,6 +129,14 @@ def decrypt_field(key: bytes, blob: bytes, *, entity_type: str, entity_id: Union
     nonce = blob[1:1 + NONCE_SIZE]
     ciphertext = blob[1 + NONCE_SIZE:]
     aad = build_aad(entity_type, entity_id, field_name, version)
+
+    rs = _get_rust_cr()
+    if (rs is not None and _rust_key_ok(key) and type(blob) is bytes and type(entity_type) is str
+            and type(field_name) is str and _rust_eid(entity_id) is not None):
+        raw = rs.decrypt_field(key, blob, entity_type, _rust_eid(entity_id), field_name)
+        if raw is None:
+            raise InvalidTag()
+        return raw.decode("utf-8")
 
     aesgcm = AESGCM(key)
     plaintext = aesgcm.decrypt(nonce, ciphertext, aad)
@@ -110,5 +166,8 @@ def blind_index(index_key: bytes, namespace: str, normalized_value: str) -> str:
     to test membership in another."""
     if not index_key:
         raise KeyMissingError("blind_index() called with no index key.")
+    rs = _get_rust_cr()
+    if rs is not None and type(index_key) is bytes and type(namespace) is str and type(normalized_value) is str:
+        return rs.blind_index(index_key, namespace, normalized_value)
     message = f"{namespace}:v1:{normalized_value}".encode("utf-8")
     return hmac.new(index_key, message, hashlib.sha256).hexdigest()
