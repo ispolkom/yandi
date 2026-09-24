@@ -12,6 +12,7 @@ use pyo3::prelude::*;
 pub mod boundaries;
 pub mod claim_answer_linker;
 pub mod claim_evidence_retriever;
+pub mod claim_graph;
 pub mod claim_identity;
 pub mod claim_semantic_identity_hardening;
 pub mod claim_types;
@@ -133,6 +134,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     entity_resolver::register(py, &entity_resolver_mod)?;
     m.add_submodule(&entity_resolver_mod)?;
 
+    let claim_graph_mod = PyModule::new_bound(py, "claim_graph")?;
+    claim_graph::register(py, &claim_graph_mod)?;
+    m.add_submodule(&claim_graph_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -151,6 +156,7 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.epistemic_router", &epistemic_router_mod)?;
     sys_modules.set_item("yandi_rs.message_intensity", &message_intensity_mod)?;
     sys_modules.set_item("yandi_rs.orch_risk", &orch_risk_mod)?;
+    sys_modules.set_item("yandi_rs.claim_graph", &claim_graph_mod)?;
     sys_modules.set_item("yandi_rs.object_resolver", &object_resolver_mod)?;
     sys_modules.set_item("yandi_rs.entity_resolver", &entity_resolver_mod)?;
     sys_modules.set_item("yandi_rs.scene_builder", &scene_builder_mod)?;

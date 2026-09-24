@@ -4,6 +4,7 @@
 //!
 //! Что переписывается (всё остальное копируется как есть):
 //!  * `\s`  -> `[\s\x1c-\x1f]`  (Python-пробелы шире на U+001C..1F);
+//!  * `\d`  -> десятичные цифры по таблице Python (серии 0..9 из py_decimal_table.rs);
 //!  * `\w`  -> класс из таблицы Python-`\w` (`isalnum()` или `_`, py_word_table.rs);
 //!  * `\b`  -> граница слова по Python-`\w`. Крейт `regex` не умеет lookaround, поэтому граница
 //!    выражается «съедающим» соседним символом: ведущая `\b` (после начала/`(`/`|`) — `(?:^|[^W])`,
@@ -18,6 +19,7 @@
 //! Не поддерживается (паника при компиляции, чтобы не пропустить молча): `\S \W \B \D`, lookaround,
 //! обратные ссылки, `(?m)`.
 
+use crate::py_decimal_table::PY_DECIMAL_ZEROS;
 use crate::py_icase_table::PY_ICASE_GROUPS;
 use crate::py_word_table::PY_WORD_RANGES;
 use once_cell::sync::Lazy;
@@ -44,6 +46,15 @@ static WORD_BODY: Lazy<String> = Lazy::new(|| {
         } else {
             let _ = write!(s, "\\x{{{lo:X}}}-\\x{{{hi:X}}}");
         }
+    }
+    s
+});
+
+/// Тело класса «десятичные цифры Python» (`\d` в `re` для str = Unicode Nd по версии Python): серии 0..9.
+static DIGIT_BODY: Lazy<String> = Lazy::new(|| {
+    let mut s = String::new();
+    for &z in PY_DECIMAL_ZEROS.iter() {
+        let _ = write!(s, "\\x{{{:X}}}-\\x{{{:X}}}", z, z + 9);
     }
     s
 });
@@ -120,7 +131,7 @@ fn translate_class(chars: &[char], start: usize, icase: bool, out: &mut String) 
                     continue;
                 }
                 'd' => {
-                    out.push_str(r"\d");
+                    out.push_str(&DIGIT_BODY);
                     i += 2;
                     continue;
                 }
@@ -230,7 +241,11 @@ pub fn translate(pattern: &str) -> String {
                         out.push_str(&WORD_BODY);
                         out.push_str("])");
                     }
-                    'd' => out.push_str(r"\d"),
+                    'd' => {
+                        out.push('[');
+                        out.push_str(&DIGIT_BODY);
+                        out.push(']');
+                    }
                     'S' | 'W' | 'B' | 'D' => panic!("\\{n} не поддерживается py_regex: {pattern}"),
                     'x' => {
                         // \xHH -> символ
@@ -348,6 +363,13 @@ mod tests {
         assert!(compile(r"(?i)s").is_match("ſ"));
         assert!(!compile(r"(?i)ß").is_match("SS")); // Python: НЕ равны
         assert!(compile(r"(?i)[а-я]+").is_match("ПРИВЕТ"));
+    }
+
+    #[test]
+    fn digit_class_is_pythons() {
+        assert!(compile(r"^\d+$").is_match("12\u{663}"));
+        assert!(compile(r"[\d.]+").is_match("\u{966}"));
+        assert!(!compile(r"\d").is_match("\u{b2}")); // надстрочная ² — не десятичная цифра
     }
 
     #[test]

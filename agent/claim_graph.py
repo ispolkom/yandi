@@ -11,9 +11,39 @@ agent/claim_graph.py — WORLD CLAIMS + ГРАФ ДЛЯ YANDI V7.
    evidence_against: ['ev_003']
    supports: ['cl_002']
    contradicts: ['cl_003']
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/claim_graph.rs — текстовое ядро (_split_into_sentences,
+_clean_sentence, _is_world_claim, _determine_claim_type, _calculate_confidence, _get_source_reliability,
+_is_contradiction, _is_support) и попарное построение рёбер (_build_graph: слова/lower() один раз на claim).
+Класс, датакласс Claim, дедупликация и время остаются здесь. Доказан на совпадение тестом
+agent/claim_graph_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается переменной окружения
+YANDI_CLAIM_GRAPH_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (`maturin develop`, см. rustlib/README.md).
 """
 
 from __future__ import annotations
+
+import logging
+import os
+
+log = logging.getLogger("yandi.claim_graph")
+
+_rust_cg = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_cg():
+    global _rust_cg
+    if _rust_cg is None:
+        if os.environ.get("YANDI_CLAIM_GRAPH_ENGINE") == "rust":
+            try:
+                import yandi_rs.claim_graph as _rs
+                _rust_cg = _rs
+                log.warning("YANDI_CLAIM_GRAPH_ENGINE=rust: используется Rust-реализация claim_graph (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_CLAIM_GRAPH_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_cg = False
+        else:
+            _rust_cg = False
+    return _rust_cg or None
 
 import sys
 import time
@@ -106,10 +136,16 @@ class ClaimGraph:
         return self.claims
     
     def _split_into_sentences(self, text: str) -> List[str]:
+        rs = _get_rust_cg()
+        if rs is not None and isinstance(text, str):
+            return rs.split_into_sentences(text)
         sentences = re.split(r'[.!?]\s+', text)
         return [s.strip() for s in sentences if len(s.strip()) > 20]
     
     def _clean_sentence(self, sent: str) -> str:
+        rs = _get_rust_cg()
+        if rs is not None and isinstance(sent, str):
+            return rs.clean_sentence(sent)
         sent = ' '.join(sent.split())
         sent = re.sub(r'\[[^\]]+\]', '', sent)
         sent = re.sub(r'\*\*([^*]+)\*\*', r'\1', sent)
@@ -118,6 +154,9 @@ class ClaimGraph:
         return sent.strip()
     
     def _is_world_claim(self, text: str) -> bool:
+        rs = _get_rust_cg()
+        if rs is not None and isinstance(text, str):
+            return rs.is_world_claim(text)
         if len(text) < 20:
             return False
         if len(text) > 350:
@@ -170,6 +209,9 @@ class ClaimGraph:
         return False
     
     def _determine_claim_type(self, text: str) -> str:
+        rs = _get_rust_cg()
+        if rs is not None and isinstance(text, str):
+            return rs.determine_claim_type(text)
         if re.search(r'(?i)вероятно|возможно|предположительно|может быть|гипотеза', text):
             return "hypothesis"
         if re.search(r'(?i)неизвестно|не\s+установлено|остаётся\s+неясным|предмет\s+дискуссии', text):
@@ -181,6 +223,14 @@ class ClaimGraph:
         return "interpretation"
     
     def _calculate_confidence(self, text: str, ev: Dict) -> float:
+        rs = _get_rust_cg()
+        if rs is not None and isinstance(text, str) and isinstance(ev, dict):
+            relevance = ev.get("relevance_to_query", 0.5)
+            if isinstance(relevance, (int, float)):
+                try:
+                    return rs.calculate_confidence(text, float(relevance))
+                except OverflowError:
+                    pass        # число, не помещающееся в float, — обычный Python-путь
         base = 0.5
         
         if re.search(r'(?i)согласно|по данным|установлено|факт|доказано', text):
@@ -199,6 +249,11 @@ class ClaimGraph:
         return min(1.0, max(0.1, base))
     
     def _get_source_reliability(self, ev: Dict) -> float:
+        rs = _get_rust_cg()
+        if rs is not None and isinstance(ev, dict):
+            _uri, _st = ev.get("source_uri", ""), ev.get("source_type", "")
+            if isinstance(_uri, str) and isinstance(_st, str):
+                return rs.source_reliability(_uri, _st)
         uri = ev.get("source_uri", "")
         if "wikipedia" in uri:
             return 0.9
@@ -242,6 +297,18 @@ class ClaimGraph:
         """
         if len(self.claims) < 2:
             return
+
+        rs = _get_rust_cg()
+        if rs is not None and all(isinstance(c.text, str) for c in self.claims):
+            for i, j, kind in rs.build_edges([c.text for c in self.claims]):
+                claim1, claim2 = self.claims[i], self.claims[j]
+                if kind == 0:
+                    claim1.contradicts.append(claim2.claim_id)
+                    claim2.contradicts.append(claim1.claim_id)
+                else:
+                    claim1.supports.append(claim2.claim_id)
+                    claim2.depends_on.append(claim1.claim_id)
+            return
         
         # Ищем противоречия и поддержки на основе текста
         for i, claim1 in enumerate(self.claims):
@@ -257,6 +324,9 @@ class ClaimGraph:
     
     def _is_contradiction(self, text1: str, text2: str) -> bool:
         """Проверить, противоречат ли два утверждения."""
+        rs = _get_rust_cg()
+        if rs is not None and isinstance(text1, str) and isinstance(text2, str):
+            return rs.is_contradiction(text1, text2)
         # Простейшая эвристика: наличие противоположных маркеров
         neg1 = any(w in text1.lower() for w in ["не", "нет", "нельзя", "невозможно"])
         neg2 = any(w in text2.lower() for w in ["не", "нет", "нельзя", "невозможно"])
@@ -275,6 +345,9 @@ class ClaimGraph:
     
     def _is_support(self, text1: str, text2: str) -> bool:
         """Проверить, поддерживает ли одно утверждение другое."""
+        rs = _get_rust_cg()
+        if rs is not None and isinstance(text1, str) and isinstance(text2, str):
+            return rs.is_support(text1, text2)
         # Если утверждения говорят об одном и том же
         common_words = set(text1.split()) & set(text2.split())
         if len(common_words) > 3:

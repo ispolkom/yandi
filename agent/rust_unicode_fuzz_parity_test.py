@@ -54,6 +54,7 @@ def main() -> int:
     import agent.object_resolver as objm
     import agent.claim_answer_linker as cal
     import agent.claim_evidence_retriever as cer
+    import agent.claim_graph as cgm
     import agent.claim_identity as ci
     import agent.claim_semantic_identity_hardening as hg
     import agent.intent_router as ir
@@ -74,6 +75,7 @@ def main() -> int:
     import yandi_rs.object_resolver as r_obj
     import yandi_rs.claim_answer_linker as r_cal
     import yandi_rs.claim_evidence_retriever as r_cer
+    import yandi_rs.claim_graph as r_cg
     import yandi_rs.claim_identity as r_ci
     import yandi_rs.claim_semantic_identity_hardening as r_hg
     import yandi_rs.claim_validator as r_cv
@@ -173,6 +175,7 @@ def main() -> int:
     bdry = pb.PersonalBoundary()
     sbld = sbm.SceneBuilder()
     objres = objm.ObjectResolver()
+    cgraph = cgm.ClaimGraph()
     entres = entm.EntityResolver()
 
     def with_rust(mod_attr_owner, sentinel, env, fn):
@@ -252,6 +255,13 @@ def main() -> int:
         cmp("epistemic.testability", er._detect_testability, lambda x, d: tuple(r_er.detect_testability(x, d)), ql, dom)
         cmp("claim_types.guess", lambda x: ct.guess_claim_type_by_text(x).value, r_ct.guess_claim_type_by_text, t)
         cmp("object_resolver", objres.resolve, lambda x: dict(r_obj.resolve(x)), t)
+        cmp("claim_graph.split", cgraph._split_into_sentences, lambda x: list(r_cg.split_into_sentences(x)), t + ". " + u)
+        cmp("claim_graph.clean", cgraph._clean_sentence, r_cg.clean_sentence, t)
+        cmp("claim_graph.is_world_claim", cgraph._is_world_claim, r_cg.is_world_claim, t)
+        cmp("claim_graph.claim_type", cgraph._determine_claim_type, r_cg.determine_claim_type, t)
+        cmp("claim_graph.confidence", lambda x: cgraph._calculate_confidence(x, {"relevance_to_query": 0.5}), lambda x: r_cg.calculate_confidence(x, 0.5), t)
+        cmp("claim_graph.is_contradiction", cgraph._is_contradiction, r_cg.is_contradiction, t, u)
+        cmp("claim_graph.is_support", cgraph._is_support, r_cg.is_support, t, u)
         # entity_resolver: game ∈ множеству совпавших игр (set-порядок у Python хеш-рандомизирован), categories — как мультимножество
         allowed = {g.upper() for g in entm.KNOWN_GAMES if g in t.strip().lower()} or {None}
         pe, re_ = entres.resolve(t), dict(r_ent.resolve(t))
