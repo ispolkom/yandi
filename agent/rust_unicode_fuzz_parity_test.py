@@ -215,6 +215,9 @@ def main() -> int:
         cmp("boundaries.toxicity", bd.detect_toxicity, lambda x: (lambda d: {**d, "words": list(d["words"])})(dict(r_bd.detect_toxicity(x))), t)
         cmp("boundaries.apology", bd.is_apology, lambda x: tuple(r_bd.is_apology(x)), t)
         cmp("evidence.is_absence", cer._is_absence_claim, r_cer.is_absence_claim, t)
+        cmp("evidence.anchor_hit", cer._anchor_hit, r_cer.anchor_hit, u.strip()[:20].lower(), t.lower())
+        cmp("evidence.subject_fields", lambda a, ti, ur, pa: cer._subject_anchor_matches("x", pa, title=ti, url=ur, named_anchors=a)[1],
+            lambda a, ti, ur, pa: list(r_cer.subject_fields(a, ti, ur, pa)), [u.strip()[:12].lower(), t.strip()[:9].lower()], t, u, t + u)
         cmp("evidence.is_existence_question", cer._is_existence_question, r_cer.is_existence_question, q)
         cmp("evidence.extract_target", cer._extract_existence_target, r_cer.extract_existence_target, q)
         cmp("evidence.classify_role", cer._classify_claim_role, lambda a, b: dict(r_cer.classify_claim_role(a, b)), t, q)

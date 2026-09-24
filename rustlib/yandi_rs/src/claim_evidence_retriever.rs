@@ -19,6 +19,12 @@
 //! находит все `\bнет\s+`, и для каждого проверяет, что остаток НЕ начинается с "сомнени" и
 //! следующий символ — строчная кириллица — тот же результат, без второго regex-движка.
 //!
+//! ДОПОЛНЕНО (2026-09-24, кусок 26): `_anchor_hit` (`\b<re.escape(якорь)>\b`) и `_subject_anchor_matches`
+//! (шлюз идентичности субъекта: какие из title/url/passage подтверждают якорь). `\b` для ПРОИЗВОЛЬНОГО литерала
+//! реализован вручную: граница слева/справа = «словесность» соседних символов (Python-`\w`, py_word_table) различается;
+//! это верно и когда якорь начинается/кончается не-словесным символом (тогда граница требует словесного соседа).
+//! Перебираются ВСЕ позиции (в т. ч. перекрывающиеся вхождения), как делает `re.search`.
+//!
 //! Статус (2026-09-24): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_CLAIM_EVIDENCE_RETRIEVER_ENGINE=rust (см.
 //! agent/claim_evidence_retriever.py).
@@ -151,6 +157,46 @@ pub fn target_overlap(claim_lower: &str, target_words: &[String]) -> bool {
     })
 }
 
+fn is_word(c: char) -> bool {
+    crate::source_clustering::is_py_word_char(c)
+}
+
+/// `_anchor_hit`: `re.search(r"\b" + re.escape(anchor) + r"\b", haystack) is not None`
+pub fn anchor_hit(anchor: &str, haystack: &str) -> bool {
+    if anchor.is_empty() {
+        return false;
+    }
+    let a: Vec<char> = anchor.chars().collect();
+    let h: Vec<char> = haystack.chars().collect();
+    if a.len() > h.len() {
+        return false;
+    }
+    let (first_w, last_w) = (is_word(a[0]), is_word(a[a.len() - 1]));
+    for i in 0..=(h.len() - a.len()) {
+        if h[i..i + a.len()] != a[..] {
+            continue;
+        }
+        let before_w = i > 0 && is_word(h[i - 1]);
+        let after_w = i + a.len() < h.len() && is_word(h[i + a.len()]);
+        if before_w != first_w && last_w != after_w {
+            return true;
+        }
+    }
+    false
+}
+
+/// `_subject_anchor_matches` без выбора якорей (его делает Python-обёртка): какие поля подтвердили якоря.
+pub fn subject_fields(anchors: &[String], title: &str, url: &str, passage: &str) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for (name, hay) in [("title", title), ("url", url), ("passage", passage)] {
+        let lower = hay.to_lowercase();
+        if anchors.iter().any(|a| anchor_hit(a, &lower)) {
+            out.push(name);
+        }
+    }
+    out
+}
+
 pub struct ClaimRole {
     pub role: Option<&'static str>,
     pub target_match: bool,
@@ -224,7 +270,21 @@ fn py_classify_claim_role<'py>(py: Python<'py>, claim_text: &str, query: &str) -
     Ok(d)
 }
 
+#[pyfunction]
+#[pyo3(name = "anchor_hit")]
+fn py_anchor_hit(anchor: &str, haystack: &str) -> bool {
+    anchor_hit(anchor, haystack)
+}
+
+#[pyfunction]
+#[pyo3(name = "subject_fields")]
+fn py_subject_fields(anchors: Vec<String>, title: &str, url: &str, passage: &str) -> Vec<&'static str> {
+    subject_fields(&anchors, title, url, passage)
+}
+
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(py_anchor_hit, m)?)?;
+    m.add_function(wrap_pyfunction!(py_subject_fields, m)?)?;
     m.add_function(wrap_pyfunction!(py_is_absence_claim, m)?)?;
     m.add_function(wrap_pyfunction!(py_is_existence_question, m)?)?;
     m.add_function(wrap_pyfunction!(py_extract_existence_target, m)?)?;
@@ -291,6 +351,15 @@ mod tests {
         // "вода" (4 симв.) должно совпасть с "воды"/"водой" через стем длиной 3.
         assert!(target_overlap("следы воды обнаружены", &["вода".to_string()]));
         assert!(target_overlap("много водой залито", &["вода".to_string()]));
+    }
+
+    #[test]
+    fn anchor_hit_word_boundaries() {
+        assert!(anchor_hit("sun", "the sun is bright"));
+        assert!(!anchor_hit("sun", "sunlight and sunday"));
+        assert!(anchor_hit("европейский союз", "решение европейский союз принял"));
+        assert!(!anchor_hit("c++", "a c++ b")); // якорь кончается не-словесным: справа нужен словесный сосед — здесь пробел
+        assert!(anchor_hit("c++", "a c++x b"));
     }
 
     #[test]

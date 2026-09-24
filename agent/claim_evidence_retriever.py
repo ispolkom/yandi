@@ -495,6 +495,10 @@ def _anchor_hit(anchor: str, haystack: str) -> bool:
     if not anchor:
         return False
 
+    rs = _get_rust_cer()
+    if rs is not None and isinstance(anchor, str) and isinstance(haystack, str):
+        return rs.anchor_hit(anchor, haystack)
+
     return re.search(r"\b" + re.escape(anchor) + r"\b", haystack) is not None
 
 
@@ -640,6 +644,12 @@ def _subject_anchor_matches(
 
     if not anchors:
         return True, []
+
+    rs = _get_rust_cer()
+    if (rs is not None and all(isinstance(a, str) for a in anchors)
+            and all(x is None or isinstance(x, str) for x in (title, url, passage))):
+        fields = list(rs.subject_fields(list(anchors), title or "", url or "", passage or ""))
+        return bool(fields), fields
 
     matched_fields: List[str] = []
 

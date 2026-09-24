@@ -20,6 +20,7 @@ Run: python -m agent.claim_evidence_retriever_rust_parity_test
 from __future__ import annotations
 
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -155,6 +156,62 @@ def main() -> int:
         py_r = _classify_claim_role(claim_text, q)
         rs_r = dict(rs.classify_claim_role(claim_text, q))
         check(f"E{i} classify_claim_role совпадает — {claim_text[:50]!r}", py_r == rs_r, f"python={py_r!r} rust={rs_r!r}")
+
+    # ── H: якоря субъекта (_anchor_hit, _subject_anchor_matches) — кусок 26 ──
+    import agent.claim_evidence_retriever as cer_mod2
+    rng = random.Random(20260924)
+    _h_ok = [0]
+
+    def check_h(name, cond, detail=""):
+        """Массовые проверки раздела H: успехи считаем, печатаем только провалы."""
+        if cond:
+            _h_ok[0] += 1
+        else:
+            check(name, cond, detail)
+    anchors_pool = ["sun", "юпитер", "европейский союз", "c++", "++", "--", "a", "aa", "ы", "x-y", "а.б", "не", "ёж", "\u0301", "²", "_", "юпитер\u0301",
+                    "nato", "e=mc²", "(x)", "[y]", "a b", "\x1c", "😀", "İstanbul", "ı", "ss", "ß", "\u0345", "\u093e", "\u0e31", "ª"]
+    hay_atoms = ["sun", "sunlight", "sunday", "юпитер", "юпитере", "Юпитер", "европейский союз", "европейский  союз", "c++", "c++x", "xc++", "a", "aa", "aaa", "aaaa", "ы",
+                 "x-y", "x-yz", "а.б", "не", "нее", "ёж", "ёжик", "\u0301", "²", "_", "юпитер\u0301", "nato", "e=mc²", "(x)", "[y]", "a b", "😀", "İstanbul", "ı", "ss", "ß",
+                 "\u0345", "\u093e", "\u0e31", "\u0903", "ª", "sun\u0345", "sun\u093e", "\u0345sun", "क", "कि",
+                 " ", "  ", ",", ".", "-", "\n", "\x1c", "1", "٣", "http://example.com/sun/jupiter"]
+    def rnd_hay():
+        return "".join(rng.choice(hay_atoms) + rng.choice(["", "", " ", "-", ",", "\u0301"]) for _ in range(rng.randint(0, 8)))
+    def _run_h(engine, fn, *a, **k):
+        saved = os.environ.get("YANDI_CLAIM_EVIDENCE_RETRIEVER_ENGINE")
+        try:
+            if engine:
+                os.environ["YANDI_CLAIM_EVIDENCE_RETRIEVER_ENGINE"] = "rust"
+            else:
+                os.environ.pop("YANDI_CLAIM_EVIDENCE_RETRIEVER_ENGINE", None)
+            cer_mod2._rust_cer = None
+            try:
+                return fn(*a, **k)
+            except Exception as e:                                    # noqa: BLE001
+                return f"EXC:{type(e).__name__}"
+        finally:
+            if saved is None:
+                os.environ.pop("YANDI_CLAIM_EVIDENCE_RETRIEVER_ENGINE", None)
+            else:
+                os.environ["YANDI_CLAIM_EVIDENCE_RETRIEVER_ENGINE"] = saved
+            cer_mod2._rust_cer = None
+    for anchor in anchors_pool + [""]:
+        for hay in ["", anchor, " " + anchor + " ", anchor + anchor, "x" + anchor, anchor + "x", "-" + anchor + "-", anchor.upper()] + [rnd_hay() for _ in range(40)]:
+            p_, r_ = _run_h(False, cer_mod2._anchor_hit, anchor, hay), _run_h(True, cer_mod2._anchor_hit, anchor, hay)
+            check_h(f" anchor_hit {anchor!r} in {hay[:30]!r}", p_ == r_, f"python={p_} rust={r_}")
+    for _ in range(3000):
+        anchors = [rng.choice(anchors_pool + [""]) for _ in range(rng.randint(0, 3))]
+        named = anchors if rng.random() < 0.6 else None
+        content = anchors if named is None else rng.choice([None, [], ["юпитер"]])
+        title, url, passage = rng.choice([None, "", rnd_hay()]), rng.choice([None, "", rnd_hay()]), rng.choice([None, "", rnd_hay()])
+        claim = rng.choice(["", "Юпитер газовый гигант", "NATO и Европейский союз", "sun"])
+        kw = dict(title=title, url=url, named_anchors=named, content_anchors=content)
+        p_, r_ = _run_h(False, cer_mod2._subject_anchor_matches, claim, passage, **kw), _run_h(True, cer_mod2._subject_anchor_matches, claim, passage, **kw)
+        check_h(f" subject_anchor_matches {anchors} t={str(title)[:15]!r}", p_ == r_, f"python={p_} rust={r_}")
+    for bad in ([5], [None], ["ok", 3]):
+        p_, r_ = _run_h(False, cer_mod2._subject_anchor_matches, "x", "юпитер", named_anchors=bad), _run_h(True, cer_mod2._subject_anchor_matches, "x", "юпитер", named_anchors=bad)
+        check_h(f" типы якорей {bad}", p_ == r_, f"python={p_} rust={r_}")
+
+    print(f"(раздел H: успешных массовых проверок {_h_ok[0]})")
 
     # ── G: сам переключатель ──
     saved_env = os.environ.get("YANDI_CLAIM_EVIDENCE_RETRIEVER_ENGINE")
