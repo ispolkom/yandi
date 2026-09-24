@@ -23,8 +23,11 @@ pub mod local_guard;
 pub mod message_intensity;
 pub mod orch_risk;
 pub mod personal_boundary;
+pub mod scene_builder;
 mod py_json;          // точный json.loads Python (для message_intensity)
 mod py_printable_table; // данные: isprintable() для repr
+mod py_case_table;    // данные: Lowercase/Uppercase/Titlecase для str.isupper(), см. gen_py_case_table.py
+mod scene_builder_data; // данные: паттерны SceneBuilder, сгенерированы из Python
 mod py_decimal_table; // данные: цифры Unicode для py_float, см. gen_py_decimal_table.py
 pub mod py_text;      // общие питоновские strip/split/\s/float — см. файл (+ подмодуль yandi_rs.py_text для проверки)
 mod py_word_table; // данные (не подмодуль Python): точная копия Python-`\w`, см. gen_py_word_table.py
@@ -113,6 +116,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     personal_boundary::register(py, &personal_boundary_mod)?;
     m.add_submodule(&personal_boundary_mod)?;
 
+    let scene_builder_mod = PyModule::new_bound(py, "scene_builder")?;
+    scene_builder::register(py, &scene_builder_mod)?;
+    m.add_submodule(&scene_builder_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -131,6 +138,7 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.epistemic_router", &epistemic_router_mod)?;
     sys_modules.set_item("yandi_rs.message_intensity", &message_intensity_mod)?;
     sys_modules.set_item("yandi_rs.orch_risk", &orch_risk_mod)?;
+    sys_modules.set_item("yandi_rs.scene_builder", &scene_builder_mod)?;
     sys_modules.set_item("yandi_rs.personal_boundary", &personal_boundary_mod)?;
     sys_modules.set_item("yandi_rs.target_router", &target_router_mod)?;
     sys_modules.set_item("yandi_rs.intent_router", &intent_router_mod)?;

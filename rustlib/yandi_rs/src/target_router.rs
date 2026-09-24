@@ -20,7 +20,7 @@ use crate::source_clustering::is_py_word_char;
 use pyo3::prelude::*;
 
 /// `re.search(r'\bWORD\b', q)` для литерала WORD из словесных символов.
-fn has_word(q: &str, word: &str) -> bool {
+pub(crate) fn has_word(q: &str, word: &str) -> bool {
     q.match_indices(word).any(|(i, _)| {
         let before_ok = q[..i].chars().next_back().map_or(true, |c| !is_py_word_char(c));
         let after_ok = q[i + word.len()..].chars().next().map_or(true, |c| !is_py_word_char(c));

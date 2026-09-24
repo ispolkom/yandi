@@ -1,11 +1,42 @@
 """
 agent/scene_builder.py — Social Scene Builder.
 Строит карту социальной сцены.
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/scene_builder.rs — SceneBuilder.build (датакласс SocialScene
+остаётся здесь; Rust отдаёт значения полей). Доказан на совпадение тестом
+agent/scene_builder_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается переменной окружения
+YANDI_SCENE_BUILDER_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (`maturin develop`, см. rustlib/README.md).
+Делегирует, только пока паттерны экземпляра не изменены и context — None/dict; иначе — Python.
+ВАЖНО: порядок элементов в scene.participants/mentioned/coalition у оригинала НЕ детерминирован
+(`list(set(...))`, хеш-рандомизация строк) — потребители не должны на него полагаться; Rust отдаёт
+уникальные значения в порядке первого появления.
 """
 
+import logging
+import os
 import re
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
+
+log = logging.getLogger("yandi.scene_builder")
+
+_rust_sb = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_sb():
+    global _rust_sb
+    if _rust_sb is None:
+        if os.environ.get("YANDI_SCENE_BUILDER_ENGINE") == "rust":
+            try:
+                import yandi_rs.scene_builder as _rs
+                _rust_sb = _rs
+                log.warning("YANDI_SCENE_BUILDER_ENGINE=rust: используется Rust-реализация scene_builder (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_SCENE_BUILDER_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_sb = False
+        else:
+            _rust_sb = False
+    return _rust_sb or None
 
 
 @dataclass
@@ -126,8 +157,26 @@ class SceneBuilder:
             "information": [r"что такое", r"кто такой", r"объясни", r"расскажи о"],
             "question": [r"\?"],
         }
-    
+        self._default_patterns = self._pattern_snapshot()
+
+    def _pattern_snapshot(self):
+        return (
+            list(self.yandi_names), list(self.ai_names), list(self.ty_verb_forms), list(self.self_reference),
+            list(self.group_reference), list(self.coalition_markers),
+            {k: list(v) for k, v in self.speech_act_patterns.items()},
+        )
+
+    def _patterns_unchanged(self) -> bool:
+        """Rust знает только паттерны по умолчанию: если атрибуты экземпляра изменили — считает Python."""
+        return self._pattern_snapshot() == self._default_patterns
+
     def build(self, text: str, context: Dict = None) -> SocialScene:
+        rs = _get_rust_sb()
+        if (rs is not None and isinstance(text, str) and (context is None or isinstance(context, dict))
+                and self._patterns_unchanged()):
+            is_dialog = bool((context or {}).get("is_dialog", True))
+            return SocialScene(**rs.build(text, is_dialog))
+
         context = context or {}
         text_lower = text.lower()
         scene = SocialScene()

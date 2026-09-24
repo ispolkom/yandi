@@ -18,6 +18,7 @@
 //! паттернах крейта `regex` определяются иначе, чем в Python (напр. '²', комбинирующие знаки);
 //! точная замена потребовала бы lookaround. Затрагивает только экзотические символы.
 
+use crate::py_case_table::{PY_LOWER_RANGES, PY_TITLE_RANGES, PY_UPPER_RANGES};
 use crate::py_decimal_table::PY_DECIMAL_ZEROS;
 use crate::py_printable_table::PY_NONPRINTABLE_RANGES;
 use pyo3::prelude::*;
@@ -104,6 +105,36 @@ fn py_decimal_value(c: char) -> Option<u32> {
     } else {
         None
     }
+}
+
+fn in_ranges(table: &[(u32, u32)], c: char) -> bool {
+    let cp = c as u32;
+    table
+        .binary_search_by(|&(lo, hi)| {
+            if cp < lo {
+                std::cmp::Ordering::Greater
+            } else if cp > hi {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+/// Python `str.isupper()`: ложь при любом Lowercase/Titlecase символе; истина, если есть хоть один
+/// Uppercase (наборы — из самого Python, см. gen_py_case_table.py).
+pub fn py_isupper(s: &str) -> bool {
+    let mut cased = false;
+    for c in s.chars() {
+        if in_ranges(&PY_LOWER_RANGES, c) || in_ranges(&PY_TITLE_RANGES, c) {
+            return false;
+        }
+        if !cased && in_ranges(&PY_UPPER_RANGES, c) {
+            cased = true;
+        }
+    }
+    cased
 }
 
 fn is_py_printable(c: char) -> bool {
@@ -202,6 +233,12 @@ fn py_py_split(s: &str) -> Vec<String> {
 }
 
 #[pyfunction]
+#[pyo3(name = "isupper")]
+fn py_py_isupper(s: &str) -> bool {
+    py_isupper(s)
+}
+
+#[pyfunction]
 #[pyo3(name = "repr_str")]
 fn py_py_repr_str(s: &str) -> String {
     py_repr_str(s)
@@ -256,6 +293,7 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_py_split, m)?)?;
     m.add_function(wrap_pyfunction!(py_py_float, m)?)?;
     m.add_function(wrap_pyfunction!(py_py_repr_str, m)?)?;
+    m.add_function(wrap_pyfunction!(py_py_isupper, m)?)?;
     m.add_function(wrap_pyfunction!(py_json_loads, m)?)?;
     Ok(())
 }
