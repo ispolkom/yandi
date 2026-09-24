@@ -135,7 +135,7 @@ pub fn inside_quotation(message: &str, position: usize) -> bool {
 
 // ---------- разбор «родных» типов из json.loads ----------
 
-enum V<'py> {
+pub(crate) enum V<'py> {
     None,
     Bool,
     Int(Bound<'py, PyAny>),
@@ -147,7 +147,7 @@ enum V<'py> {
 
 /// None = посторонний тип (подкласс, кортеж, Decimal…) → вызывающий откатывается на Python.
 /// Строка с одиноким суррогатом даёт Err(UnicodeEncodeError) — обёртка тоже откатывается.
-fn classify<'py>(o: &Bound<'py, PyAny>) -> PyResult<Option<V<'py>>> {
+pub(crate) fn classify<'py>(o: &Bound<'py, PyAny>) -> PyResult<Option<V<'py>>> {
     if o.is_none() {
         return Ok(Some(V::None));
     }
@@ -173,7 +173,7 @@ fn classify<'py>(o: &Bound<'py, PyAny>) -> PyResult<Option<V<'py>>> {
 }
 
 /// Значение целого: Some(i64) либо None для огромного (тогда любое сравнение с диапазоном слов — «вне диапазона»).
-fn small_int(o: &Bound<'_, PyAny>) -> Option<i64> {
+pub(crate) fn small_int(o: &Bound<'_, PyAny>) -> Option<i64> {
     o.extract::<i64>().ok()
 }
 

@@ -66,6 +66,41 @@ _IDEM_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _SECRET_RE = re.compile(r"^[0-9a-f]{64}$")
 
+# Rust-перенос (2026-09-24): rustlib/yandi_rs/src/core_lifecycle.rs — разбор ключа, три регулярки идентификаторов, схема запросов
+# `_validate`, HKDF проверочного значения. Доказан тестом pet/pet_core_lifecycle_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН;
+# включается YANDI_CORE_LIFECYCLE_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs. Файлы, права, AES-GCM и жизненная логика — здесь, в Python.
+_rust_cl = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+_ID_KINDS = {id(_REQUEST_ID_RE): 0, id(_IDEM_RE): 1, id(_SECRET_RE): 2}
+_ID_PATTERNS = {0: r"^[A-Za-z0-9_-]{1,64}$", 1: r"^[A-Za-z0-9_-]{8,64}$", 2: r"^[0-9a-f]{64}$"}
+
+
+def _get_rust_cl():
+    global _rust_cl
+    if _rust_cl is None:
+        if os.environ.get("YANDI_CORE_LIFECYCLE_ENGINE") == "rust":
+            try:
+                import yandi_rs.core_lifecycle as _rs
+                _rust_cl = _rs
+                _log_line("YANDI_CORE_LIFECYCLE_ENGINE=rust: используется Rust-реализация core_lifecycle (rustlib/yandi_rs)")
+            except ImportError as e:
+                _log_line(f"YANDI_CORE_LIFECYCLE_ENGINE=rust запрошен, но yandi_rs не собран ({e}) — использую Python")
+                _rust_cl = False
+        else:
+            _rust_cl = False
+    return _rust_cl or None
+
+
+def _id_ok(rx, text) -> bool:
+    """`rx.match(text)` как булево; для str и неизменённых регулярок — через Rust."""
+    rs = _get_rust_cl()
+    kind = _ID_KINDS.get(id(rx))
+    if rs is not None and kind is not None and type(text) is str and rx.pattern == _ID_PATTERNS[kind]:
+        try:
+            return rs.id_match(kind, text)
+        except UnicodeEncodeError:
+            pass
+    return rx.match(text) is not None
+
 _CHECK_PLAINTEXT = b"yandi core check value v1"
 _CHECK_INFO = b"yandi/core/v1/check-value"
 _CHECK_FILE = "check-value.json"
@@ -107,7 +142,7 @@ def load_launch_secret(path: str) -> str:
     finally:
         os.close(fd)
     secret = data.decode("ascii", "replace").strip()
-    if not _SECRET_RE.match(secret):
+    if not _id_ok(_SECRET_RE, secret):
         raise LaunchSecretError("the launch secret file does not hold 32 random bytes in hex")
     return secret
 
@@ -115,6 +150,11 @@ def load_launch_secret(path: str) -> str:
 # ── check value (how a key is proven without keeping anything readable) ─────────────────────────────────────────
 
 def _check_key(derived_key: bytes) -> bytes:
+    rs = _get_rust_cl()
+    if rs is not None and type(derived_key) is bytes and _CHECK_INFO == b"yandi/core/v1/check-value":
+        out = rs.check_key(derived_key, _CHECK_INFO)
+        if out is not None:
+            return out
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=_CHECK_INFO).derive(derived_key)
 
 
@@ -203,6 +243,14 @@ def parse_request_body(raw: bytes) -> dict:
 
 
 def _validate(endpoint: str, doc: dict) -> Optional[str]:
+    rs = _get_rust_cl()
+    if rs is not None and type(endpoint) is str and UNLOCK_CONTEXT == "yandi/core/v1":
+        try:
+            r = rs.validate(endpoint, doc, UNLOCK_CONTEXT)
+        except UnicodeEncodeError:
+            r = None
+        if r is not None:
+            return r[0] if isinstance(r, tuple) else r
     allowed = {"unlock": {"key", "context", "extensions"}, "lock": {"extensions"}, "shutdown": {"deadline_ms", "extensions"}}[endpoint]
     if set(doc) - allowed:
         return "The request contains a field that is not allowed."
@@ -224,6 +272,12 @@ def _validate(endpoint: str, doc: dict) -> Optional[str]:
 
 
 def _decode_key(text: str) -> Optional[bytes]:
+    rs = _get_rust_cl()
+    if rs is not None and type(text) is str and _KEY_RE.pattern == r"^[A-Za-z0-9+/]{43}=$":
+        try:
+            return rs.decode_key(text)
+        except UnicodeEncodeError:
+            pass
     if not _KEY_RE.match(text):
         return None
     try:
@@ -250,7 +304,7 @@ class Lifecycle:
     def __init__(self, secret: str, state_dir: str | Path, *, log: Callable[[str], None] = _log_line,
                  on_ready: Optional[list[Callable[[], Awaitable[None]]]] = None,
                  request_stop: Optional[Callable[[float], None]] = None, test_mode: bool = False):
-        if not _SECRET_RE.match(secret):
+        if not _id_ok(_SECRET_RE, secret):
             raise ValueError("the launch secret must be 32 random bytes in hex")
         self._secret = secret.encode("ascii")
         self.state_dir = Path(state_dir)
@@ -452,7 +506,7 @@ class CoreBoundary:
         core = self.core
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
         rid = headers.get("x-request-id", "")
-        rid = rid if _REQUEST_ID_RE.match(rid) else "req_" + secrets.token_hex(6)
+        rid = rid if _id_ok(_REQUEST_ID_RE, rid) else "req_" + secrets.token_hex(6)
         method, path = scope["method"], scope["path"]
         try:
             await self._send(send, await self._v1_reply(method, path, headers, receive, rid))
@@ -475,7 +529,7 @@ class CoreBoundary:
         idem_key, raw, doc = None, b"", {}
         if method == "POST":
             idem_key = headers.get("idempotency-key")
-            if idem_key is None or not _IDEM_RE.match(idem_key):
+            if idem_key is None or not _id_ok(_IDEM_RE, idem_key):
                 return error_reply(400, "invalid_payload", "A valid Idempotency-Key header is required.", rid)
             declared = headers.get("content-length", "")
             if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
