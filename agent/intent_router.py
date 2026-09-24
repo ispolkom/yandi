@@ -1,9 +1,37 @@
 """
 agent/intent_router.py — Определяет тип запроса
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/intent_router.rs — detect_intent, should_use_rag,
+get_intent_action, get_intent_description, get_intent_explanation. Доказан на совпадение тестом
+agent/intent_router_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается переменной окружения
+YANDI_INTENT_ROUTER_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (`maturin develop`, см.
+rustlib/README.md). Не собран — тихо остаёмся на Python.
 """
 
+import logging
+import os
 import re
 from typing import Dict, Any, Tuple
+
+log = logging.getLogger("yandi.intent_router")
+
+_rust_ir = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_ir():
+    global _rust_ir
+    if _rust_ir is None:
+        if os.environ.get("YANDI_INTENT_ROUTER_ENGINE") == "rust":
+            try:
+                import yandi_rs.intent_router as _rs
+                _rust_ir = _rs
+                log.warning("YANDI_INTENT_ROUTER_ENGINE=rust: используется Rust-реализация intent_router (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_INTENT_ROUTER_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_ir = False
+        else:
+            _rust_ir = False
+    return _rust_ir or None
 
 INTENT_PATTERNS = {
     "social_dialog": {
@@ -115,6 +143,10 @@ def detect_intent(query: str) -> Tuple[str, float, str]:
     if not query:
         return "unknown", 0.0, "empty"
 
+    rs = _get_rust_ir()
+    if rs is not None and isinstance(query, str):
+        return tuple(rs.detect_intent(query))
+
     q = query.lower().strip()
     
     best_intent = "unknown"
@@ -140,20 +172,32 @@ def detect_intent(query: str) -> Tuple[str, float, str]:
 
 
 def should_use_rag(intent_type: str) -> bool:
+    rs = _get_rust_ir()
+    if rs is not None and isinstance(intent_type, str):
+        return rs.should_use_rag(intent_type)
     return intent_type in RAG_REQUIRED
 
 
 def get_intent_action(intent_type: str) -> str:
+    rs = _get_rust_ir()
+    if rs is not None and isinstance(intent_type, str):
+        return rs.get_intent_action(intent_type)
     data = INTENT_PATTERNS.get(intent_type, {})
     return data.get("action", "unknown")
 
 
 def get_intent_description(intent_type: str) -> str:
+    rs = _get_rust_ir()
+    if rs is not None and isinstance(intent_type, str):
+        return rs.get_intent_description(intent_type)
     data = INTENT_PATTERNS.get(intent_type, {})
     return data.get("description", "неизвестный тип запроса")
 
 
 def get_intent_explanation(intent_type: str) -> str:
+    rs = _get_rust_ir()
+    if rs is not None and isinstance(intent_type, str):
+        return rs.get_intent_explanation(intent_type)
     explanations = {
         "objective_information": "Я поняла, что ты хочешь узнать факты. Я поищу информацию.",
         "subjective_interpretation": "Я поняла, что ты хочешь моё мнение или анализ. Я поделюсь им.",

@@ -18,6 +18,7 @@ pub mod claim_types;
 pub mod claim_validator;
 pub mod criticism_detector;
 pub mod epistemic_router;
+pub mod intent_router;
 pub mod local_guard;
 pub mod message_intensity;
 pub mod orch_risk;
@@ -98,6 +99,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     py_text::register(py, &py_text_mod)?;
     m.add_submodule(&py_text_mod)?;
 
+    let intent_router_mod = PyModule::new_bound(py, "intent_router")?;
+    intent_router::register(py, &intent_router_mod)?;
+    m.add_submodule(&intent_router_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -116,6 +121,7 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.epistemic_router", &epistemic_router_mod)?;
     sys_modules.set_item("yandi_rs.message_intensity", &message_intensity_mod)?;
     sys_modules.set_item("yandi_rs.orch_risk", &orch_risk_mod)?;
+    sys_modules.set_item("yandi_rs.intent_router", &intent_router_mod)?;
     sys_modules.set_item("yandi_rs.py_text", &py_text_mod)?;
     sys_modules.set_item("yandi_rs.source_clustering", &source_clustering_mod)?;
     Ok(())
