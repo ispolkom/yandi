@@ -87,13 +87,40 @@ deliberately does not make — see the plan's own "не превращать Pha
 
 PERFORMANCE: zero network/embedding/LLM calls. Pure comparison of two
 already-computed strings via a lookup table.
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/canonical_trust.rs — compute_canonical_trust (лог `log(...)` при
+verbose остаётся здесь). Доказан на совпадение тестом agent/canonical_trust_rust_parity_test.py. По умолчанию
+ВЫКЛЮЧЕН; включается переменной окружения YANDI_CANONICAL_TRUST_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs
+(`maturin develop`, см. rustlib/README.md). Метки не-строки/не-None идут прежним Python-путём.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any, Dict, Optional
 
 from agent.orchestrator.epistemic.trust_gate import _TRUST_ORDER, _apply_trust_cap
+
+_logger = logging.getLogger("yandi.canonical_trust")
+
+_rust_ct = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_ct():
+    global _rust_ct
+    if _rust_ct is None:
+        if os.environ.get("YANDI_CANONICAL_TRUST_ENGINE") == "rust":
+            try:
+                import yandi_rs.canonical_trust as _rs
+                _rust_ct = _rs
+                _logger.warning("YANDI_CANONICAL_TRUST_ENGINE=rust: используется Rust-реализация canonical_trust (rustlib/yandi_rs)")
+            except ImportError as e:
+                _logger.warning("YANDI_CANONICAL_TRUST_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_ct = False
+        else:
+            _rust_ct = False
+    return _rust_ct or None
 
 
 def compute_canonical_trust(
@@ -111,6 +138,21 @@ def compute_canonical_trust(
     "UNVERIFIED" (the same fail-safe default both existing strands
     already use for "nothing computed").
     """
+    rs = _get_rust_ct()
+    if (rs is not None and (final_synthesizer_trust is None or isinstance(final_synthesizer_trust, str))
+            and (trust_gate_label is None or isinstance(trust_gate_label, str))):
+        result = dict(rs.compute_canonical_trust(final_synthesizer_trust, trust_gate_label))
+        if verbose and result["stricter_strand"] in ("trust_gate", "synthesizer", "equal"):
+            log(
+                "[Canonical Trust Shadow] "
+                f"synthesizer_strand={final_synthesizer_trust} "
+                f"trust_gate_strand={trust_gate_label} "
+                f"canonical={result['canonical_trust']} "
+                f"diverged={result['diverged']} "
+                f"stricter_strand={result['stricter_strand']}"
+            )
+        return result
+
     if not final_synthesizer_trust and not trust_gate_label:
         return {
             "canonical_trust": "UNVERIFIED",

@@ -22,7 +22,7 @@ use crate::trust_data::TRUST_ORDER;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-fn order(label: &str) -> i64 {
+pub fn order(label: &str) -> i64 {
     TRUST_ORDER.iter().find(|(k, _)| *k == label).map(|(_, v)| *v).unwrap_or(0)
 }
 
