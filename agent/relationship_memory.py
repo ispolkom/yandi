@@ -30,6 +30,8 @@ owns the transaction.
 """
 from __future__ import annotations
 
+import logging
+import os
 import re
 import time
 import uuid
@@ -312,7 +314,38 @@ def _stem(token: str) -> str:
 _NON_CONTENT_STEMS = {_stem(w) for w in _NON_CONTENT_WORDS}
 
 
+_log = logging.getLogger("yandi.relationship_memory")
+_rust_rm = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+_DEFAULT_STEM_TABLES = (tuple(_STEM_SUFFIXES), frozenset(_NON_CONTENT_STEMS))
+
+
+def _get_rust_rm():
+    """Rust-перенос (2026-09-24): rustlib/yandi_rs/src/relationship_memory.rs — стеммер `_stems`. Доказан тестом
+    agent/relationship_memory_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается YANDI_RELATIONSHIP_MEMORY_ENGINE=rust
+    ПОСЛЕ сборки rustlib/yandi_rs. Делегирует, только пока таблицы стеммера не изменены."""
+    global _rust_rm
+    if _rust_rm is None:
+        if os.environ.get("YANDI_RELATIONSHIP_MEMORY_ENGINE") == "rust":
+            try:
+                import yandi_rs.relationship_memory as _rs
+                _rust_rm = _rs
+                _log.warning("YANDI_RELATIONSHIP_MEMORY_ENGINE=rust: используется Rust-реализация relationship_memory (rustlib/yandi_rs)")
+            except ImportError as e:
+                _log.warning("YANDI_RELATIONSHIP_MEMORY_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_rm = False
+        else:
+            _rust_rm = False
+    return _rust_rm or None
+
+
 def _stems(text: Any, *, drop_non_content: bool) -> set:
+    rs = _get_rust_rm()
+    if (rs is not None and (text is None or type(text) is str)
+            and (tuple(_STEM_SUFFIXES), frozenset(_NON_CONTENT_STEMS)) == _DEFAULT_STEM_TABLES):
+        try:
+            return rs.stems(text or "", bool(drop_non_content))
+        except UnicodeEncodeError:
+            pass        # одинокий суррогат — исходный код ниже
     tokens = re.findall(r"[a-zа-я0-9]+", _normalize(text))
     stems = {_stem(t) for t in tokens}
     if drop_non_content:

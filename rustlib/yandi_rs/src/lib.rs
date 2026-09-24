@@ -32,6 +32,7 @@ pub mod policy;
 pub mod scene_builder;
 mod py_json;          // точный json.loads Python (для message_intensity)
 mod py_printable_table; // данные: isprintable() для repr
+mod relationship_memory_data; // данные: таблицы стеммера, сгенерированы из Python (gen_relationship_memory_data.py)
 mod py_unassigned_table; // данные: не назначенные в Unicode Python кодовые точки, см. gen_py_unassigned_table.py
 mod py_casefold_table; // данные: одиночные отображения str.casefold() из Python, см. gen_py_casefold_table.py
 mod py_lower_table; // данные: одиночные отображения str.lower() из Python, см. gen_py_lower_table.py
@@ -54,6 +55,7 @@ pub mod tool_shell;
 pub mod crypto;
 pub mod pet_extraction;
 pub mod orch_tag_tree;
+pub mod relationship_memory;
 pub mod trust_gate;
 pub mod web_login;
 
@@ -185,6 +187,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     orch_tag_tree::register(py, &orch_tag_tree_mod)?;
     m.add_submodule(&orch_tag_tree_mod)?;
 
+    let relationship_memory_mod = PyModule::new_bound(py, "relationship_memory")?;
+    relationship_memory::register(py, &relationship_memory_mod)?;
+    m.add_submodule(&relationship_memory_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -207,6 +213,7 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.crypto", &crypto_mod)?;
     sys_modules.set_item("yandi_rs.pet_extraction", &pet_extraction_mod)?;
     sys_modules.set_item("yandi_rs.orch_tag_tree", &orch_tag_tree_mod)?;
+    sys_modules.set_item("yandi_rs.relationship_memory", &relationship_memory_mod)?;
     sys_modules.set_item("yandi_rs.policy", &policy_mod)?;
     sys_modules.set_item("yandi_rs.final_claim_coverage", &final_claim_coverage_mod)?;
     sys_modules.set_item("yandi_rs.canonical_trust", &canonical_trust_mod)?;
