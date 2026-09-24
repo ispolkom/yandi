@@ -2,11 +2,39 @@
 agent/personal_boundary.py — Определяет границы личности YANDI.
 Отличает личные запросы от деловых.
 Различает искренние извинения от провокаций.
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/personal_boundary.rs — PersonalBoundary.analyze и
+get_response_template (класс и датакласс остаются здесь; Rust отдаёт данные). Доказан на совпадение
+тестом agent/personal_boundary_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается переменной
+окружения YANDI_PERSONAL_BOUNDARY_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (`maturin develop`, см.
+rustlib/README.md). Делегирует, только пока списки паттернов экземпляра не изменены; иначе — Python.
 """
 
+import logging
+import os
 import re
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
+
+log = logging.getLogger("yandi.personal_boundary")
+
+_rust_pb = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_pb():
+    global _rust_pb
+    if _rust_pb is None:
+        if os.environ.get("YANDI_PERSONAL_BOUNDARY_ENGINE") == "rust":
+            try:
+                import yandi_rs.personal_boundary as _rs
+                _rust_pb = _rs
+                log.warning("YANDI_PERSONAL_BOUNDARY_ENGINE=rust: используется Rust-реализация personal_boundary (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_PERSONAL_BOUNDARY_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_pb = False
+        else:
+            _rust_pb = False
+    return _rust_pb or None
 
 
 @dataclass
@@ -86,11 +114,26 @@ class PersonalBoundary:
             r"твоё мнение",
             r"что для тебя",
         ]
-    
+        self._default_patterns = self._pattern_snapshot()
+
+    def _pattern_snapshot(self):
+        return (
+            list(self.personal_patterns), list(self.sincere_apology_patterns), list(self.formal_apology_patterns),
+            list(self.provocation_patterns), list(self.deep_question_patterns),
+        )
+
+    def _patterns_unchanged(self) -> bool:
+        """Rust знает только паттерны по умолчанию: если списки экземпляра изменили — считает Python."""
+        return self._pattern_snapshot() == self._default_patterns
+
     def analyze(self, query: str, context: Dict = None) -> BoundaryAnalysis:
         """
         Анализирует запрос на предмет личного характера.
         """
+        rs = _get_rust_pb()
+        if rs is not None and isinstance(query, str) and self._patterns_unchanged():
+            return BoundaryAnalysis(**rs.analyze(query))
+
         context = context or {}
         query_lower = query.lower()
         result = BoundaryAnalysis()
@@ -178,6 +221,19 @@ class PersonalBoundary:
         state = state or {}
         trust = state.get("trust", 50)
         irritation = state.get("irritation", 10)
+
+        rs = _get_rust_pb()
+        if (rs is not None and isinstance(analysis, BoundaryAnalysis)
+                and isinstance(trust, (int, float)) and isinstance(irritation, (int, float))):
+            try:
+                kind, tone, template = rs.get_response_template(
+                    bool(analysis.is_provocation), bool(analysis.is_apology), bool(analysis.is_sincere),
+                    bool(analysis.is_personal), bool(analysis.is_deep_question), bool(analysis.is_social),
+                    float(trust), float(irritation),
+                )
+                return {"type": kind, "tone": tone, "template": template}
+            except OverflowError:
+                pass        # число, не помещающееся в float, — обычный Python-путь
         
         if analysis.is_provocation:
             return {
