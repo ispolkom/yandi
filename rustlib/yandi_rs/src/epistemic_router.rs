@@ -22,6 +22,7 @@
 //! Статус (2026-09-23): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_EPISTEMIC_ROUTER_ENGINE=rust (см. agent/epistemic_router.py).
 
+use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 
@@ -168,7 +169,7 @@ const HYPOTHETICAL_MARKERS: &[&str] = &[
 
 /// agent/epistemic_router.py::_detect_hypothetical
 pub fn detect_hypothetical(query: &str) -> bool {
-    let q = query.to_lowercase();
+    let q = query.py_lowercase();
     HYPOTHETICAL_MARKERS.iter().any(|m| q.contains(m))
 }
 
@@ -179,7 +180,7 @@ const NEGATIVE_CLAIM_MARKERS: &[&str] = &[
 
 /// agent/epistemic_router.py::_detect_negative_claim
 pub fn detect_negative_claim(query: &str) -> bool {
-    let q = query.to_lowercase();
+    let q = query.py_lowercase();
     NEGATIVE_CLAIM_MARKERS.iter().any(|m| q.contains(m))
 }
 
@@ -212,7 +213,7 @@ const STABILITY_MARKERS: &[(&str, &[&str])] = &[
 /// agent/epistemic_router.py::_detect_knowledge_stability — domain/testability параметры
 /// НЕ используются в оригинале (сохранено дословно). Возвращает (stability, confidence, reason).
 pub fn detect_knowledge_stability(q: &str, _domain: &str, _testability: &str) -> (&'static str, f64, &'static str) {
-    let q_lower = q.to_lowercase();
+    let q_lower = q.py_lowercase();
     // Первый ключ со строго наибольшим счётом побеждает (Python max() на ничьей берёт первый
     // по порядку итерации) — обновляем best только на СТРОГО большем счёте, не на равном.
     let mut best_key: Option<&'static str> = None;

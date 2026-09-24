@@ -16,9 +16,9 @@
 //! Статус (2026-09-24, hostname уточнён): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_SOURCE_QUALITY_ENGINE=rust (см. agent/source_quality.py).
 
+use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
-use unicode_normalization::UnicodeNormalization;
 use pyo3::types::PyDict;
 use std::collections::HashSet;
 
@@ -203,7 +203,7 @@ fn py_urlsplit_netloc(url: &str) -> Result<String, ()> {
     // _checknetloc: символы, которые NFKC-нормализация разворачивает в '/?#@:'
     if !netloc.is_empty() && !netloc.is_ascii() {
         let n: String = netloc.chars().filter(|c| !matches!(c, '@' | ':' | '#' | '?')).collect();
-        let netloc2: String = n.nfkc().collect();
+        let netloc2: String = crate::py_text::py_nfkc(&n);
         if n != netloc2 && netloc2.chars().any(|c| "/?#@:".contains(c)) {
             return Err(());
         }
@@ -236,7 +236,7 @@ pub fn hostname(url: &str) -> String {
         Some(i) => (&hostname[..i], &hostname[i..]),
         None => (hostname, ""),
     };
-    let mut host = format!("{}{}", head.to_lowercase(), zone).to_lowercase();
+    let mut host = format!("{}{}", head.py_lowercase(), zone).py_lowercase();
     if let Some(stripped) = host.strip_prefix("www.") {
         host = stripped.to_string();
     }
@@ -271,7 +271,7 @@ fn classify_source(host: &str, url: &str) -> (&'static str, f64, f64) {
     if matches_domain(host, &SOCIAL_DOMAINS) {
         return ("social", 0.20, 0.20);
     }
-    let lowered = url.to_lowercase();
+    let lowered = url.py_lowercase();
     if lowered.contains("blog") {
         return ("blog_opinion", 0.35, 0.30);
     }
@@ -303,7 +303,7 @@ fn refine_source_class(
     text: &str,
 ) -> (&'static str, f64, f64, Vec<String>) {
     let text_head: String = text.chars().take(5000).collect();
-    let combined = format!("{url} {title} {text_head}").to_lowercase();
+    let combined = format!("{url} {title} {text_head}").py_lowercase();
 
     if FORUM_MARKERS.iter().any(|m| combined.contains(m)) {
         return ("forum", authority.min(0.30), primaryness.min(0.25), vec!["content indicates forum/community source".to_string()]);
@@ -313,7 +313,7 @@ fn refine_source_class(
     }
 
     let speculative_hits = SPECULATIVE_MARKERS.iter().filter(|m| combined.contains(**m)).count();
-    let title_url = format!("{url} {title}").to_lowercase();
+    let title_url = format!("{url} {title}").py_lowercase();
     let strong_speculative_hit = SPECULATIVE_MARKERS.iter().any(|m| title_url.contains(m));
     if speculative_hits >= 2 || strong_speculative_hit {
         return (
@@ -414,7 +414,7 @@ pub fn evaluate_source_quality(url: &str, title: &str, text: &str, source_type: 
     traceability = traceability.min(1.0);
 
     let mut source_class_owned = source_class.to_string();
-    if source_type.to_lowercase().contains("generated") {
+    if source_type.py_lowercase().contains("generated") {
         source_class_owned = "generated_pipeline".to_string();
         authority = authority.min(0.20);
         primaryness = 0.10;

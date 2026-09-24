@@ -11,6 +11,7 @@
 //! Статус (2026-09-24): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_OBJECT_RESOLVER_ENGINE=rust (см. agent/object_resolver.py).
 
+use crate::py_text::PyLowerExt;
 use crate::resolver_data::OBJECT_TYPES;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
@@ -33,7 +34,7 @@ pub struct Resolved {
 
 /// ObjectResolver.resolve
 pub fn resolve(query: &str) -> Resolved {
-    let q = crate::py_text::py_strip(&query.to_lowercase()).to_string();
+    let q = crate::py_text::py_strip(&query.py_lowercase()).to_string();
     let mut best = Resolved { type_: "unknown", confidence: 0.0, analyzer: "GeneralSubjective", matched_pattern: "none" };
     for (t, regs) in OBJECT_TYPES.iter().zip(COMPILED.iter()) {
         for (pattern, re) in t.patterns.iter().zip(regs.iter()) {

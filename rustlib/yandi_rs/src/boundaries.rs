@@ -12,6 +12,7 @@
 //! Статус (2026-09-23): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_BOUNDARIES_ENGINE=rust (см. agent/boundaries.py).
 
+use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -55,7 +56,7 @@ pub struct ToxicityResult {
 
 /// agent/boundaries.py::detect_toxicity
 pub fn detect_toxicity(text: &str) -> ToxicityResult {
-    let lower = text.to_lowercase();
+    let lower = text.py_lowercase();
     let find = |list: &[&'static str]| -> Vec<&'static str> { list.iter().copied().filter(|w| lower.contains(w)).collect() };
 
     let severe = find(&SEVERE_SET);
@@ -75,7 +76,7 @@ pub fn detect_toxicity(text: &str) -> ToxicityResult {
 
 /// agent/boundaries.py::is_apology — возвращает (is_apology, is_sincere)
 pub fn is_apology(text: &str) -> (bool, bool) {
-    let lower = text.to_lowercase();
+    let lower = text.py_lowercase();
     if !APOLOGY_KEYWORDS.iter().any(|k| lower.contains(k)) {
         return (false, false);
     }

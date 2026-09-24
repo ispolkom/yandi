@@ -13,11 +13,17 @@ CLI:
   python3 assistant/orch_tag_tree.py show
   python3 assistant/orch_tag_tree.py classify "как починить тормоза"
   python3 assistant/orch_tag_tree.py suggest   — показать рекомендации split/merge
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/orch_tag_tree.rs — `_tokenize`, `_lsh_bucket`, `lsh_entropy` и пересчёт энтропии узла
+в `TagTree.update`. Доказан тестом agent/orch_tag_tree_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается
+YANDI_ORCH_TAG_TREE_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs. Делегирует, только пока `_STOPWORDS` не изменён; дерево, файл и время — в Python.
 """
 from __future__ import annotations
 
 import json
+import logging
 import math
+import os
 import re
 import time
 from pathlib import Path
@@ -49,14 +55,55 @@ SEED_DOMAINS = [
 ]
 
 
+_log = logging.getLogger("yandi.orch_tag_tree")
+_rust_tt = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+_DEFAULT_STOPWORDS = frozenset(_STOPWORDS)
+
+
+def _get_rust_tt():
+    global _rust_tt
+    if _rust_tt is None:
+        if os.environ.get("YANDI_ORCH_TAG_TREE_ENGINE") == "rust":
+            try:
+                import yandi_rs.orch_tag_tree as _rs
+                _rust_tt = _rs
+                _log.warning("YANDI_ORCH_TAG_TREE_ENGINE=rust: используется Rust-реализация orch_tag_tree (rustlib/yandi_rs)")
+            except ImportError as e:
+                _log.warning("YANDI_ORCH_TAG_TREE_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_tt = False
+        else:
+            _rust_tt = False
+    return _rust_tt or None
+
+
+def _rust_ok():
+    """Rust-ядро, если запрошено и стоп-слова в Python не менялись (в Rust они вшиты; parity-тест сверяет их с оригиналом)."""
+    rs = _get_rust_tt()
+    if rs is not None and _STOPWORDS == _DEFAULT_STOPWORDS:
+        return rs
+    return None
+
+
 def _tokenize(text: str) -> list[str]:
     """Простая токенизация без стоп-слов."""
+    rs = _rust_ok()
+    if rs is not None and type(text) is str:
+        try:
+            return rs.tokenize(text)
+        except UnicodeEncodeError:
+            pass        # одинокий суррогат — исходный код ниже
     tokens = re.findall(r'\b[а-яёa-z]{3,}\b', text.lower())
     return [t for t in tokens if t not in _STOPWORDS]
 
 
 def _lsh_bucket(token: str, n_buckets: int = 32) -> int:
     """Быстрый LSH-бакет для токена через хэш."""
+    rs = _rust_ok()
+    if rs is not None and type(token) is str and type(n_buckets) is int and n_buckets >= 1:
+        try:
+            return rs.lsh_bucket(token, n_buckets)
+        except (UnicodeEncodeError, OverflowError):
+            pass
     h = 0
     for c in token:
         h = (h * 31 + ord(c)) % n_buckets
@@ -70,6 +117,14 @@ def lsh_entropy(queries: list[str], n_buckets: int = 32) -> float:
     """
     if not queries:
         return 0.0
+
+    rs = _rust_ok()
+    if (rs is not None and type(queries) is list and type(n_buckets) is int and 2 <= n_buckets <= 1 << 20
+            and all(type(q) is str for q in queries)):
+        try:
+            return rs.lsh_entropy(queries, n_buckets)
+        except UnicodeEncodeError:
+            pass
 
     counts = [0] * n_buckets
     total  = 0
@@ -186,6 +241,14 @@ class TagTree:
             node.lsh_hist[b] += 1
 
         # Пересчитать энтропию по гистограмме
+        rs = _rust_ok()
+        if (rs is not None and type(node.lsh_hist) is list and len(node.lsh_hist) == 32
+                and all(type(c) is int and 0 <= c < 1 << 50 for c in node.lsh_hist)):
+            e = rs.entropy_from_hist(node.lsh_hist)
+            if e is not None:
+                node.entropy = e
+            self._save()
+            return node
         total = sum(node.lsh_hist)
         if total > 0:
             log_n   = math.log(32)

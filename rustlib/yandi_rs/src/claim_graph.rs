@@ -19,6 +19,7 @@
 //! Статус (2026-09-24): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_CLAIM_GRAPH_ENGINE=rust (см. agent/claim_graph.py).
 
+use crate::py_text::PyLowerExt;
 use crate::py_text::{py_split_whitespace, py_strip};
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
@@ -182,7 +183,7 @@ fn contradiction_core(t1: &str, neg1: bool, t2: &str, neg2: bool) -> bool {
 
 /// `_is_contradiction`
 pub fn is_contradiction(t1: &str, t2: &str) -> bool {
-    contradiction_core(t1, has_neg(&t1.to_lowercase()), t2, has_neg(&t2.to_lowercase()))
+    contradiction_core(t1, has_neg(&t1.py_lowercase()), t2, has_neg(&t2.py_lowercase()))
 }
 
 /// `_is_support`
@@ -195,7 +196,7 @@ pub fn is_support(t1: &str, t2: &str) -> bool {
 /// Все рёбра `_build_graph` в порядке вложенных циклов Python: (i, j, 0=противоречие | 1=поддержка).
 pub fn build_edges(texts: &[String]) -> Vec<(usize, usize, u8)> {
     let n = texts.len();
-    let negs: Vec<bool> = texts.iter().map(|t| has_neg(&t.to_lowercase())).collect();
+    let negs: Vec<bool> = texts.iter().map(|t| has_neg(&t.py_lowercase())).collect();
     let words: Vec<HashSet<&str>> = texts.iter().map(|t| py_split_whitespace(t).collect()).collect();
     let mut edges = Vec::new();
     for i in 0..n {

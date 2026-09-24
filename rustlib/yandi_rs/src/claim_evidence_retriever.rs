@@ -29,6 +29,7 @@
 //! ВЫКЛЮЧЕНО — переключатель YANDI_CLAIM_EVIDENCE_RETRIEVER_ENGINE=rust (см.
 //! agent/claim_evidence_retriever.py).
 
+use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -125,7 +126,7 @@ const EVIDENCE_INSTRUMENT_MARKERS: &[&str] = &["телескоп", "зонд", "
 
 /// agent/claim_evidence_retriever.py::_is_absence_claim
 pub fn is_absence_claim(claim_text: &str) -> bool {
-    let lower = claim_text.to_lowercase();
+    let lower = claim_text.py_lowercase();
     ABSENCE_MARKERS.iter().any(|m| m.is_match(&lower)) || matches_bare_net(&lower)
 }
 
@@ -143,7 +144,7 @@ pub fn extract_existence_target(query: &str) -> Vec<String> {
     let phrase = caps.get(1).map(|m| m.as_str()).unwrap_or("");
     WORD_RE
         .find_iter(phrase)
-        .map(|m| m.as_str().to_lowercase())
+        .map(|m| m.as_str().py_lowercase())
         .filter(|w| w.chars().count() >= 4 && !TARGET_STOPWORDS.contains(&w.as_str()))
         .collect()
 }
@@ -189,7 +190,7 @@ pub fn anchor_hit(anchor: &str, haystack: &str) -> bool {
 pub fn subject_fields(anchors: &[String], title: &str, url: &str, passage: &str) -> Vec<&'static str> {
     let mut out = Vec::new();
     for (name, hay) in [("title", title), ("url", url), ("passage", passage)] {
-        let lower = hay.to_lowercase();
+        let lower = hay.py_lowercase();
         if anchors.iter().any(|a| anchor_hit(a, &lower)) {
             out.push(name);
         }
@@ -211,7 +212,7 @@ pub fn classify_claim_role(claim_text: &str, query: &str) -> ClaimRole {
     }
 
     let target_words = extract_existence_target(query);
-    let lower = claim_text.to_lowercase();
+    let lower = claim_text.py_lowercase();
 
     let target_match = target_overlap(&lower, &target_words);
     let has_assertion = ABSENCE_MARKERS.iter().any(|m| m.is_match(&lower))

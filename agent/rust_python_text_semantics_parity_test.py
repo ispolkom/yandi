@@ -88,6 +88,35 @@ def main() -> int:
     bad = [cp for cp in range(0x110000) if chr(cp).isspace() != pt.is_space(cp)]
     check("A1 is_space совпадает с str.isspace() на всех кодовых точках", not bad, f"{[hex(c) for c in bad[:8]]}")
 
+    # ── A1b: регистр и нормализация Unicode по ВСЕМ кодовым точкам (версия Unicode у Rust новее, чем у Python 3.11) ──
+    import unicodedata
+    bad_l, bad_c, bad_n = [], [], []
+    for cp in range(0x110000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        ch = chr(cp)
+        for t in (ch, "aΣ" + ch, ch + "Σa", "1" + ch + "Σ" + ch + "1"):
+            if pt.lower(t) != t.lower():
+                bad_l.append(cp)
+        if pt.casefold(ch) != ch.casefold():
+            bad_c.append(cp)
+        for t in (ch, "a" + ch + "\u0301", ch + ch, "\u0301" + ch + "\u0323", "\U000113b8" + ch, ch + "\U000113b8", "\u1161" + ch + "\u11a8"):
+            if pt.nfc(t) != unicodedata.normalize("NFC", t) or pt.nfkc(t) != unicodedata.normalize("NFKC", t):
+                bad_n.append(cp)
+    check("A1b py_lower совпадает с str.lower() на всех кодовых точках (включая финальную сигму)", not bad_l, f"{[hex(c) for c in bad_l[:8]]}")
+    check("A1c py_casefold совпадает с str.casefold() на всех кодовых точках", not bad_c, f"{[hex(c) for c in bad_c[:8]]}")
+    check("A1d py_nfc/py_nfkc совпадают с unicodedata.normalize на всех кодовых точках", not bad_n, f"{[hex(c) for c in bad_n[:8]]}")
+    rng0 = random.Random(7)
+    pool0 = ["Σ", "σ", "ς", "a", "A", "1", " ", "\u0301", "\u00b7", "'", ".", "Ω", "я", "Я", "İ", "\u02b0", "\u2019", "ǅ", "\U0001d400", "\u200b", "-",
+             "e", "\u0323", "\u1100", "\u1161", "\u11a8", "\uac00", "\U000113c2", "\U000113b8", "\ufb01", "\u212b", "\u0344", "\ua7cb", "\u1c89"]
+    bad_f = []
+    for _ in range(150000):
+        t = "".join(rng0.choice(pool0) for _ in range(rng0.randrange(1, 9)))
+        if (pt.lower(t) != t.lower() or pt.nfc(t) != unicodedata.normalize("NFC", t) or pt.nfkc(t) != unicodedata.normalize("NFKC", t)
+                or pt.casefold(t) != t.casefold()):
+            bad_f.append(t)
+    check("A1e фаззинг lower/casefold/nfc/nfkc на смесях (сигма, комбинирующие, хангыль, символы новее Unicode 14)", not bad_f, f"{bad_f[:3]!r}")
+
     # ── A2: strip / split ──
     rng = random.Random(20260924)
     pool = [" ", "\t", "\n", "\x0b", "\x1c", "\x1d", "\x1e", "\x1f", "\x85", "\xa0", "　", "​", "﻿",

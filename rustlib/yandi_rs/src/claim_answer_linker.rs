@@ -15,6 +15,7 @@
 //! Статус (2026-09-23): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_CLAIM_ANSWER_LINKER_ENGINE=rust (см. agent/claim_answer_linker.py).
 
+use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -30,7 +31,7 @@ pub fn extract_key_phrases(text: &str) -> Vec<String> {
         let trimmed = crate::py_text::py_strip(sent);
         if trimmed.chars().count() > 20 {
             let head: String = trimmed.chars().take(50).collect();
-            phrases.push(head.to_lowercase());
+            phrases.push(head.py_lowercase());
         }
     }
     phrases
@@ -38,7 +39,7 @@ pub fn extract_key_phrases(text: &str) -> Vec<String> {
 
 /// agent/claim_answer_linker.py::ClaimAnswerLinker._is_claim_supporting
 pub fn is_claim_supporting(claim_text: &str, key_phrases: &[String]) -> bool {
-    let claim_lower = claim_text.to_lowercase();
+    let claim_lower = claim_text.py_lowercase();
     for phrase in key_phrases {
         let words: Vec<&str> = crate::py_text::py_split_whitespace(phrase).take(5).collect();
         let word_match = words.iter().filter(|w| claim_lower.contains(*w)).count();

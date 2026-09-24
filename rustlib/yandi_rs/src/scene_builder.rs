@@ -19,6 +19,7 @@
 //! Статус (2026-09-24): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_SCENE_BUILDER_ENGINE=rust (см. agent/scene_builder.py).
 
+use crate::py_text::PyLowerExt;
 use crate::py_text::py_isupper;
 use crate::scene_builder_data::*;
 use crate::target_router::has_word;
@@ -104,7 +105,7 @@ fn first_max(d: &[(&'static str, f64)]) -> &'static str {
 
 /// SceneBuilder.build
 pub fn build(text: &str, is_dialog: bool) -> Scene {
-    let lower = text.to_lowercase();
+    let lower = text.py_lowercase();
 
     let mut participants: Vec<String> = vec!["user".to_string()];
     let mut mentioned: Vec<String> = Vec::new();

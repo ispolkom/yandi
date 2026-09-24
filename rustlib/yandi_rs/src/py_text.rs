@@ -17,6 +17,10 @@
 
 use crate::py_case_table::{PY_LOWER_RANGES, PY_TITLE_RANGES, PY_UPPER_RANGES};
 use crate::py_decimal_table::PY_DECIMAL_ZEROS;
+use crate::py_casefold_table::PY_CASEFOLD_MAP;
+use crate::py_unassigned_table::PY_UNASSIGNED;
+use unicode_normalization::UnicodeNormalization;
+use crate::py_lower_table::{PY_LOWER_MAP, PY_SIGMA_CASED, PY_SIGMA_IGNORABLE};
 use crate::py_printable_table::PY_NONPRINTABLE_RANGES;
 use pyo3::prelude::*;
 use regex::Regex;
@@ -47,6 +51,143 @@ pub fn py_strip(s: &str) -> &str {
 /// Python `s.split()` (без аргументов): куски между пробельными символами, без пустых.
 pub fn py_split_whitespace(s: &str) -> impl Iterator<Item = &str> {
     s.split(is_py_space).filter(|p| !p.is_empty())
+}
+
+fn in_ranges_u32(table: &[(u32, u32)], c: char) -> bool {
+    let cp = c as u32;
+    table
+        .binary_search_by(|&(lo, hi)| {
+            if cp < lo {
+                std::cmp::Ordering::Greater
+            } else if cp > hi {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+/// CPython `handle_capital_sigma`: «ς» (финальная) или «σ» — по соседям с пропуском case-ignorable символов.
+fn is_final_sigma(chars: &[char], i: usize) -> bool {
+    let mut j = i;
+    let mut prev_cased = false;
+    while j > 0 {
+        j -= 1;
+        if in_ranges_u32(&PY_SIGMA_IGNORABLE, chars[j]) {
+            continue;
+        }
+        prev_cased = in_ranges_u32(&PY_SIGMA_CASED, chars[j]);
+        break;
+    }
+    if !prev_cased {
+        return false;
+    }
+    let mut k = i + 1;
+    while k < chars.len() {
+        if in_ranges_u32(&PY_SIGMA_IGNORABLE, chars[k]) {
+            k += 1;
+            continue;
+        }
+        return !in_ranges_u32(&PY_SIGMA_CASED, chars[k]);
+    }
+    true
+}
+
+/// Python `str.lower()` побитово: одиночные отображения — таблица самого Python (Unicode 14), финальная сигма — правило CPython
+/// с классами символов, снятыми у Python. `str::to_lowercase` в Rust знает более новый Unicode и понижает символы (U+A7CB, U+A7D2…),
+/// которых Python 3.11 не понижает, — а это меняет `\w`-соседство.
+pub fn py_lower(s: &str) -> String {
+    if s.is_ascii() {
+        return s.to_ascii_lowercase();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '\u{3A3}' {
+            out.push(if is_final_sigma(&chars, i) { '\u{3C2}' } else { '\u{3C3}' });
+            continue;
+        }
+        if c.is_ascii() {
+            out.push(c.to_ascii_lowercase());
+            continue;
+        }
+        let cp = c as u32;
+        match PY_LOWER_MAP.binary_search_by_key(&cp, |&(k, _)| k) {
+            Ok(idx) => out.push_str(PY_LOWER_MAP[idx].1),
+            Err(_) => out.push(c),
+        }
+    }
+    out
+}
+
+/// Python `str.casefold()` побитово (таблица из самого Python; свёртка контекстно-независима).
+pub fn py_casefold(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii() {
+            out.push(c.to_ascii_lowercase());
+            continue;
+        }
+        let cp = c as u32;
+        match PY_CASEFOLD_MAP.binary_search_by_key(&cp, |&(k, _)| k) {
+            Ok(idx) => out.push_str(PY_CASEFOLD_MAP[idx].1),
+            Err(_) => out.push(c),
+        }
+    }
+    out
+}
+
+/// Кодовая точка не назначена в Unicode самого Python (категория Cn).
+pub fn is_py_unassigned(c: char) -> bool {
+    in_ranges_u32(&PY_UNASSIGNED, c)
+}
+
+fn normalize_pieces(s: &str, f: impl Fn(&str) -> String) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut piece = String::new();
+    for c in s.chars() {
+        if is_py_unassigned(c) {
+            if !piece.is_empty() {
+                out.push_str(&f(&piece));
+                piece.clear();
+            }
+            out.push(c);
+        } else {
+            piece.push(c);
+        }
+    }
+    if !piece.is_empty() {
+        out.push_str(&f(&piece));
+    }
+    out
+}
+
+/// `unicodedata.normalize("NFC", s)` как в Python 3.11 (Unicode 14): символы, которых Python не знает, — барьеры (см. gen_py_unassigned_table.py).
+pub fn py_nfc(s: &str) -> String {
+    if s.is_ascii() {
+        return s.to_string();
+    }
+    normalize_pieces(s, |p| p.nfc().collect())
+}
+
+/// `unicodedata.normalize("NFKC", s)` — то же для NFKC.
+pub fn py_nfkc(s: &str) -> String {
+    if s.is_ascii() {
+        return s.to_string();
+    }
+    normalize_pieces(s, |p| p.nfkc().collect())
+}
+
+/// `.py_lowercase()` — drop-in для `.to_lowercase()` с семантикой Python `str.lower()`.
+pub trait PyLowerExt {
+    fn py_lowercase(&self) -> String;
+}
+
+impl PyLowerExt for str {
+    fn py_lowercase(&self) -> String {
+        py_lower(self)
+    }
 }
 
 /// Regex с точной питоновской семантикой (`\s`, `\w`, `\b`, `$`, IGNORECASE) — см. py_regex.rs.
@@ -245,6 +386,30 @@ fn py_json_loads(py: Python<'_>, s: &str) -> PyResult<(Option<bool>, PyObject)> 
 }
 
 #[pyfunction]
+#[pyo3(name = "lower")]
+fn py_py_lower(s: &str) -> String {
+    py_lower(s)
+}
+
+#[pyfunction]
+#[pyo3(name = "casefold")]
+fn py_py_casefold(s: &str) -> String {
+    py_casefold(s)
+}
+
+#[pyfunction]
+#[pyo3(name = "nfc")]
+fn py_py_nfc(s: &str) -> String {
+    py_nfc(s)
+}
+
+#[pyfunction]
+#[pyo3(name = "nfkc")]
+fn py_py_nfkc(s: &str) -> String {
+    py_nfkc(s)
+}
+
+#[pyfunction]
 #[pyo3(name = "float")]
 fn py_py_float(s: &str) -> Option<f64> {
     py_float(s)
@@ -255,6 +420,10 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_py_strip, m)?)?;
     m.add_function(wrap_pyfunction!(py_py_split, m)?)?;
     m.add_function(wrap_pyfunction!(py_py_float, m)?)?;
+    m.add_function(wrap_pyfunction!(py_py_lower, m)?)?;
+    m.add_function(wrap_pyfunction!(py_py_nfc, m)?)?;
+    m.add_function(wrap_pyfunction!(py_py_nfkc, m)?)?;
+    m.add_function(wrap_pyfunction!(py_py_casefold, m)?)?;
     m.add_function(wrap_pyfunction!(py_py_repr_str, m)?)?;
     m.add_function(wrap_pyfunction!(py_py_isupper, m)?)?;
     m.add_function(wrap_pyfunction!(py_json_loads, m)?)?;

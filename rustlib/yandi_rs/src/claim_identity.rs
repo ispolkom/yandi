@@ -15,13 +15,14 @@
 //!    Вместо ещё одного крейта (`fancy-regex`) написан ручной посимвольный поиск границы слова
 //!    (`boundary_search`) — тот же результат, без второго regex-движка.
 //! 3. Python `str.casefold()` — полное Unicode-сворачивание регистра (сильнее `.lower()`);
-//!    переносится крейтом `caseless`. Python `str.lower()` (используется в этом же модуле для
+//!    переносится таблицей из самого Python (`py_text::py_casefold`; крейт `caseless` знал другую версию Unicode). Python `str.lower()` (используется в этом же модуле для
 //!    `word.lower()`/`text.lower()`, НЕ `.casefold()`) — переносится Rust `str::to_lowercase()`.
 //!    Это два РАЗНЫХ преобразования и в Python, и здесь — не перепутаны местами.
 //!
 //! Статус (2026-09-23): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_CLAIM_IDENTITY_ENGINE=rust (см. agent/claim_identity.py).
 
+use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use regex::Regex;
@@ -155,8 +156,8 @@ pub fn canonicalize_claim_text(claim_text: &str) -> String {
     if claim_text.is_empty() {
         return String::new();
     }
-    let nfc: String = claim_text.nfc().collect();
-    let folded = caseless::default_case_fold_str(&nfc);
+    let nfc: String = crate::py_text::py_nfc(claim_text);
+    let folded = crate::py_text::py_casefold(&nfc);
     let collapsed = crate::py_text::py_split_whitespace(&folded).collect::<Vec<_>>().join(" ");
     let no_trailing_punct =
         collapsed.trim_end_matches(|c: char| crate::py_text::is_py_space(c) || matches!(c, '.' | '!' | '?' | '…'));
@@ -190,7 +191,7 @@ pub fn extract_subject_anchors(claim_text: &str) -> Vec<String> {
             continue;
         }
         if CAPITALIZED_WORD_RE.is_match(word) {
-            anchors.push(word.to_lowercase());
+            anchors.push(word.py_lowercase());
         }
     }
 
@@ -202,7 +203,7 @@ pub fn extract_subject_anchors(claim_text: &str) -> Vec<String> {
         }
     }
 
-    let claim_lower = text.to_lowercase();
+    let claim_lower = text.py_lowercase();
     for (form, form_aliases) in SUBJECT_ANCHOR_ALIASES {
         let whole_word = WHOLE_WORD_ONLY_KEYS.contains(form);
         if boundary_search(&claim_lower, form, whole_word) {
@@ -221,7 +222,7 @@ pub fn extract_content_anchors(text: &str) -> Vec<String> {
     if text.is_empty() {
         return Vec::new();
     }
-    let lower = text.to_lowercase();
+    let lower = text.py_lowercase();
 
     let mut anchors: Vec<String> = Vec::new();
     for m in CONTENT_TOKEN_RE.find_iter(&lower) {

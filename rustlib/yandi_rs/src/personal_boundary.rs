@@ -17,6 +17,7 @@
 //! Статус (2026-09-24): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_PERSONAL_BOUNDARY_ENGINE=rust (см. agent/personal_boundary.py).
 
+use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -88,7 +89,7 @@ impl Analysis {
 
 /// PersonalBoundary.analyze
 pub fn analyze(query: &str) -> Analysis {
-    let q = query.to_lowercase();
+    let q = query.py_lowercase();
     let mut r = Analysis::new();
 
     for (re, src) in R_PROVOCATION.iter() {

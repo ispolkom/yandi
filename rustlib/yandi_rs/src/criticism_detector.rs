@@ -14,6 +14,7 @@
 //! Статус (2026-09-23): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_CRITICISM_ENGINE=rust (см. agent/criticism_detector.py).
 
+use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyDictMethods};
@@ -158,7 +159,7 @@ fn check_aggression(text: &str) -> f64 {
 
 /// agent/criticism_detector.py::CriticismDetector.analyze
 pub fn analyze(text: &str, trust: f64, history_insults: f64) -> CriticismAnalysis {
-    let text_lower = text.to_lowercase();
+    let text_lower = text.py_lowercase();
     let mut result = CriticismAnalysis::new();
 
     let (insult_score, insult_words) = check_person_insults(&text_lower);

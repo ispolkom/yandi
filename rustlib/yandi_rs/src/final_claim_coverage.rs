@@ -14,6 +14,7 @@
 //! Статус (2026-09-24): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_FINAL_CLAIM_COVERAGE_ENGINE=rust (см. agent/final_claim_coverage.py).
 
+use crate::py_text::PyLowerExt;
 use crate::fcc_data::STOPWORDS;
 use crate::py_text::py_strip;
 use once_cell::sync::Lazy;
@@ -29,7 +30,7 @@ const MANDATORY_OVERLAP_FLOOR: f64 = 0.15;
 
 /// `_content_words`
 pub fn content_words(text: &str) -> HashSet<String> {
-    let lower = text.to_lowercase();
+    let lower = text.py_lowercase();
     WORD_RE
         .find_iter(&lower)
         .map(|m| m.as_str())
@@ -54,7 +55,7 @@ pub fn lexical_overlap(a: &str, b: &str) -> f64 {
 
 /// `_has_negation`
 pub fn has_negation(text: &str) -> bool {
-    NEGATION.is_match(&text.to_lowercase())
+    NEGATION.is_match(&text.py_lowercase())
 }
 
 fn numbers(text: &str) -> HashSet<String> {
@@ -67,7 +68,7 @@ pub fn shares_number(a: &str, b: &str) -> bool {
 }
 
 fn norm(t: &str) -> String {
-    py_strip(t).to_lowercase()
+    py_strip(t).py_lowercase()
 }
 
 /// `_is_near_duplicate`

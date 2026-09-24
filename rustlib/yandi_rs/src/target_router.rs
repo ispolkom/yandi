@@ -15,6 +15,7 @@
 //! Статус (2026-09-24): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_TARGET_ROUTER_ENGINE=rust (см. agent/target_router.py).
 
+use crate::py_text::PyLowerExt;
 use crate::py_text::{is_py_space, py_strip};
 use crate::source_clustering::is_py_word_char;
 use pyo3::prelude::*;
@@ -56,7 +57,7 @@ const KNOWLEDGE_KEYWORDS: &[&str] = &[
 
 /// agent/target_router.py::detect_target
 pub fn detect_target(query: &str) -> (&'static str, f64) {
-    let q = py_strip(&query.to_lowercase()).to_string();
+    let q = py_strip(&query.py_lowercase()).to_string();
     let q = q.as_str();
 
     let mut ai_score = 0.0f64;

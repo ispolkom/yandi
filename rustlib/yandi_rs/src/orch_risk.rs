@@ -19,6 +19,7 @@
 //! Статус (2026-09-24): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_ORCH_RISK_ENGINE=rust (см. agent/orch_risk.py).
 
+use crate::py_text::PyLowerExt;
 use pyo3::prelude::*;
 
 const CRITICAL_KW: &[&str] = &[
@@ -47,7 +48,7 @@ pub struct Risk {
 
 /// agent/orch_risk.py::assess_risk
 pub fn assess_risk(query: &str) -> Risk {
-    let q = query.to_lowercase();
+    let q = query.py_lowercase();
 
     if CRITICAL_KW.iter().any(|kw| q.contains(kw)) {
         return Risk { risk_level: "critical", mandatory_arbitrage: true, validator_model: "14b", nodes_required: 3 };

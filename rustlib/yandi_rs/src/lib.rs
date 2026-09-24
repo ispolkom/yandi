@@ -32,6 +32,9 @@ pub mod policy;
 pub mod scene_builder;
 mod py_json;          // точный json.loads Python (для message_intensity)
 mod py_printable_table; // данные: isprintable() для repr
+mod py_unassigned_table; // данные: не назначенные в Unicode Python кодовые точки, см. gen_py_unassigned_table.py
+mod py_casefold_table; // данные: одиночные отображения str.casefold() из Python, см. gen_py_casefold_table.py
+mod py_lower_table; // данные: одиночные отображения str.lower() из Python, см. gen_py_lower_table.py
 mod py_case_table;    // данные: Lowercase/Uppercase/Titlecase для str.isupper(), см. gen_py_case_table.py
 mod scene_builder_data; // данные: паттерны SceneBuilder, сгенерированы из Python
 mod resolver_data;    // данные: таблицы object/entity resolver, сгенерированы из Python
@@ -50,6 +53,7 @@ pub mod target_router;
 pub mod tool_shell;
 pub mod crypto;
 pub mod pet_extraction;
+pub mod orch_tag_tree;
 pub mod trust_gate;
 pub mod web_login;
 
@@ -177,6 +181,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     pet_extraction::register(py, &pet_extraction_mod)?;
     m.add_submodule(&pet_extraction_mod)?;
 
+    let orch_tag_tree_mod = PyModule::new_bound(py, "orch_tag_tree")?;
+    orch_tag_tree::register(py, &orch_tag_tree_mod)?;
+    m.add_submodule(&orch_tag_tree_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -198,6 +206,7 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.tool_shell", &tool_shell_mod)?;
     sys_modules.set_item("yandi_rs.crypto", &crypto_mod)?;
     sys_modules.set_item("yandi_rs.pet_extraction", &pet_extraction_mod)?;
+    sys_modules.set_item("yandi_rs.orch_tag_tree", &orch_tag_tree_mod)?;
     sys_modules.set_item("yandi_rs.policy", &policy_mod)?;
     sys_modules.set_item("yandi_rs.final_claim_coverage", &final_claim_coverage_mod)?;
     sys_modules.set_item("yandi_rs.canonical_trust", &canonical_trust_mod)?;

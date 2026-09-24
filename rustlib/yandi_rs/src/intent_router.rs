@@ -16,6 +16,7 @@
 //! Статус (2026-09-24): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_INTENT_ROUTER_ENGINE=rust (см. agent/intent_router.py).
 
+use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use regex::Regex;
@@ -141,7 +142,7 @@ static COMPILED: Lazy<Vec<Vec<(Regex, usize, &'static str)>>> = Lazy::new(|| {
 
 /// agent/intent_router.py::detect_intent (для непустого query)
 pub fn detect_intent(query: &str) -> (String, f64, String) {
-    let q = crate::py_text::py_strip(&query.to_lowercase()).to_string();
+    let q = crate::py_text::py_strip(&query.py_lowercase()).to_string();
 
     let mut best_intent = "unknown";
     let mut best_confidence = 0.0f64;

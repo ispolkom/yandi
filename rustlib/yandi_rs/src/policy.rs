@@ -19,6 +19,7 @@
 //! Статус (2026-09-24): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_POLICY_ENGINE=rust (см. agent/policy.py).
 
+use crate::py_text::PyLowerExt;
 use crate::policy_data::*;
 use crate::py_text::py_strip;
 use crate::source_clustering::is_py_word_char;
@@ -81,8 +82,8 @@ pub struct Finding {
 }
 
 fn passes_filters(kind: &str, matched: &str) -> bool {
-    let lower = matched.to_lowercase();
-    if SECRET_WHITELIST.iter().any(|w| lower.contains(&w.to_lowercase())) {
+    let lower = matched.py_lowercase();
+    if SECRET_WHITELIST.iter().any(|w| lower.contains(&w.py_lowercase())) {
         return false;
     }
     if kind == "proxy_creds" && SAFE_HOSTS.iter().any(|h| matched.contains(h)) {

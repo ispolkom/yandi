@@ -15,6 +15,7 @@
 //! эту, Rust-реализацию можно переменной окружения YANDI_GUARD_ENGINE=rust (см. pet/local_guard.py) —
 //! это решение осознанно оставлено на владельца, не включено автоматически.
 
+use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -53,7 +54,7 @@ fn fullmatch(re: &Regex, s: &str) -> bool {
 
 /// pet/local_guard.py::_host_name
 pub fn host_name(host_header: &str) -> String {
-    let host = crate::py_text::py_strip(host_header).to_lowercase();
+    let host = crate::py_text::py_strip(host_header).py_lowercase();
     if let Some(rest) = host.strip_prefix('[') {
         // "[::1]:9010" -> "::1"
         return match rest.find(']') {

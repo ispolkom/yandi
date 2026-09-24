@@ -10,6 +10,7 @@
 //! Статус (2026-09-23): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_CLAIM_TYPES_ENGINE=rust (см. agent/claim_types.py).
 
+use crate::py_text::PyLowerExt;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use std::collections::HashMap;
@@ -72,7 +73,7 @@ pub fn should_use_web_for_type(claim_type_value: &str) -> bool {
 
 /// agent/claim_types.py::guess_claim_type_by_text — возвращает строковое значение ClaimType.
 pub fn guess_claim_type_by_text(text: &str) -> &'static str {
-    let lower = text.to_lowercase();
+    let lower = text.py_lowercase();
     let any_of = |words: &[&str]| words.iter().any(|w| lower.contains(w));
 
     if any_of(&["бог", "душа", "дух", "абсолют", "трансцендентный", "сверхъестественный"]) {

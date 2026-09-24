@@ -20,6 +20,7 @@
 //! Статус (2026-09-24): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_ENTITY_RESOLVER_ENGINE=rust (см. agent/entity_resolver.py).
 
+use crate::py_text::PyLowerExt;
 use crate::py_text::{py_isupper, py_split_whitespace, py_strip};
 use crate::resolver_data::{KNOWN_GAMES, KNOWN_GAME_TERMS, KNOWN_MEDIA};
 use pyo3::prelude::*;
@@ -42,7 +43,7 @@ fn first_upper(w: &str) -> bool {
 /// EntityResolver.resolve
 pub fn resolve(query: &str) -> Entity {
     let q = py_strip(query);
-    let q_lower = q.to_lowercase();
+    let q_lower = q.py_lowercase();
 
     let mut type_: &'static str = "unknown";
     let mut game: Option<String> = None;
