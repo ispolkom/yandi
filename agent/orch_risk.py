@@ -1,10 +1,38 @@
 """
 assistant/orch_risk.py — Risk Engine (hardcoded правила, без LLM).
 Определяет уровень риска запроса и параметры валидации.
+
+Rust-перенос (2026-09-24): rustlib/yandi_rs/src/orch_risk.rs — assess_risk целиком. Доказан на
+совпадение тестом agent/orch_risk_rust_parity_test.py. По умолчанию ВЫКЛЮЧЕН; включается
+переменной окружения YANDI_ORCH_RISK_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (`maturin
+develop`, см. rustlib/README.md). Не собран — тихо остаёмся на Python.
 """
 from __future__ import annotations
 
+import logging
+import os
+
 from agent.orch_schemas import RiskResult, RiskLevel
+
+log = logging.getLogger("yandi.orch_risk")
+
+_rust_risk = None        # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_risk():
+    global _rust_risk
+    if _rust_risk is None:
+        if os.environ.get("YANDI_ORCH_RISK_ENGINE") == "rust":
+            try:
+                import yandi_rs.orch_risk as _rs
+                _rust_risk = _rs
+                log.warning("YANDI_ORCH_RISK_ENGINE=rust: используется Rust-реализация orch_risk (rustlib/yandi_rs)")
+            except ImportError as e:
+                log.warning("YANDI_ORCH_RISK_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_risk = False
+        else:
+            _rust_risk = False
+    return _rust_risk or None
 
 # Ключевые слова → уровень риска
 _CRITICAL_KW = {
@@ -32,6 +60,16 @@ def assess_risk(query: str) -> RiskResult:
     Returns:
         RiskResult с risk_level, mandatory_arbitrage, validator_model, nodes_required
     """
+    rs = _get_rust_risk()
+    if rs is not None:
+        level, arbitrage, model, nodes = rs.assess_risk(query)
+        return RiskResult(
+            risk_level=level,
+            mandatory_arbitrage=arbitrage,
+            validator_model=model,
+            nodes_required=nodes,
+        )
+
     q = query.lower()
 
     # Critical — медицина, юриспруденция, финансы, безопасность

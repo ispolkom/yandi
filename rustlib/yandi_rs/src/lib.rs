@@ -20,6 +20,7 @@ pub mod criticism_detector;
 pub mod epistemic_router;
 pub mod local_guard;
 pub mod message_intensity;
+pub mod orch_risk;
 pub mod source_quality;
 pub mod web_login;
 
@@ -79,6 +80,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     message_intensity::register(py, &message_intensity_mod)?;
     m.add_submodule(&message_intensity_mod)?;
 
+    let orch_risk_mod = PyModule::new_bound(py, "orch_risk")?;
+    orch_risk::register(py, &orch_risk_mod)?;
+    m.add_submodule(&orch_risk_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -96,5 +101,6 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.claim_types", &claim_types_mod)?;
     sys_modules.set_item("yandi_rs.epistemic_router", &epistemic_router_mod)?;
     sys_modules.set_item("yandi_rs.message_intensity", &message_intensity_mod)?;
+    sys_modules.set_item("yandi_rs.orch_risk", &orch_risk_mod)?;
     Ok(())
 }
