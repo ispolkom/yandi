@@ -50,6 +50,7 @@ def main() -> int:
     import agent.boundaries as bd
     import agent.claim_types as ct
     import agent.epistemic_router as er
+    import agent.final_claim_coverage as fccm
     import agent.entity_resolver as entm
     import agent.object_resolver as objm
     import agent.claim_answer_linker as cal
@@ -71,6 +72,7 @@ def main() -> int:
     import yandi_rs.boundaries as r_bd
     import yandi_rs.claim_types as r_ct
     import yandi_rs.epistemic_router as r_er
+    import yandi_rs.final_claim_coverage as r_fcc
     import yandi_rs.entity_resolver as r_ent
     import yandi_rs.object_resolver as r_obj
     import yandi_rs.claim_answer_linker as r_cal
@@ -255,6 +257,12 @@ def main() -> int:
         cmp("epistemic.testability", er._detect_testability, lambda x, d: tuple(r_er.detect_testability(x, d)), ql, dom)
         cmp("claim_types.guess", lambda x: ct.guess_claim_type_by_text(x).value, r_ct.guess_claim_type_by_text, t)
         cmp("object_resolver", objres.resolve, lambda x: dict(r_obj.resolve(x)), t)
+        cmp("fcc.content_words", lambda x: sorted(fccm._content_words(x)), r_fcc.content_words, t)
+        cmp("fcc.has_negation", fccm._has_negation, r_fcc.has_negation, t)
+        cmp("fcc.lexical_overlap", fccm._lexical_overlap, r_fcc.lexical_overlap, t, u)
+        cmp("fcc.shares_number", fccm._shares_number, r_fcc.shares_number, t, u)
+        cmp("fcc.is_near_duplicate", fccm._is_near_duplicate, r_fcc.is_near_duplicate, t, u)
+        cmp("fcc.mandatory_reason", lambda a, b: fccm._mandatory_routing_reason(a, b, "CORE", None), lambda a, b: r_fcc.mandatory_routing_reason(a, b, "CORE", None), t, u)
         cmp("claim_graph.split", cgraph._split_into_sentences, lambda x: list(r_cg.split_into_sentences(x)), t + ". " + u)
         cmp("claim_graph.clean", cgraph._clean_sentence, r_cg.clean_sentence, t)
         cmp("claim_graph.is_world_claim", cgraph._is_world_claim, r_cg.is_world_claim, t)

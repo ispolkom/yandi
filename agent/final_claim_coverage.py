@@ -29,6 +29,8 @@ agent/final_claim_coverage.py
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -48,6 +50,34 @@ from agent.claim_relation import (
 )
 
 _EXTRACTION_TIMEOUT = 180  # same order as orch_synthesizer's analyst-role calls
+
+# Rust-перенос (2026-09-24): rustlib/yandi_rs/src/final_claim_coverage.rs — лексическое ядро маршрутизации пар
+# (_content_words, _lexical_overlap, _has_negation, _shares_number, _is_near_duplicate, _mandatory_routing_reason) и
+# матрица «обязательных» пар для _route_candidate_pairs (слова/числа/отрицания — один раз на утверждение). Эмбеддинги,
+# LLM/NLI и _extract_json остаются здесь. Доказан тестом agent/final_claim_coverage_rust_parity_test.py. По умолчанию
+# ВЫКЛЮЧЕН; включается YANDI_FINAL_CLAIM_COVERAGE_ENGINE=rust ПОСЛЕ сборки rustlib/yandi_rs (см. rustlib/README.md).
+_fcc_log = logging.getLogger("yandi.final_claim_coverage")
+_rust_fcc = None          # None = ещё не пробовали; False = не запрошено/не собрано; модуль = подключён
+
+
+def _get_rust_fcc():
+    global _rust_fcc
+    if _rust_fcc is None:
+        if os.environ.get("YANDI_FINAL_CLAIM_COVERAGE_ENGINE") == "rust":
+            try:
+                import yandi_rs.final_claim_coverage as _rs
+                _rust_fcc = _rs
+                _fcc_log.warning("YANDI_FINAL_CLAIM_COVERAGE_ENGINE=rust: используется Rust-реализация final_claim_coverage (rustlib/yandi_rs)")
+            except ImportError as e:
+                _fcc_log.warning("YANDI_FINAL_CLAIM_COVERAGE_ENGINE=rust запрошен, но yandi_rs не собран (%s) — использую Python", e)
+                _rust_fcc = False
+        else:
+            _rust_fcc = False
+    return _rust_fcc or None
+
+
+def _str_or_none(x) -> bool:
+    return x is None or isinstance(x, str)
 
 
 def _call_ollama_for_extraction(prompt: str) -> Dict[str, Any]:
@@ -194,6 +224,9 @@ COVERAGE_ROUTING_TOP_K = 5
 
 
 def _content_words(text: str) -> set:
+    rs = _get_rust_fcc()
+    if rs is not None and _str_or_none(text):
+        return set(rs.content_words(text or ""))
     stopwords = {
         "что", "это", "как", "для", "на", "в", "с", "по", "из", "от", "до",
         "за", "у", "о", "к", "и", "а", "но", "или", "же", "бы", "не", "да",
@@ -207,6 +240,9 @@ def _content_words(text: str) -> set:
 
 
 def _lexical_overlap(a: str, b: str) -> float:
+    rs = _get_rust_fcc()
+    if rs is not None and _str_or_none(a) and _str_or_none(b):
+        return rs.lexical_overlap(a or "", b or "")
     wa, wb = _content_words(a), _content_words(b)
     if not wa or not wb:
         return 0.0
@@ -220,16 +256,25 @@ _NEGATION_MARKERS_RE = re.compile(
 
 
 def _has_negation(text: str) -> bool:
+    rs = _get_rust_fcc()
+    if rs is not None and _str_or_none(text):
+        return rs.has_negation(text or "")
     return bool(_NEGATION_MARKERS_RE.search((text or "").lower()))
 
 
 def _shares_number(a: str, b: str) -> bool:
+    rs = _get_rust_fcc()
+    if rs is not None and _str_or_none(a) and _str_or_none(b):
+        return rs.shares_number(a or "", b or "")
     na = set(re.findall(r"\d+(?:[.,]\d+)?", a or ""))
     nb = set(re.findall(r"\d+(?:[.,]\d+)?", b or ""))
     return bool(na & nb)
 
 
 def _is_near_duplicate(a: str, b: str) -> bool:
+    rs = _get_rust_fcc()
+    if rs is not None and _str_or_none(a) and _str_or_none(b):
+        return rs.is_near_duplicate(a or "", b or "")
     a_norm, b_norm = (a or "").strip().lower(), (b or "").strip().lower()
     if a_norm == b_norm:
         return True
@@ -261,6 +306,11 @@ def _mandatory_routing_reason(
     under-including risks recall, which is the one thing this layer is
     not allowed to trade away.
     """
+    rs = _get_rust_fcc()
+    if (rs is not None and _str_or_none(final_text) and _str_or_none(pipeline_text)
+            and _str_or_none(final_role) and _str_or_none(pipeline_role)):
+        return rs.mandatory_routing_reason(final_text or "", pipeline_text or "", final_role, pipeline_role)
+
     if _is_near_duplicate(final_text, pipeline_text):
         return "exact_or_near_duplicate"
 
@@ -356,6 +406,13 @@ def _route_candidate_pairs(
 
     vec_by_text = _embed_texts_batch(final_claims_text + pipeline_claims_text)
 
+    # Rust: вся матрица «обязательных» причин за один вызов (слова/числа/отрицания — один раз на утверждение)
+    mandatory_matrix = None
+    _rs = _get_rust_fcc()
+    if (_rs is not None and all(isinstance(t, str) for t in final_claims_text + pipeline_claims_text)
+            and all(_str_or_none(r) for r in final_roles + pipeline_roles)):
+        mandatory_matrix = _rs.mandatory_matrix(final_claims_text, pipeline_claims_text, final_roles, pipeline_roles)
+
     for fi, final_text in enumerate(final_claims_text):
         sims = None
 
@@ -385,12 +442,12 @@ def _route_candidate_pairs(
                     stats["threshold"] += 1
 
         for pi, pipeline_text in enumerate(pipeline_claims_text):
-            reason = _mandatory_routing_reason(
+            reason = (mandatory_matrix[fi][pi] if mandatory_matrix is not None else _mandatory_routing_reason(
                 final_text,
                 pipeline_text,
                 final_roles[fi],
                 pipeline_roles[pi],
-            )
+            ))
 
             if reason:
                 if pi not in routing[fi]:

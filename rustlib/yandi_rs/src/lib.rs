@@ -21,6 +21,7 @@ pub mod claim_validator;
 pub mod criticism_detector;
 pub mod entity_resolver;
 pub mod epistemic_router;
+pub mod final_claim_coverage;
 pub mod intent_router;
 pub mod local_guard;
 pub mod message_intensity;
@@ -34,6 +35,7 @@ mod py_case_table;    // данные: Lowercase/Uppercase/Titlecase для str.
 mod scene_builder_data; // данные: паттерны SceneBuilder, сгенерированы из Python
 mod resolver_data;    // данные: таблицы object/entity resolver, сгенерированы из Python
 mod trust_data;       // данные: таблица рангов доверия, сгенерирована из Python
+mod fcc_data;         // данные: стоп-слова final_claim_coverage, сгенерированы из Python
 mod py_icase_table;   // данные: группы IGNORECASE Python, см. gen_py_icase_table.py
 mod py_regex;         // транслятор паттернов Python re -> крейт regex
 mod py_decimal_table; // данные: цифры Unicode для py_float, см. gen_py_decimal_table.py
@@ -149,6 +151,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     canonical_trust::register(py, &canonical_trust_mod)?;
     m.add_submodule(&canonical_trust_mod)?;
 
+    let final_claim_coverage_mod = PyModule::new_bound(py, "final_claim_coverage")?;
+    final_claim_coverage::register(py, &final_claim_coverage_mod)?;
+    m.add_submodule(&final_claim_coverage_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -167,6 +173,7 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.epistemic_router", &epistemic_router_mod)?;
     sys_modules.set_item("yandi_rs.message_intensity", &message_intensity_mod)?;
     sys_modules.set_item("yandi_rs.orch_risk", &orch_risk_mod)?;
+    sys_modules.set_item("yandi_rs.final_claim_coverage", &final_claim_coverage_mod)?;
     sys_modules.set_item("yandi_rs.canonical_trust", &canonical_trust_mod)?;
     sys_modules.set_item("yandi_rs.trust_gate", &trust_gate_mod)?;
     sys_modules.set_item("yandi_rs.claim_graph", &claim_graph_mod)?;
