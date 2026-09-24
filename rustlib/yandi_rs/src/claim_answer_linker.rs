@@ -20,14 +20,14 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use regex::Regex;
 
-static SENTENCE_SPLIT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[.!?]\s+").expect("статический паттерн валиден"));
+static SENTENCE_SPLIT_RE: Lazy<Regex> = Lazy::new(|| crate::py_text::py_regex(r"[.!?]\s+"));
 
 /// agent/claim_answer_linker.py::ClaimAnswerLinker._extract_key_phrases
 pub fn extract_key_phrases(text: &str) -> Vec<String> {
     let sentences: Vec<&str> = SENTENCE_SPLIT_RE.split(text).collect();
     let mut phrases = Vec::new();
     for sent in sentences.iter().take(5) {
-        let trimmed = sent.trim();
+        let trimmed = crate::py_text::py_strip(sent);
         if trimmed.chars().count() > 20 {
             let head: String = trimmed.chars().take(50).collect();
             phrases.push(head.to_lowercase());
@@ -40,7 +40,7 @@ pub fn extract_key_phrases(text: &str) -> Vec<String> {
 pub fn is_claim_supporting(claim_text: &str, key_phrases: &[String]) -> bool {
     let claim_lower = claim_text.to_lowercase();
     for phrase in key_phrases {
-        let words: Vec<&str> = phrase.split_whitespace().take(5).collect();
+        let words: Vec<&str> = crate::py_text::py_split_whitespace(phrase).take(5).collect();
         let word_match = words.iter().filter(|w| claim_lower.contains(*w)).count();
         // Дословно: если words пуст (0 >= 0*0.4 = 0.0 -> true), claim засчитывается как
         // поддерживающий — сохранено как в оригинале, не "исправлено" защитной проверкой.

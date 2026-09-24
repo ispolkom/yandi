@@ -66,7 +66,7 @@ const AGGRESSIVE_MARKERS: &[&str] = &["вообще", "абсолютно", "с�
 static CONSTRUCTIVE_REGEXES: Lazy<Vec<Regex>> = Lazy::new(|| {
     CONSTRUCTIVE_PATTERNS
         .iter()
-        .map(|(p, _)| Regex::new(p).unwrap_or_else(|e| panic!("паттерн должен быть валиден: {p}: {e}")))
+        .map(|(p, _)| crate::py_text::py_regex(p))
         .collect()
 });
 

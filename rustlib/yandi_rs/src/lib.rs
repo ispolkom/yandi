@@ -21,6 +21,10 @@ pub mod epistemic_router;
 pub mod local_guard;
 pub mod message_intensity;
 pub mod orch_risk;
+mod py_json;          // точный json.loads Python (для message_intensity)
+mod py_printable_table; // данные: isprintable() для repr
+mod py_decimal_table; // данные: цифры Unicode для py_float, см. gen_py_decimal_table.py
+pub mod py_text;      // общие питоновские strip/split/\s/float — см. файл (+ подмодуль yandi_rs.py_text для проверки)
 mod py_word_table; // данные (не подмодуль Python): точная копия Python-`\w`, см. gen_py_word_table.py
 pub mod source_clustering;
 pub mod source_quality;
@@ -90,6 +94,10 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     source_clustering::register(py, &source_clustering_mod)?;
     m.add_submodule(&source_clustering_mod)?;
 
+    let py_text_mod = PyModule::new_bound(py, "py_text")?;
+    py_text::register(py, &py_text_mod)?;
+    m.add_submodule(&py_text_mod)?;
+
     // Чтобы `import yandi_rs.xxx` и `from yandi_rs.xxx import y` тоже работали (без этого
     // подмодуль виден только как атрибут yandi_rs.xxx, но не как отдельный элемент
     // sys.modules, что ломает некоторые формы импорта). Один и тот же шаг на каждый
@@ -108,6 +116,7 @@ fn yandi_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys_modules.set_item("yandi_rs.epistemic_router", &epistemic_router_mod)?;
     sys_modules.set_item("yandi_rs.message_intensity", &message_intensity_mod)?;
     sys_modules.set_item("yandi_rs.orch_risk", &orch_risk_mod)?;
+    sys_modules.set_item("yandi_rs.py_text", &py_text_mod)?;
     sys_modules.set_item("yandi_rs.source_clustering", &source_clustering_mod)?;
     Ok(())
 }

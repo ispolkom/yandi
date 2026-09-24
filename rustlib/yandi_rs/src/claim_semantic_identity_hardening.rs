@@ -35,7 +35,7 @@ use regex::Regex;
 use std::collections::HashSet;
 
 fn re(pattern: &str) -> Regex {
-    Regex::new(pattern).unwrap_or_else(|e| panic!("статический паттерн должен быть валиден: {pattern}: {e}"))
+    crate::py_text::py_regex(pattern)
 }
 
 static CAUSAL: Lazy<Regex> = Lazy::new(|| re(r"(?i)\b(вызывает|вызвал[а-я]*|приводит\s+к|привёл[а-я]*\s+к|является\s+причиной|causes?|leads?\s+to)\b"));

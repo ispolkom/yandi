@@ -220,11 +220,11 @@ pub fn evaluate_source_quality(url: &str, title: &str, text: &str, source_type: 
         traceability += 0.45;
         reasons.push("source has URL".to_string());
     }
-    if !title.trim().is_empty() && title.trim().chars().count() >= 5 {
+    if !crate::py_text::py_strip(title).is_empty() && crate::py_text::py_strip(title).chars().count() >= 5 {
         traceability += 0.20;
         reasons.push("source has title".to_string());
     }
-    let clean_text = text.trim();
+    let clean_text = crate::py_text::py_strip(text);
     let clean_len = clean_text.chars().count();
     if clean_len >= 200 {
         traceability += 0.20;

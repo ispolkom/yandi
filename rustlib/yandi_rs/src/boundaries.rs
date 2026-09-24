@@ -79,7 +79,7 @@ pub fn is_apology(text: &str) -> (bool, bool) {
     if !APOLOGY_KEYWORDS.iter().any(|k| lower.contains(k)) {
         return (false, false);
     }
-    if text.trim().chars().count() < 10 {
+    if crate::py_text::py_strip(text).chars().count() < 10 {
         return (true, false);
     }
     if EXCUSE_WORDS.iter().any(|e| lower.contains(e)) {

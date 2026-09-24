@@ -18,7 +18,7 @@ use pyo3::prelude::*;
 use regex::Regex;
 
 fn re(pattern: &str) -> Regex {
-    Regex::new(pattern).unwrap_or_else(|e| panic!("статический паттерн должен быть валиден: {pattern}: {e}"))
+    crate::py_text::py_regex(pattern)
 }
 
 // agent/claim_validator.py::META_PATTERNS — соседние raw-строки в Python склеиваются
@@ -94,11 +94,11 @@ static FACT_PAST_TENSE_RE: Lazy<Regex> =
 
 /// agent/claim_validator.py::ClaimValidator.normalize_claim_text
 pub fn normalize_claim_text(claim_text: &str) -> String {
-    let text = claim_text.trim();
+    let text = crate::py_text::py_strip(claim_text);
     let text = BULLET_RE.replace(text, "");
     let text = NUMBERED_RE.replace(&text, "");
     let text = BOLD_RE.replace(&text, "$1");
-    text.trim().to_string()
+    crate::py_text::py_strip(&text).to_string()
 }
 
 fn looks_like_fact(text: &str) -> bool {

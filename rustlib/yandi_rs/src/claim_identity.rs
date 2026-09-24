@@ -157,10 +157,10 @@ pub fn canonicalize_claim_text(claim_text: &str) -> String {
     }
     let nfc: String = claim_text.nfc().collect();
     let folded = caseless::default_case_fold_str(&nfc);
-    let collapsed = folded.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = crate::py_text::py_split_whitespace(&folded).collect::<Vec<_>>().join(" ");
     let no_trailing_punct =
-        collapsed.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '.' | '!' | '?' | '…'));
-    no_trailing_punct.trim().to_string()
+        collapsed.trim_end_matches(|c: char| crate::py_text::is_py_space(c) || matches!(c, '.' | '!' | '?' | '…'));
+    crate::py_text::py_strip(no_trailing_punct).to_string()
 }
 
 /// agent/claim_identity.py::compute_claim_content_hash
@@ -177,7 +177,7 @@ pub fn compute_claim_content_hash(claim_text: &str) -> Option<String> {
 /// agent/claim_identity.py::extract_subject_anchors — stable dedup (первое вхождение решает
 /// порядок), как Python `dict.fromkeys(...)`.
 pub fn extract_subject_anchors(claim_text: &str) -> Vec<String> {
-    let text = claim_text.trim();
+    let text = crate::py_text::py_strip(claim_text);
     if text.is_empty() {
         return Vec::new();
     }
@@ -217,7 +217,7 @@ pub fn extract_subject_anchors(claim_text: &str) -> Vec<String> {
 
 /// agent/claim_identity.py::extract_content_anchors
 pub fn extract_content_anchors(text: &str) -> Vec<String> {
-    let text = text.trim();
+    let text = crate::py_text::py_strip(text);
     if text.is_empty() {
         return Vec::new();
     }

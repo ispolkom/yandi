@@ -9,7 +9,7 @@
 //!
 //! Python `bool(state[key])` — это truthiness ЛЮБОГО JSON-значения (0/""/[]/{}/null -> false,
 //! всё остальное -> true), не просто bool-каст. Реализовано здесь через `json_truthy()`,
-//! повторяющую эти же правила на serde_json::Value, а не через Rust bool-конверсию.
+//! повторяющую эти же правила на PyJson, а не через Rust bool-конверсию.
 //!
 //! Статус (2026-09-23): построено и проверено на параллельность с Python; в бою по умолчанию
 //! ВЫКЛЮЧЕНО — переключатель YANDI_MESSAGE_INTENSITY_ENGINE=rust (см. agent/message_intensity.py).
@@ -18,14 +18,23 @@ use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use regex::Regex;
-use serde_json::Value as Json;
+
+use crate::py_json::{self, Escalate, LoadsError, PyJson};
+use crate::py_text::{py_float, py_repr_str, py_strip};
 
 static MARKER_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)#{0,3}\s*YANDI[_\s.-]STATE\s*#{0,3}").expect("статический паттерн валиден"));
+    Lazy::new(|| crate::py_text::py_regex(r"(?i)#{0,3}\s*YANDI[_\s.-]STATE\s*#{0,3}"));
 static STRIP_ALL_MARKERS_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)#{0,3}\s*YANDI[_\s.-]STATE\s*#{0,3}\s*:?\s*").expect("статический паттерн валиден"));
+    Lazy::new(|| crate::py_text::py_regex(r"(?i)#{0,3}\s*YANDI[_\s.-]STATE\s*#{0,3}\s*:?\s*"));
 // Жадный "{...}" через возможные переносы строк — эквивалент Python re.DOTALL.
 static JSON_OBJECT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)\{.*\}").expect("статический паттерн валиден"));
+
+/// Исключения Python, которые НЕ ловятся `except` в оригинале и потому должны долететь до вызывающего.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Stop {
+    Recursion,
+    Overflow,
+}
 
 #[derive(Debug, Clone)]
 pub struct IntensityResult {
@@ -58,165 +67,179 @@ impl IntensityResult {
 
 /// agent/message_intensity.py::_strip_all_markers
 pub fn strip_all_markers(text: &str) -> String {
-    STRIP_ALL_MARKERS_RE.replace_all(text, " ").trim().to_string()
+    py_strip(&STRIP_ALL_MARKERS_RE.replace_all(text, " ")).to_string()
 }
 
-/// Python bool(x) truthiness для JSON-значения, как оно приходит из json.loads.
-fn json_truthy(v: &Json) -> bool {
+/// Python bool(x) для значения из json.loads.
+fn json_truthy(v: &PyJson) -> bool {
     match v {
-        Json::Null => false,
-        Json::Bool(b) => *b,
-        Json::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
-        Json::String(s) => !s.is_empty(),
-        Json::Array(a) => !a.is_empty(),
-        Json::Object(o) => !o.is_empty(),
+        PyJson::Null => false,
+        PyJson::Bool(b) => *b,
+        PyJson::Int { zero, .. } => !*zero,
+        PyJson::Float(f) => *f != 0.0, // NaN != 0.0 -> true, как bool(nan)
+        PyJson::Str(s) => !s.is_empty(),
+        PyJson::List(a) => !a.is_empty(),
+        PyJson::Dict(o) => !o.is_empty(),
     }
 }
 
-/// Python float(x) — включая терпимость к числовым строкам ("0.5" -> 0.5), как настоящий float().
-fn json_as_f64(v: &Json) -> Option<f64> {
+/// Итог Python `float(x)`: значение, либо текст исключения (ValueError/TypeError — они ловятся и
+/// попадают в диагностику), либо Overflow (не ловится).
+enum FloatOf {
+    Value(f64),
+    Failed(String),
+    Overflow,
+}
+
+fn py_float_of(v: &PyJson) -> FloatOf {
+    let type_error = |t: &str| {
+        FloatOf::Failed(format!("float() argument must be a string or a real number, not '{t}'"))
+    };
     match v {
-        Json::Number(n) => n.as_f64(),
-        Json::String(s) => s.trim().parse::<f64>().ok(),
-        Json::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
-        _ => None,
+        PyJson::Null => type_error("NoneType"),
+        PyJson::Bool(b) => FloatOf::Value(if *b { 1.0 } else { 0.0 }),
+        PyJson::Int { as_f64, .. } => {
+            if as_f64.is_infinite() {
+                FloatOf::Overflow
+            } else {
+                FloatOf::Value(*as_f64)
+            }
+        }
+        PyJson::Float(f) => FloatOf::Value(*f),
+        PyJson::Str(s) => match py_float(s) {
+            Some(f) => FloatOf::Value(f),
+            None => FloatOf::Failed(format!("could not convert string to float: {}", py_repr_str(s))),
+        },
+        PyJson::List(_) => type_error("list"),
+        PyJson::Dict(_) => type_error("dict"),
     }
 }
 
-/// agent/message_intensity.py::intensity_from_state — работает на уже распарсенном JSON-объекте
-/// (то, что реально приходит из json.loads в обоих реальных вызывающих местах этого модуля).
-pub fn intensity_from_state_json(state: &Json, error: &str) -> IntensityResult {
-    let obj = match state.as_object() {
-        Some(o) => o,
-        None => return IntensityResult::neutral("semantic state missing or not an object"),
-    };
-    let is_insult = match obj.get("is_insult") {
-        Some(v) => json_truthy(v),
-        None => return IntensityResult::neutral("semantic state missing/invalid fields: 'is_insult'"),
-    };
-    let is_apology = match obj.get("is_apology") {
-        Some(v) => json_truthy(v),
-        None => return IntensityResult::neutral("semantic state missing/invalid fields: 'is_apology'"),
-    };
-    let severity = match obj.get("severity").and_then(json_as_f64) {
-        Some(v) => v.clamp(0.0, 1.0),
-        None => return IntensityResult::neutral("semantic state missing/invalid fields: 'severity'"),
-    };
-    let sincerity = match obj.get("sincerity").and_then(json_as_f64) {
-        Some(v) => v.clamp(0.0, 1.0),
-        None => return IntensityResult::neutral("semantic state missing/invalid fields: 'sincerity'"),
-    };
-    let is_promise = obj.get("is_promise").map(|v| v == &Json::Bool(true)).unwrap_or(false);
-    let claims_fulfilled = obj.get("claims_fulfilled").map(|v| v == &Json::Bool(true)).unwrap_or(false);
+/// Python `max(0.0, min(1.0, x))` — НЕ f64::clamp (тот возвращает NaN как есть, а Python даёт 1.0).
+fn py_clamp01(x: f64) -> f64 {
+    let m = if x < 1.0 { x } else { 1.0 };
+    if m > 0.0 {
+        m
+    } else {
+        0.0
+    }
+}
 
-    IntensityResult {
-        ok: true,
-        is_insult,
-        is_apology,
-        severity,
-        sincerity,
-        error: error.to_string(),
-        is_promise,
-        claims_fulfilled,
-        evidence: String::new(),
+/// Последовательность `bool(d["is_insult"]), bool(d["is_apology"]), float(d["severity"]),
+/// float(d["sincerity"])` в порядке Python: первое же исключение определяет текст.
+/// Ok(Err(text)) — пойманное KeyError/TypeError/ValueError; Err(Stop) — непойманное.
+fn read_state_fields(d: &PyJson) -> Result<Result<(bool, bool, f64, f64), String>, Stop> {
+    let key_error = |k: &str| Err::<(bool, bool, f64, f64), String>(format!("'{k}'"));
+    let Some(is_insult) = d.get("is_insult") else { return Ok(key_error("is_insult")) };
+    let is_insult = json_truthy(is_insult);
+    let Some(is_apology) = d.get("is_apology") else { return Ok(key_error("is_apology")) };
+    let is_apology = json_truthy(is_apology);
+    let mut floats = [0.0f64; 2];
+    for (i, k) in ["severity", "sincerity"].iter().enumerate() {
+        let Some(v) = d.get(k) else { return Ok(key_error(k)) };
+        match py_float_of(v) {
+            FloatOf::Value(f) => floats[i] = py_clamp01(f),
+            FloatOf::Failed(msg) => return Ok(Err(msg)),
+            FloatOf::Overflow => return Err(Stop::Overflow),
+        }
+    }
+    Ok(Ok((is_insult, is_apology, floats[0], floats[1])))
+}
+
+/// agent/message_intensity.py::intensity_from_state — работает на уже распарсенном JSON-объекте.
+pub fn intensity_from_state_json(state: &PyJson, error: &str) -> Result<IntensityResult, Stop> {
+    if !state.is_dict() {
+        return Ok(IntensityResult::neutral("semantic state missing or not an object"));
+    }
+    match read_state_fields(state)? {
+        Err(e) => Ok(IntensityResult::neutral(&format!("semantic state missing/invalid fields: {e}"))),
+        Ok((is_insult, is_apology, severity, sincerity)) => Ok(IntensityResult {
+            ok: true,
+            is_insult,
+            is_apology,
+            severity,
+            sincerity,
+            error: error.to_string(),
+            is_promise: state.get("is_promise").map(|v| v.is_true()).unwrap_or(false),
+            claims_fulfilled: state.get("claims_fulfilled").map(|v| v.is_true()).unwrap_or(false),
+            evidence: String::new(),
+        }),
     }
 }
 
 /// agent/message_intensity.py::_parse_structured — None если форма не подходит (вызывающий код
 /// падает обратно на легаси-путь через маркер).
-pub fn parse_structured_json(data: &Json) -> Option<(String, IntensityResult)> {
-    let obj = data.as_object()?;
-    let reply_v = obj.get("reply")?;
-    let state_v = obj.get("state")?;
-    let reply = reply_v.as_str()?;
-    if !state_v.is_object() {
-        return None;
+pub fn parse_structured_json(data: &PyJson) -> Result<Option<(String, IntensityResult)>, Stop> {
+    if data.get("reply").is_none() || data.get("state").is_none() {
+        return Ok(None);
+    }
+    let (Some(PyJson::Str(reply)), Some(state)) = (data.get("reply"), data.get("state")) else {
+        return Ok(None);
+    };
+    if !state.is_dict() {
+        return Ok(None);
     }
 
-    let result = intensity_from_state_json(state_v, "");
+    let result = intensity_from_state_json(state, "")?;
     if !result.ok {
         let mut r = result;
         r.error = r.error.replacen("semantic", "structured", 1);
-        return Some((reply.trim().to_string(), r));
+        return Ok(Some((py_strip(reply).to_string(), r)));
     }
-    if reply.trim().is_empty() {
+    if py_strip(reply).is_empty() {
         let mut r = result;
         r.error = "model produced no visible reply, tag only".to_string();
-        return Some((String::new(), r));
+        return Ok(Some((String::new(), r)));
     }
-    Some((reply.trim().to_string(), result))
+    Ok(Some((py_strip(reply).to_string(), result)))
 }
 
-/// agent/message_intensity.py::parse_self_report
-pub fn parse_self_report(raw: &str) -> (String, IntensityResult) {
-    let stripped = raw.trim();
+/// agent/message_intensity.py::parse_self_report (Err(Stop) = исключение, летящее мимо except).
+pub fn try_parse_self_report(raw: &str) -> Result<(String, IntensityResult), Stop> {
+    let stripped = py_strip(raw);
     if stripped.starts_with('{') {
-        if let Ok(data) = serde_json::from_str::<Json>(stripped) {
-            if data.is_object() {
-                if let Some(structured) = parse_structured_json(&data) {
-                    return structured;
+        match py_json::loads(stripped) {
+            Ok(data) => {
+                if data.is_dict() {
+                    if let Some(structured) = parse_structured_json(&data)? {
+                        return Ok(structured);
+                    }
                 }
             }
+            Err(LoadsError::Decode(_)) => {}
+            Err(LoadsError::Escalate(Escalate::Recursion)) => return Err(Stop::Recursion),
         }
     }
 
     let matches: Vec<_> = MARKER_RE.find_iter(raw).collect();
     let Some(last) = matches.last() else {
-        return (raw.trim().to_string(), IntensityResult::neutral("no state marker found in model output"));
+        return Ok((py_strip(raw).to_string(), IntensityResult::neutral("no state marker found in model output")));
     };
 
-    let visible = raw[..last.start()].trim().to_string();
+    let visible = py_strip(&raw[..last.start()]).to_string();
     let tail = &raw[last.end()..];
+    let fallback = |visible: &String| if !visible.is_empty() { visible.clone() } else { strip_all_markers(raw) };
 
     let Some(json_match) = JSON_OBJECT_RE.find(tail) else {
-        let fallback = if !visible.is_empty() { visible } else { strip_all_markers(raw) };
         let tail_preview: String = tail.chars().take(200).collect();
-        // Python `{tail[:200]!r}`: repr() по умолчанию оборачивает в одинарные кавычки (кроме
-        // редкого случая текста с одинарной, но без двойной кавычки внутри — этот единственный
-        // угловой случай здесь не воспроизведён, цена/выгода не оправданы для диагностической
-        // строки; во всех реалистичных случаях битого JSON совпадает побайтово).
-        return (fallback, IntensityResult::neutral(&format!("marker present but no JSON object after it: '{tail_preview}'")));
+        return Ok((
+            fallback(&visible),
+            IntensityResult::neutral(&format!("marker present but no JSON object after it: {}", py_repr_str(&tail_preview))),
+        ));
     };
 
-    let data: Json = match serde_json::from_str(json_match.as_str()) {
+    let data = match py_json::loads(json_match.as_str()) {
         Ok(d) => d,
+        Err(LoadsError::Decode(e)) => {
+            return Ok((fallback(&visible), IntensityResult::neutral(&format!("malformed JSON after marker: {e}"))));
+        }
+        Err(LoadsError::Escalate(Escalate::Recursion)) => return Err(Stop::Recursion),
+    };
+
+    let (is_insult, is_apology, severity, sincerity) = match read_state_fields(&data)? {
+        Ok(v) => v,
         Err(e) => {
-            let fallback = if !visible.is_empty() { visible.clone() } else { strip_all_markers(raw) };
-            return (fallback, IntensityResult::neutral(&format!("malformed JSON after marker: {e}")));
-        }
-    };
-
-    let obj = match data.as_object() {
-        Some(o) => o,
-        None => {
-            let fallback = if !visible.is_empty() { visible.clone() } else { strip_all_markers(raw) };
-            return (fallback, IntensityResult::neutral("state JSON missing/invalid expected fields"));
-        }
-    };
-
-    let get_bool = |k: &str| obj.get(k).map(json_truthy);
-    let get_f64 = |k: &str| obj.get(k).and_then(json_as_f64);
-
-    // Python вычисляет data["is_insult"]/data["is_apology"]/data["severity"]/data["sincerity"]
-    // В ЭТОМ ПОРЯДКЕ как позиционные kwargs конструктора — первый же отсутствующий/невалидный
-    // ключ бросает KeyError с ИМЕНЕМ ЭТОГО ключа, message "...: 'имя_поля'". Воспроизведено:
-    // проверяем в том же порядке, останавливаемся на первом отсутствующем.
-    for field in ["is_insult", "is_apology", "severity", "sincerity"] {
-        let present = match field {
-            "is_insult" | "is_apology" => get_bool(field).is_some(),
-            _ => get_f64(field).is_some(),
-        };
-        if !present {
-            let fallback = if !visible.is_empty() { visible.clone() } else { strip_all_markers(raw) };
-            return (fallback, IntensityResult::neutral(&format!("state JSON missing/invalid expected fields: '{field}'")));
-        }
-    }
-
-    let (is_insult, is_apology, severity, sincerity) = match (get_bool("is_insult"), get_bool("is_apology"), get_f64("severity"), get_f64("sincerity")) {
-        (Some(ii), Some(ia), Some(sv), Some(sc)) => (ii, ia, sv.clamp(0.0, 1.0), sc.clamp(0.0, 1.0)),
-        _ => {
-            let fallback = if !visible.is_empty() { visible.clone() } else { strip_all_markers(raw) };
-            return (fallback, IntensityResult::neutral("state JSON missing/invalid expected fields"));
+            return Ok((fallback(&visible), IntensityResult::neutral(&format!("state JSON missing/invalid expected fields: {e}"))));
         }
     };
 
@@ -235,13 +258,25 @@ pub fn parse_self_report(raw: &str) -> (String, IntensityResult) {
     if visible.is_empty() {
         let mut r = result;
         r.error = "model produced no visible reply, tag only".to_string();
-        return (String::new(), r);
+        return Ok((String::new(), r));
     }
 
-    (visible, result)
+    Ok((visible, result))
+}
+
+/// Для юнит-тестов и внутренних вызовов, где «мимо except» не интересно.
+pub fn parse_self_report(raw: &str) -> (String, IntensityResult) {
+    try_parse_self_report(raw).unwrap_or_else(|_| (String::new(), IntensityResult::neutral("escalated")))
 }
 
 // ── PyO3-обвязка ────────────────────────────────────────────────────────────
+
+fn stop_to_pyerr(s: Stop) -> PyErr {
+    match s {
+        Stop::Recursion => pyo3::exceptions::PyRecursionError::new_err("maximum recursion depth exceeded while decoding a JSON document"),
+        Stop::Overflow => pyo3::exceptions::PyOverflowError::new_err("int too large to convert to float"),
+    }
+}
 
 fn result_to_dict<'py>(py: Python<'py>, r: &IntensityResult) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new_bound(py);
@@ -264,17 +299,19 @@ fn py_strip_all_markers(text: &str) -> String {
 }
 
 /// state: любой Python-объект — сериализуется через json.dumps (тот же путь, каким реально
-/// приходят эти данные из распарсенного ответа модели), затем разбирается тем же JSON-парсером,
-/// что и остальной модуль — не отдельная, потенциально расходящаяся конверсия типов.
+/// приходят эти данные из распарсенного ответа модели), затем разбирается тем же точным
+/// json.loads-портом. Приближение (известное): значения, которые json.dumps не умеет, дают общий
+/// текст "not an object", а не точное TypeError-сообщение Python о типе.
 #[pyfunction]
 #[pyo3(name = "intensity_from_state", signature = (state, error=""))]
 fn py_intensity_from_state<'py>(py: Python<'py>, state: &Bound<'py, PyAny>, error: &str) -> PyResult<Bound<'py, PyDict>> {
     let json_mod = py.import_bound("json")?;
     let dumped: PyResult<String> = json_mod.call_method1("dumps", (state,)).and_then(|v| v.extract());
     let result = match dumped {
-        Ok(s) => match serde_json::from_str::<Json>(&s) {
-            Ok(v) => intensity_from_state_json(&v, error),
-            Err(_) => IntensityResult::neutral("semantic state missing or not an object"),
+        Ok(s) => match py_json::loads(&s) {
+            Ok(v) => intensity_from_state_json(&v, error).map_err(stop_to_pyerr)?,
+            Err(LoadsError::Decode(_)) => IntensityResult::neutral("semantic state missing or not an object"),
+            Err(LoadsError::Escalate(_)) => return Err(stop_to_pyerr(Stop::Recursion)),
         },
         Err(_) => IntensityResult::neutral("semantic state missing or not an object"),
     };
@@ -284,7 +321,7 @@ fn py_intensity_from_state<'py>(py: Python<'py>, state: &Bound<'py, PyAny>, erro
 #[pyfunction]
 #[pyo3(name = "parse_self_report")]
 fn py_parse_self_report<'py>(py: Python<'py>, raw: &str) -> PyResult<(String, Bound<'py, PyDict>)> {
-    let (visible, result) = parse_self_report(raw);
+    let (visible, result) = try_parse_self_report(raw).map_err(stop_to_pyerr)?;
     Ok((visible, result_to_dict(py, &result)?))
 }
 
@@ -380,14 +417,60 @@ mod tests {
         assert!(r.error.contains("no visible reply"));
     }
 
+    fn state(s: &str) -> PyJson {
+        py_json::loads(s).unwrap()
+    }
+
     #[test]
     fn json_truthy_matches_python_bool() {
-        assert!(!json_truthy(&Json::Null));
-        assert!(!json_truthy(&serde_json::json!(0)));
-        assert!(json_truthy(&serde_json::json!(0.5)));
-        assert!(!json_truthy(&serde_json::json!("")));
-        assert!(json_truthy(&serde_json::json!("x")));
-        assert!(!json_truthy(&serde_json::json!([])));
-        assert!(json_truthy(&serde_json::json!([1])));
+        assert!(!json_truthy(&state("null")));
+        assert!(!json_truthy(&state("0")));
+        assert!(!json_truthy(&state("-0")));
+        assert!(!json_truthy(&state("0.0")));
+        assert!(json_truthy(&state("0.5")));
+        assert!(json_truthy(&state("NaN")));
+        assert!(!json_truthy(&state("\"\"")));
+        assert!(json_truthy(&state("\"x\"")));
+        assert!(!json_truthy(&state("[]")));
+        assert!(json_truthy(&state("[1]")));
+        assert!(!json_truthy(&state("{}")));
+    }
+
+    #[test]
+    fn nan_severity_clamps_to_one_like_python() {
+        // Python: max(0.0, min(1.0, nan)) == 1.0 (f64::clamp дал бы NaN)
+        let raw = "Ответ.\n#YANDI_STATE: {\"is_insult\": false, \"is_apology\": false, \"severity\": NaN, \"sincerity\": 0.5}";
+        let (_, r) = parse_self_report(raw);
+        assert!(r.ok);
+        assert_eq!(r.severity, 1.0);
+    }
+
+    #[test]
+    fn infinity_and_huge_exponent_accepted_like_python() {
+        let raw = "Ответ.\n#YANDI_STATE: {\"is_insult\": false, \"is_apology\": false, \"severity\": 1e999, \"sincerity\": -Infinity}";
+        let (_, r) = parse_self_report(raw);
+        assert!(r.ok);
+        assert_eq!((r.severity, r.sincerity), (1.0, 0.0));
+    }
+
+    #[test]
+    fn float_failure_texts_are_pythons() {
+        let raw = |v: &str| format!("О.\n#YANDI_STATE: {{\"is_insult\": false, \"is_apology\": false, \"severity\": {v}, \"sincerity\": 0.5}}");
+        assert_eq!(parse_self_report(&raw("\"abc\"")).1.error, "state JSON missing/invalid expected fields: could not convert string to float: 'abc'");
+        assert_eq!(parse_self_report(&raw("[1]")).1.error, "state JSON missing/invalid expected fields: float() argument must be a string or a real number, not 'list'");
+        assert_eq!(parse_self_report(&raw("null")).1.error, "state JSON missing/invalid expected fields: float() argument must be a string or a real number, not 'NoneType'");
+        assert_eq!(parse_self_report("О.\n#YANDI_STATE: {\"is_insult\": false}").1.error, "state JSON missing/invalid expected fields: 'is_apology'");
+    }
+
+    #[test]
+    fn no_json_tail_uses_python_repr() {
+        let (_, r) = parse_self_report("Ответ.\n#YANDI_STATE: severity\nhigh\t'x'");
+        assert_eq!(r.error, "marker present but no JSON object after it: \": severity\\nhigh\\t'x'\"");
+    }
+
+    #[test]
+    fn deep_nesting_is_recursion_stop_not_crash() {
+        let raw = format!("{{\"reply\": {}", "[".repeat(100_000));
+        assert_eq!(try_parse_self_report(&raw).unwrap_err(), Stop::Recursion);
     }
 }

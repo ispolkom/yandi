@@ -53,7 +53,7 @@ fn fullmatch(re: &Regex, s: &str) -> bool {
 
 /// pet/local_guard.py::_host_name
 pub fn host_name(host_header: &str) -> String {
-    let host = host_header.trim().to_lowercase();
+    let host = crate::py_text::py_strip(host_header).to_lowercase();
     if let Some(rest) = host.strip_prefix('[') {
         // "[::1]:9010" -> "::1"
         return match rest.find(']') {

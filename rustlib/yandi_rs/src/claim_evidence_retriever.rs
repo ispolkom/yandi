@@ -29,7 +29,7 @@ use pyo3::types::PyDict;
 use regex::Regex;
 
 fn re(pattern: &str) -> Regex {
-    Regex::new(pattern).unwrap_or_else(|e| panic!("статический паттерн должен быть валиден: {pattern}: {e}"))
+    crate::py_text::py_regex(pattern)
 }
 
 // agent/claim_evidence_retriever.py::_NEGATION_GAP
@@ -122,7 +122,7 @@ pub fn is_existence_question(query: &str) -> bool {
 
 /// agent/claim_evidence_retriever.py::_extract_existence_target
 pub fn extract_existence_target(query: &str) -> Vec<String> {
-    let query = query.trim();
+    let query = crate::py_text::py_strip(query);
     let Some(caps) = EXISTENCE_TARGET_RE.captures(query) else {
         return Vec::new();
     };
