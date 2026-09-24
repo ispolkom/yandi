@@ -400,6 +400,12 @@ def evaluate_claim_status_gate(claims_data, synthesis_result, log):
     total_claims, claims_rejected) for the caller to assign as its own
     locals.
     """
+    rs = _get_rust_cs()
+    if rs is not None:
+        r = rs.evaluate_gate(claims_data, synthesis_result, log)
+        if r is not None:
+            return r
+
     claims_verified = len([
         c for c in claims_data
         if c.get("verification_status") == "verified"

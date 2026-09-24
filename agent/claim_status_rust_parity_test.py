@@ -203,6 +203,136 @@ def main() -> int:
                 n += 1
                 check("B1 направленные случаи", p == rr, f"{claims!r}: {p} vs {rr}")
 
+        # ---- B2. evaluate_claim_status_gate (ШЛЮЗ СТАТУСОВ: потолок доверия + предупреждение в теле ответа) ------------------------------
+        import dataclasses
+        import decimal
+        import types as _types
+
+        @dataclasses.dataclass
+        class Synth:
+            answer: object = "Ответ модели."
+            trust_level: object = "STRONGLY_SUPPORTED"
+            confidence: object = 0.9
+
+        @dataclasses.dataclass(frozen=True)
+        class FrozenSynth:
+            answer: object = "Ответ модели."
+            trust_level: object = "STRONGLY_SUPPORTED"
+            confidence: object = 0.9
+
+        class Slots:
+            __slots__ = ("answer", "trust_level", "confidence")
+
+            def __init__(self, a, t, c):
+                self.answer, self.trust_level, self.confidence = a, t, c
+
+        class Prop:
+            def __init__(self, a, t, c):
+                self._a, self.trust_level, self.confidence = a, t, c
+
+            @property
+            def answer(self):
+                return self._a
+
+            @answer.setter
+            def answer(self, v):
+                self._a = v
+
+        def state(o):
+            if hasattr(o, "__slots__") and not hasattr(o, "__dict__"):
+                return {k: getattr(o, k, "<нет>") for k in o.__slots__}
+            return {k: v for k, v in vars(o).items()}
+
+        def run_gate(mode, claims, synth):
+            st._rust_cs = RsProxy2 if mode == "rs" else False
+            cl = copy.deepcopy(claims)
+            sy = copy.deepcopy(synth)
+            logs = []
+            try:
+                res = st.evaluate_claim_status_gate(cl, sy, logs.append)
+                return ("ok", res, repr(state(sy)), logs, repr(cl))
+            except Exception as e:  # noqa: BLE001
+                return ("exc", type(e).__name__, repr(state(sy)), logs, repr(cl))
+
+        real_gate = rs.evaluate_gate
+        gstats = {"rust": 0, "fallback": 0}
+
+        def counting_gate(*a):
+            r = real_gate(*a)
+            gstats["rust" if r is not None else "fallback"] += 1
+            return r
+
+        class RsProxy2:
+            evaluate_gate = staticmethod(counting_gate)
+            classify_claim = staticmethod(real)
+
+        GST = ["verified", "supported", "disputed", "contradicted", "candidate", "rejected", "unverified", "weak", "", None, "VERIFIED", "Supported"]
+        GST_W = [5, ["supported"], True, 1.5]
+        ANS = ["Ответ модели.", "", "⚠️ уже помечено", "⚠️", "\u26a0 без селектора", "текст ⚠️ внутри", "многострочный\nтекст\n"]
+        ANS_W = [None, b"x", 5, ["a"], MyDict()]
+        TRUST = ["UNVERIFIED", "WEAKLY_SUPPORTED", "PARTIALLY_SUPPORTED", "SUPPORTED", "STRONGLY_SUPPORTED", "VERIFIED", "unknown", "", None, 0, 7]
+        TRUST_W = [["x"], {"a": 1}, 2.5, True]
+        CONF = [0.0, 0.1, 0.24, 0.25, 0.26, 0.4, 0.44, 0.45, 0.46, 0.59, 0.6, 0.61, 0.9, 1.0, 1, 0, -1, True, False, float("nan"), float("inf"), -float("inf"), 10 ** 30]
+        CONF_W = ["0.5", None, decimal.Decimal("0.3"), [0.3], b"1"]
+        gn = 0
+        for it in range(40000):
+            pw = 0.0 if it % 4 else rnd.choice([0.1, 0.3])
+            nclaims = rnd.choice([0, 0, 1, 1, 2, 3, 4, 6])
+            kind = rnd.random()
+            claims = []
+            for i in range(nclaims):
+                c = {"claim_id": f"c{i}"}
+                if kind < 0.15:
+                    c["verification_status"] = "rejected"
+                elif kind < 0.30:
+                    c["verification_status"] = rnd.choice(["contradicted", "unverified", "candidate", "rejected", "contradicted"])
+                elif kind < 0.45:
+                    c["verification_status"] = rnd.choice(["disputed", "supported", "unverified", "verified"])
+                elif kind < 0.6:
+                    c["verification_status"] = rnd.choice(["supported", "unverified", "candidate", "weak", None, ""])
+                elif rnd.random() < 0.95:
+                    c["verification_status"] = rnd.choice(GST_W) if rnd.random() < pw else rnd.choice(GST)
+                if rnd.random() < 0.05:
+                    c.pop("verification_status", None)
+                claims.append(c)
+            if pw and rnd.random() < 0.1 and claims:
+                claims[rnd.randrange(len(claims))] = rnd.choice([MyDict(verification_status="supported"), None, 5, "x"])
+            if pw and rnd.random() < 0.05:
+                claims = tuple(claims)
+            a = rnd.choice(ANS_W) if rnd.random() < pw else rnd.choice(ANS)
+            t = rnd.choice(TRUST_W) if rnd.random() < pw else rnd.choice(TRUST)
+            c_ = rnd.choice(CONF_W) if rnd.random() < pw else rnd.choice(CONF)
+            kindsy = rnd.random()
+            if kindsy < 0.7:
+                sy = Synth(a, t, c_)
+            elif kindsy < 0.78:
+                sy = _types.SimpleNamespace(answer=a, trust_level=t, confidence=c_)
+            elif kindsy < 0.84:
+                sy = Slots(a, t, c_)
+            elif kindsy < 0.9:
+                sy = Prop(a, t, c_)
+            elif kindsy < 0.95:
+                sy = FrozenSynth(a, t, c_)
+            else:
+                sy = _types.SimpleNamespace(answer=a)          # нет trust_level/confidence
+            p = run_gate("py", claims, sy)
+            rr = run_gate("rs", claims, sy)
+            gn += 1
+            check("B2 evaluate_claim_status_gate", p == rr, f"claims={claims!r}\n synth={state(sy)!r}\n py={p}\n rs={rr}")
+        n += gn
+        check("B3 шлюз: Rust-путь реально использован (>= 60%)", gstats["rust"] >= 0.6 * (gstats["rust"] + gstats["fallback"]) and gstats["rust"] > 20000, str(gstats))
+        # пять веток по очереди, точные тексты
+        for statuses in ([], ["rejected", "rejected"], ["contradicted", "unverified"], ["contradicted", "supported"], ["disputed", "supported"], ["supported", "unverified"],
+                         ["supported"], ["unverified", "candidate"], ["verified", "unverified"], ["verified"], ["contradicted", "rejected", "candidate"]):
+            cl = [{"claim_id": f"c{i}", "verification_status": s_} for i, s_ in enumerate(statuses)]
+            for tl in ("STRONGLY_SUPPORTED", "VERIFIED", "SUPPORTED", "PARTIALLY_SUPPORTED", "WEAKLY_SUPPORTED", "UNVERIFIED"):
+                for ans in ("Ответ.", "⚠️ уже"):
+                    sy = Synth(ans, tl, 0.95)
+                    p = run_gate("py", cl, sy)
+                    rr = run_gate("rs", cl, sy)
+                    n += 1
+                    check("B4 ветки шлюза", p == rr, f"{statuses} {tl}: {p} vs {rr}")
+
         # ---- C. охват: сколько прошло по Rust-пути ------------------------------------------------------------------------------------
         check("C1 Rust-путь реально использован (>= 60% вызовов)", stats["rust"] >= 0.6 * (stats["rust"] + stats["fallback"]) and stats["rust"] > 20000,
               str(stats))

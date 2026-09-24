@@ -16,7 +16,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFloat, PyList, PySet, PyString};
 
-use crate::pet_extraction::classify;
+use crate::pet_extraction::{classify, V};
 
 /// Родной тип? (иначе — откат)
 fn native(o: &Bound<'_, PyAny>) -> bool {
@@ -281,5 +281,238 @@ fn py_classify_claim(
 
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_classify_claim, m)?)?;
+    register_gate(_py, m)?;
+    Ok(())
+}
+
+// =====================================================================================================================
+// evaluate_claim_status_gate (срез 38) — ШЛЮЗ СТАТУСОВ: подсчёт статусов утверждений и, по результату, потолок доверия/уверенности +
+// предупреждение В ТЕЛЕ ответа (`⚠️ ВАЖНО: …`). Пять взаимоисключающих случаев в том же порядке, что в оригинале. Работает над объектом
+// `synthesis_result` через getattr/setattr (dataclass/SimpleNamespace/любой объект), `log` вызывается В ТЕХ ЖЕ местах, что в оригинале.
+// Откат (None, ничего не сделано и не залогировано): утверждения — не список словарей с «родными» значениями статуса; для веток, которые
+// читают `answer`/`confidence`/`trust_level`, они не «родные» (answer — не str, confidence — не число, trust_level нехэшируем).
+// =====================================================================================================================
+
+fn py_min<'py>(py: Python<'py>, a: &Bound<'py, PyAny>, b: f64) -> PyResult<Bound<'py, PyAny>> {
+    py.import_bound("builtins")?.getattr("min")?.call1((a, b))
+}
+
+fn trust_rank(v: &Bound<'_, PyAny>) -> Option<i32> {
+    // trust_rank.get(current, 0): None = нехэшируемое/посторонний тип → откат
+    match classify(v) {
+        Ok(Some(V::Str(s))) => Some(match s.as_str() {
+            "UNVERIFIED" => 0,
+            "WEAKLY_SUPPORTED" => 1,
+            "PARTIALLY_SUPPORTED" => 2,
+            "SUPPORTED" => 3,
+            "STRONGLY_SUPPORTED" => 4,
+            "VERIFIED" => 5,
+            _ => 0,
+        }),
+        Ok(Some(V::None)) | Ok(Some(V::Bool)) | Ok(Some(V::Int(_))) | Ok(Some(V::Float(_))) => Some(0),
+        _ => None,
+    }
+}
+
+fn is_number(v: &Bound<'_, PyAny>) -> bool {
+    matches!(classify(v), Ok(Some(V::Int(_))) | Ok(Some(V::Float(_))) | Ok(Some(V::Bool)))
+}
+
+const WARN: &str = "⚠️";
+
+#[pyfunction]
+#[pyo3(name = "evaluate_gate")]
+fn py_evaluate_gate(
+    py: Python<'_>, claims_data: &Bound<'_, PyAny>, synth: &Bound<'_, PyAny>, log: &Bound<'_, PyAny>,
+) -> PyResult<Option<(usize, usize, usize)>> {
+    // ---- 1. подсчёт (без побочных эффектов) ----
+    let list = match claims_data.downcast_exact::<PyList>() {
+        Ok(l) => l.clone(),
+        Err(_) => return Ok(None),
+    };
+    let (mut verified, mut supported, mut disputed, mut contradicted, mut candidate, mut rejected, mut unverified) = (0usize, 0, 0, 0, 0, 0, 0);
+    for c in list.iter() {
+        let d = match c.downcast_exact::<PyDict>() {
+            Ok(d) => d.clone(),
+            Err(_) => return Ok(None),
+        };
+        let v = match d.get_item("verification_status") {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+        match v {
+            None => unverified += 1, // .get → None ∈ (…, None, …)
+            Some(o) => {
+                if !native(&o) {
+                    return Ok(None);
+                }
+                let eq = |s: &str| o.eq(s).unwrap_or(false);
+                if eq("verified") {
+                    verified += 1;
+                }
+                if eq("supported") {
+                    supported += 1;
+                }
+                if eq("disputed") {
+                    disputed += 1;
+                }
+                if eq("contradicted") {
+                    contradicted += 1;
+                }
+                if eq("candidate") {
+                    candidate += 1;
+                }
+                if eq("rejected") {
+                    rejected += 1;
+                }
+                if o.is_none() || eq("unverified") || eq("weak") || eq("") {
+                    unverified += 1;
+                }
+            }
+        }
+    }
+    let total = list.len();
+    let accepted = verified;
+
+    #[derive(PartialEq)]
+    enum Branch {
+        NoClaims,
+        AllRejected,
+        Contradicted,
+        Disputed,
+        VerifiedZero,
+        Fine,
+    }
+    let branch = if total == 0 {
+        Branch::NoClaims
+    } else if rejected == total {
+        Branch::AllRejected
+    } else if contradicted > 0 && contradicted + rejected + unverified + candidate == total {
+        Branch::Contradicted
+    } else if disputed > 0 {
+        Branch::Disputed
+    } else if verified == 0 {
+        Branch::VerifiedZero
+    } else {
+        Branch::Fine
+    };
+
+    // ---- 2. проверка типов для веток, которые читают поля ответа (до любого эффекта) ----
+    if matches!(branch, Branch::Contradicted | Branch::Disputed | Branch::VerifiedZero) {
+        let conf = match synth.getattr("confidence") {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+        let ans = match synth.getattr("answer") {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+        if !is_number(&conf) || ans.get_type().is(&py.get_type_bound::<PyString>()) == false {
+            return Ok(None);
+        }
+        if matches!(branch, Branch::Disputed | Branch::VerifiedZero) {
+            let tl = match synth.getattr("trust_level") {
+                Ok(v) => v,
+                Err(_) => return Ok(None),
+            };
+            if trust_rank(&tl).is_none() {
+                return Ok(None);
+            }
+        }
+    }
+
+    let say = |m: String| -> PyResult<()> {
+        log.call1((m,))?;
+        Ok(())
+    };
+    say(format!(
+        "[Claim Status Gate] verified={verified}, supported={supported}, disputed={disputed}, contradicted={contradicted}, candidate={candidate}, unverified={unverified}, rejected={rejected}, total={total}"
+    ))?;
+
+    // предупреждение в начало ответа, если его там ещё нет
+    let prepend = |notice: String| -> PyResult<()> {
+        let ans = synth.getattr("answer")?;
+        let s: String = ans.extract()?;
+        if !s.starts_with(WARN) {
+            synth.setattr("answer", format!("{notice}\n{s}"))?;
+        }
+        Ok(())
+    };
+    let cap_conf = |cap: f64| -> PyResult<()> {
+        let cur = synth.getattr("confidence")?;
+        synth.setattr("confidence", py_min(py, &cur, cap)?)?;
+        Ok(())
+    };
+    let rank_now = || -> PyResult<i32> { Ok(trust_rank(&synth.getattr("trust_level")?).unwrap_or(0)) };
+
+    match branch {
+        Branch::NoClaims => {
+            say("[Claim Status Gate] Claims отсутствуют — статус UNVERIFIED".to_string())?;
+            synth.setattr(
+                "answer",
+                "Я попыталась найти информацию.\n\nНо мне не удалось выделить достаточно проверяемых утверждений.\nЯ не могу дать уверенный ответ на этот вопрос.\n\nЕсли дашь дополнительный контекст — я попробую ещё раз.",
+            )?;
+            synth.setattr("trust_level", "UNVERIFIED")?;
+            synth.setattr("confidence", 0.0f64)?;
+        }
+        Branch::AllRejected => {
+            say("[Claim Status Gate] Все claims структурно отклонены".to_string())?;
+            synth.setattr(
+                "answer",
+                "Я попыталась сформировать ответ, но выделенные утверждения не прошли структурную проверку.\n\nПоэтому я не могу считать этот ответ надёжным.",
+            )?;
+            synth.setattr("trust_level", "UNVERIFIED")?;
+            synth.setattr("confidence", 0.0f64)?;
+        }
+        Branch::Contradicted => {
+            say("[Claim Status Gate] Поддержанных claims нет, присутствуют опровергающие evidence".to_string())?;
+            synth.setattr("trust_level", "UNVERIFIED")?;
+            cap_conf(0.25)?;
+            prepend(format!(
+                "⚠️ ВАЖНО: часть проверяемых утверждений в этом ответе была ОПРОВЕРГНУТА найденными источниками (contradicted={contradicted} из {total}), и ни одно утверждение не получило прямого подтверждения. Текст ниже остаётся гипотезой модели — не считай его установленным фактом.\n"
+            ))?;
+        }
+        Branch::Disputed => {
+            say(format!("[Claim Status Gate] Обнаружены спорные claims: {disputed}"))?;
+            if rank_now()? > 1 {
+                synth.setattr("trust_level", "WEAKLY_SUPPORTED")?;
+            }
+            cap_conf(0.45)?;
+            prepend(format!(
+                "⚠️ ВАЖНО: часть проверяемых утверждений в этом ответе является СПОРНОЙ (disputed={disputed} из {total}) — по ним есть и подтверждающие, и опровергающие источники одновременно. Не считай эти пункты установленным фактом.\n"
+            ))?;
+        }
+        Branch::VerifiedZero => {
+            say(format!("[Claim Status Gate] verified=0, supported={supported} — ответ остаётся предварительным"))?;
+            if rank_now()? > 2 {
+                synth.setattr("trust_level", "PARTIALLY_SUPPORTED")?;
+            }
+            if supported == 0 {
+                if rank_now()? > 1 {
+                    synth.setattr("trust_level", "WEAKLY_SUPPORTED")?;
+                }
+                cap_conf(0.40)?;
+                prepend(format!(
+                    "⚠️ ВАЖНО: ни одно из {total} проверяемых утверждений не получило подтверждающих доказательств (supported=0, verified=0). Всё, что изложено ниже — неподтверждённая гипотеза модели, а не установленный факт. Система не получила достаточной evidence-базы для проверки.\n"
+                ))?;
+            } else {
+                cap_conf(0.60)?;
+                let mixed = unverified + candidate;
+                if mixed > 0 {
+                    prepend(format!(
+                        "⚠️ ВАЖНО: не все утверждения в этом ответе подтверждены — {mixed} из {total} проверяемых утверждений не получили ни подтверждающих, ни опровергающих доказательств (unverified/candidate). Не считай их установленным фактом наравне с подтверждённой частью ответа.\n"
+                    ))?;
+                }
+            }
+        }
+        Branch::Fine => {
+            say(format!("[Claim Status Gate] Есть verified claims: {verified}/{total}"))?;
+        }
+    }
+    Ok(Some((accepted, total, rejected)))
+}
+
+pub fn register_gate(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(py_evaluate_gate, m)?)?;
     Ok(())
 }
