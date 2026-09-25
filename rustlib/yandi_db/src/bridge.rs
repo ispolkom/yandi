@@ -94,6 +94,17 @@ fn exec_sql(handle: u64, sql: &str, params_json: &str) -> PyResult<usize> {
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
+/// Журнал целостности: `integrity_call(name, args_json) -> {"ok": …} | {"error": "…"}`.
+#[pyfunction]
+fn integrity_call(name: &str, args_json: &str) -> PyResult<String> {
+    let args: Value = serde_json::from_str(args_json).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok(match crate::integrity::call(name, &args) {
+        Ok(v) => json!({"ok": v}),
+        Err(e) => json!({"error": e}),
+    }
+    .to_string())
+}
+
 #[pymodule]
 fn yandi_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(open_memory, m)?)?;
@@ -104,5 +115,6 @@ fn yandi_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fp_clear_key, m)?)?;
     m.add_function(wrap_pyfunction!(fp_forget_mode, m)?)?;
     m.add_function(wrap_pyfunction!(exec_sql, m)?)?;
+    m.add_function(wrap_pyfunction!(integrity_call, m)?)?;
     Ok(())
 }

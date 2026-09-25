@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection};
 
 /// Версия схемы, из которой сгенерированы `schema_sqlite.sql` / `triggers_sqlite.sql`.
+pub mod integrity;
 pub mod repo;
 
 #[cfg(feature = "python")]
