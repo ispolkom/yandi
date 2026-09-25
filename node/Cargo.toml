@@ -14,6 +14,9 @@ members = ["core_supervisor", "key_root"]
 [dependencies]
 # Перенесённая с Python логика ядра (rustlib/): чистая Rust-библиотека БЕЗ Python (default-features = false) — путь к единому бинарнику.
 yandi_rs = { path = "../rustlib/yandi_rs", default-features = false }
+# Родной шлюз к моделям (secure_store на встроенной SQLite, клиент, бэкенды) и встроенное хранилище состояния (замена Redis) — тоже без Python.
+yandi_llm = { path = "../rustlib/yandi_llm", default-features = false }
+yandi_state = { path = "../rustlib/yandi_state", default-features = false }
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
 
