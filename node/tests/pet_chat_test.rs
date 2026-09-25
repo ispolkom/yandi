@@ -119,4 +119,36 @@ async fn whole_turn_runs_through_native_core_and_gateway() {
     let r: Value = post_json("/api/local/chat", json!({"model": "нет-такой", "messages": [{"role": "user", "content": "x"}]})).await.unwrap().json().await.unwrap();
     assert_eq!(r["ok"], json!(false), "{r}");
     assert!(r["content"].as_str().unwrap().starts_with("❌"));
+
+    // история окна разговора: добавить, прочитать, стереть; чужой вид отвергается
+    let r: Value = post_json("/api/local/clear", json!({})).await.unwrap().json().await.unwrap();
+    assert_eq!(r["ok"], json!(true));
+    for m in [json!({"role": "user", "content": "привет"}), json!({"role": "assistant", "content": "здравствуй"})] {
+        let r: Value = post_json("/api/local/message", m).await.unwrap().json().await.unwrap();
+        assert_eq!(r["ok"], json!(true));
+    }
+    let bad: Value = post_json("/api/local/message", json!([1, 2])).await.unwrap().json().await.unwrap();
+    assert_eq!(bad["ok"], json!(false));
+    let h: Value = http.get(format!("{base}/api/local/history")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(h["messages"], json!([{"role": "user", "content": "привет"}, {"role": "assistant", "content": "здравствуй"}]));
+    for i in 0..305 {
+        post_json("/api/local/message", json!({"role": "user", "content": format!("м{i}")})).await.unwrap();
+    }
+    let h: Value = http.get(format!("{base}/api/local/history")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(h["messages"].as_array().unwrap().len(), 300, "хранится не больше 300 последних");
+    assert_eq!(h["messages"][299]["content"], json!("м304"));
+    post_json("/api/local/clear", json!({})).await.unwrap();
+    let h: Value = http.get(format!("{base}/api/local/history")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(h["messages"], json!([]));
+}
+
+#[test]
+fn assistant_page_is_self_contained_and_linked_from_navigation() {
+    let html = include_str!("../src/web/ui/assistant.html");
+    assert!(!html.contains("<script src=\"http") && !html.contains("<link rel=\"stylesheet\" href=\"http"), "никаких внешних скриптов и стилей");
+    assert!(html.contains("/api/local/chat") && html.contains("/api/local/history"));
+    for page in ["index", "chat", "settings", "groups", "ai", "gateways", "relay", "group-chat"] {
+        let t = std::fs::read_to_string(format!("{}/src/web/ui/{page}.html", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        assert!(t.contains("href=\"/assistant\""), "{page}: нет ссылки на «Помощницу»");
+    }
 }

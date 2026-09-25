@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YANDI — Помощница</title>
+    <link rel="stylesheet" href="/style.css">
+    <style>
+        .banner { padding: .6rem .8rem; border-radius: var(--border-radius); margin-bottom: 1rem; background: #fff3cd; border: 1px solid #e0c060; color: #5a4300; }
+        .bar { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: .6rem; }
+        .bar .grow { flex: 1; }
+        .chat-box { height: 60vh; overflow-y: auto; border: 1px solid var(--border-color); border-radius: var(--border-radius); padding: .6rem; background: var(--icq-message-bg); }
+        .msg { margin: .4rem 0; padding: .5rem .7rem; border-radius: var(--border-radius); white-space: pre-wrap; word-wrap: break-word; max-width: 92%; }
+        .msg.user { background: var(--icq-message-sent); margin-left: auto; }
+        .msg.assistant { background: #f4f4f4; border: 1px solid var(--icq-message-border); }
+        .msg.error { background: #fdecea; color: var(--danger-color); }
+        .msg.wait { color: var(--text-muted); font-style: italic; }
+        .composer { display: flex; gap: .5rem; margin-top: .6rem; }
+        .composer textarea { flex: 1; min-height: 3rem; resize: vertical; }
+        .note { font-size: .85rem; color: var(--text-muted); margin: .5rem 0; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <h1 class="logo"><img src="/media/logo.png" alt="YANDI" style="height:42px;width:auto;display:block;"></h1>
+                <nav class="nav">
+                    <a href="/" class="nav-link">Главная</a>
+                    <a href="/chat" class="nav-link">Чат</a>
+                    <a href="/ai" class="nav-link">ИИ</a>
+                    <a href="/assistant" class="nav-link active">Помощница</a>
+                    <a href="/groups" class="nav-link">Группы</a>
+                    <a href="/gateways" class="nav-link">Шлюзы</a>
+                    <a href="/relay" class="nav-link">Relay</a>
+                    <a href="/settings" class="nav-link">Настройки</a>
+                </nav>
+                <div><a href="/api/auth/logout" class="btn btn-sm btn-secondary" style="text-decoration:none;">Выйти</a></div>
+            </div>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="container">
+            <div id="noModel" class="banner hidden">Сначала выберите модель в разделе <a href="/ai">ИИ</a> — тогда Помощница сможет отвечать.</div>
+            <div class="bar">
+                <label for="model">Отвечает модель:</label>
+                <select id="model"></select>
+                <span class="grow"></span>
+                <button id="clear" class="btn btn-sm btn-secondary" type="button">Очистить историю</button>
+            </div>
+            <div id="box" class="chat-box"></div>
+            <div class="composer">
+                <textarea id="text" placeholder="Напишите Помощнице…" rows="2"></textarea>
+                <button id="send" class="btn btn-primary" type="button">Отправить</button>
+            </div>
+            <p class="note">Помощница помнит разговор и то, что вы о себе рассказывали; всё хранится только на этом устройстве. Enter — отправить, Shift+Enter — новая строка.</p>
+        </div>
+    </main>
+
+    <script>
+    (function () {
+        var box = document.getElementById('box');
+        var text = document.getElementById('text');
+        var send = document.getElementById('send');
+        var sel = document.getElementById('model');
+        var history = [];   // {role, content}
+        var busy = false;
+
+        function add(role, content, cls) {
+            var d = document.createElement('div');
+            d.className = 'msg ' + (cls || role);
+            d.textContent = content;
+            box.appendChild(d);
+            box.scrollTop = box.scrollHeight;
+            return d;
+        }
+
+        function api(path, opts) {
+            return fetch(path, opts).then(function (r) { return r.json(); });
+        }
+
+        function post(path, body) {
+            return api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        }
+
+        // номер реплики: 8–64 знаков из латиницы, цифр, «_» и «-» — по нему повтор доставки не считается новым событием
+        function newTurnId() {
+            var a = new Uint8Array(12);
+            (window.crypto || window.msCrypto).getRandomValues(a);
+            var s = 't';
+            for (var i = 0; i < a.length; i++) s += ('0' + a[i].toString(16)).slice(-2);
+            return s;
+        }
+
+        function loadModels() {
+            return api('/api/ai/state').then(function (s) {
+                var names = (s.models || []).map(function (m) { return m.name; });
+                sel.innerHTML = '';
+                names.forEach(function (n) {
+                    var o = document.createElement('option');
+                    o.value = n; o.textContent = n;
+                    sel.appendChild(o);
+                });
+                var saved = null;
+                try { saved = localStorage.getItem('assistantModel'); } catch (e) {}
+                var pick = (saved && names.indexOf(saved) >= 0) ? saved : (s.default || names[0] || '');
+                if (pick) sel.value = pick;
+                document.getElementById('noModel').classList.toggle('hidden', names.length > 0);
+                send.disabled = names.length === 0;
+            }).catch(function () {
+                document.getElementById('noModel').classList.remove('hidden');
+            });
+        }
+
+        function loadHistory() {
+            return api('/api/local/history').then(function (h) {
+                (h.messages || []).forEach(function (m) {
+                    if (m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string') {
+                        history.push({ role: m.role, content: m.content });
+                        add(m.role, m.content);
+                    }
+                });
+            }).catch(function () {});
+        }
+
+        function submit() {
+            var value = text.value.trim();
+            if (!value || busy || send.disabled) return;
+            busy = true; send.disabled = true;
+            text.value = '';
+            add('user', value);
+            history.push({ role: 'user', content: value });
+            post('/api/local/message', { role: 'user', content: value });
+            var wait = add('assistant', 'Думаю…', 'wait');
+            var context = history.slice(-20);
+            post('/api/local/chat', { model: sel.value, temperature: 0.7, messages: context, turn_id: newTurnId() }).then(function (r) {
+                box.removeChild(wait);
+                if (r.ok) {
+                    add('assistant', r.content);
+                    history.push({ role: 'assistant', content: r.content });
+                    post('/api/local/message', { role: 'assistant', content: r.content });
+                } else {
+                    add('assistant', r.content || ('❌ ' + (r.error || 'Не удалось ответить.')), 'error');
+                }
+            }).catch(function () {
+                box.removeChild(wait);
+                add('assistant', '❌ Нет связи с узлом.', 'error');
+            }).then(function () {
+                busy = false; send.disabled = sel.options.length === 0; text.focus();
+            });
+        }
+
+        send.addEventListener('click', submit);
+        text.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+        });
+        sel.addEventListener('change', function () { try { localStorage.setItem('assistantModel', sel.value); } catch (e) {} });
+        document.getElementById('clear').addEventListener('click', function () {
+            if (!confirm('Стереть историю окна разговора? Память Помощницы о вас останется.')) return;
+            post('/api/local/clear', {}).then(function () { history = []; box.innerHTML = ''; });
+        });
+
+        loadModels().then(loadHistory);
+    })();
+    </script>
+</body>
+</html>

@@ -1,9 +1,10 @@
 //! Личный чат Помощницы на РОДНОМ ядре Rust: `POST /api/local/chat` (тот же обмен, что был у Python-сервера PET — `{model, temperature, messages, turn_id}` → `{ok, content, model_used}`).
 //! Весь ход (память об отношениях, личная память, извлечение событий и фактов, ответ, одна транзакция записи) выполняет `yandi_core::chat_turn`; модели вызываются через собственный шлюз узла
 //! (тот же движок и те же настройки владельца, что у раздела «ИИ»). Маршрут монтируется ПОД проверкой входа.
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use axum::{response::{IntoResponse, Json}, routing::post, Router};
+use axum::{response::{IntoResponse, Json}, routing::{get, post}, Router};
 use serde_json::{json, Value};
 
 use yandi_core::chat_turn as ct;
@@ -98,6 +99,68 @@ async fn handle_chat(Json(p): Json<Value>) -> impl IntoResponse {
     }
 }
 
+
+// ---------------------------------------------------------------- история разговора (для окна «Помощница»)
+
+/// Сколько последних сообщений помнит окно разговора (как `MAX_MESSAGES` у Python-сервера).
+const MAX_MESSAGES: usize = 300;
+/// Одно сообщение окна не больше этого (защита файла истории от раздувания).
+const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+
+static HISTORY_LOCK: Mutex<()> = Mutex::new(());
+
+fn history_path() -> PathBuf {
+    yandi_db::data_dir().join("local_chat.json")
+}
+
+fn read_history() -> Vec<Value> {
+    std::fs::read_to_string(history_path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v.get("messages").and_then(|m| m.as_array().cloned())).unwrap_or_default()
+}
+
+/// Запись через временный файл и переименование: обрыв посреди записи не портит историю.
+fn write_history(messages: &[Value]) -> Result<(), String> {
+    let p = history_path();
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, json!({"messages": messages}).to_string()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
+}
+
+async fn handle_history() -> impl IntoResponse {
+    let _g = HISTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let all = read_history();
+    let start = all.len().saturating_sub(MAX_MESSAGES);
+    Json(json!({"messages": &all[start..]}))
+}
+
+async fn handle_save_message(Json(p): Json<Value>) -> impl IntoResponse {
+    if !p.is_object() || p.to_string().len() > MAX_MESSAGE_BYTES {
+        return Json(json!({"ok": false, "error": "Сообщение не сохранено: неверный вид или слишком большое."}));
+    }
+    let _g = HISTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut all = read_history();
+    all.push(p);
+    let start = all.len().saturating_sub(MAX_MESSAGES);
+    match write_history(&all[start..]) {
+        Ok(()) => Json(json!({"ok": true})),
+        Err(e) => Json(json!({"ok": false, "error": format!("Не удалось сохранить историю: {e}")})),
+    }
+}
+
+async fn handle_clear() -> impl IntoResponse {
+    let _g = HISTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    match write_history(&[]) {
+        Ok(()) => Json(json!({"ok": true})),
+        Err(e) => Json(json!({"ok": false, "error": format!("Не удалось очистить историю: {e}")})),
+    }
+}
+
 pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
-    Router::new().route("/api/local/chat", post(handle_chat).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
+    Router::new()
+        .route("/api/local/chat", post(handle_chat).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
+        .route("/api/local/history", get(handle_history))
+        .route("/api/local/message", post(handle_save_message).layer(axum::extract::DefaultBodyLimit::max(256 * 1024)))
+        .route("/api/local/clear", post(handle_clear))
 }
