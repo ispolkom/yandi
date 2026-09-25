@@ -381,6 +381,58 @@ fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
                 other => return Err(format!("нет метода {other}")),
             }
         }
+        name if name.starts_with("bm_") => {
+            use crate::belief_manager as bm;
+            use std::cell::RefCell;
+            let strs = |k: &str| -> Vec<String> { a.get(k).and_then(|v| v.as_array()).map(|x| x.iter().map(|e| e.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default() };
+            let st = |k: &str| a_str(a, k).unwrap_or_default();
+            // подмена шлюза: «вложения» из заданной карты «текст → вектор» (нет карты → недоступно), «судья» — сценарий ответов
+            let embed_map: Option<serde_json::Map<String, Value>> = a.get("embed_map").and_then(|v| v.as_object()).cloned();
+            let embed_calls: RefCell<Vec<Value>> = RefCell::new(vec![]);
+            let embed = |texts: &[String]| -> Option<Vec<Vec<f32>>> {
+                embed_calls.borrow_mut().push(json!(texts));
+                let m = embed_map.as_ref()?;
+                Some(texts.iter().map(|t| m.get(t).and_then(|v| v.as_array()).map(|x| x.iter().map(|e| e.as_f64().unwrap_or(0.0) as f32).collect()).unwrap_or_else(|| vec![1.0, 0.0, 0.0])).collect())
+            };
+            let queue: RefCell<Vec<String>> = RefCell::new(strs("judge_responses"));
+            let prompts: RefCell<Vec<Value>> = RefCell::new(vec![]);
+            let judge = |prompt: &str| -> Result<String, String> {
+                prompts.borrow_mut().push(json!(prompt));
+                let r = if queue.borrow().is_empty() { String::new() } else { queue.borrow_mut().remove(0) };
+                match r.strip_prefix("__raise__:") {
+                    Some(name) => Err(name.to_string()),
+                    None => Ok(r),
+                }
+            };
+            let out = match &name[3..] {
+                "apply_decay" => {
+                    bm::apply_decay(cx)?;
+                    Value::Null
+                }
+                "add_belief" => {
+                    let b = bm::add_belief(cx, &st("topic"), &st("statement"), a_f(a, "confidence"), &strs("evidence_for"), &strs("evidence_against"), &strs("claim_ids"), a.get("prior").and_then(|v| v.as_f64()).unwrap_or(0.5), &embed, &judge)?;
+                    b.to_json()
+                }
+                "challenge_belief" => match bm::challenge_belief(cx, &st("belief_id"), &st("counter_evidence"), a_f(a, "new_confidence"), &st("reason"))? {
+                    Some(b) => b.to_json(),
+                    None => Value::Null,
+                },
+                "supersede_belief" => json!(bm::supersede_belief(cx, &st("old_belief_id"), &st("new_belief_id"))?),
+                "get_beliefs_by_topic" => json!(bm::get_beliefs_by_topic(cx, &st("topic"))?.iter().map(|b| b.to_json()).collect::<Vec<_>>()),
+                "get_all_active" => json!(bm::get_all_active(cx)?.iter().map(|b| b.to_json()).collect::<Vec<_>>()),
+                "get_all" => json!(bm::get_all(cx)?.iter().map(|b| b.to_json()).collect::<Vec<_>>()),
+                "get_belief" => match bm::get_belief(cx, &st("belief_id"))? {
+                    Some(b) => b.to_json(),
+                    None => Value::Null,
+                },
+                "get_belief_history" => bm::get_belief_history(cx, &st("belief_id"))?,
+                "get_contradictory" => json!(bm::get_contradictory(cx, a.get("min_score").and_then(|v| v.as_f64()).unwrap_or(0.5))?.iter().map(|b| b.to_json()).collect::<Vec<_>>()),
+                "get_stats" => bm::get_stats(cx)?,
+                "summary" => json!(bm::summary(cx)?),
+                other => return Err(format!("нет метода {other}")),
+            };
+            json!({"out": out, "embed_calls": embed_calls.into_inner(), "prompts": prompts.into_inner()})
+        }
         other => yandi_db::repo::call(cx.conn, other, a)?,
     })
 }

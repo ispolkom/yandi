@@ -40,6 +40,9 @@ async fn whole_turn_runs_through_native_core_and_gateway() {
     std::env::remove_var("YANDI_EXTRACTION_MODEL");
     std::env::remove_var("YANDI_VERIFIER_MODEL");
 
+    // главный ключ узла (после входа): личные слова должны лечь в базу запечатанными
+    yandi::web::pet_chat::set_master_key_provider(Box::new(|| Some([7u8; 32])));
+
     let script = Arc::new(Script { answers: Mutex::new(VecDeque::new()), seen: Mutex::new(vec![]) });
     let svc = serve(Router::new().route("/v1/chat/completions", post(fake_service)).with_state(script.clone())).await;
     let base = serve(yandi::web::ai_api::router::<()>().merge(yandi::web::pet_chat::router::<()>())).await;
@@ -76,6 +79,10 @@ async fn whole_turn_runs_through_native_core_and_gateway() {
     }
     // ход записан одной транзакцией: реплика + обида
     let db = yandi_db::Db::open(&dir.join("yandi.sqlite")).unwrap();
+    let stored: String = db.conn().query_row("SELECT user_text FROM interaction_turn WHERE source_turn_id=?", [turn], |r| r.get(0)).unwrap();
+    assert!(stored.starts_with("yp1:") && !stored.contains("тупая"), "слова человека лежат в базе запечатанными: {stored}");
+    let g_text: String = db.conn().query_row("SELECT description FROM grievance", [], |r| r.get(0)).unwrap();
+    assert!(g_text.starts_with("yp1:"), "описание обиды запечатано");
     let n: i64 = db.conn().query_row("SELECT COUNT(*) FROM interaction_turn WHERE source_turn_id=?", [turn], |r| r.get(0)).unwrap();
     assert_eq!(n, 1);
     let g: i64 = db.conn().query_row("SELECT COUNT(*) FROM grievance", [], |r| r.get(0)).unwrap();

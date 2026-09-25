@@ -23,6 +23,57 @@ fn db() -> Result<&'static Mutex<yandi_db::Db>, String> {
         .map_err(|e| e.clone())
 }
 
+// ---------------------------------------------------------------- защита личных слов «в покое»
+
+/// Откуда взять главный ключ узла (после входа человека). Если не задан (тесты, разработка без входа) — защита не включается, база работает как открытая.
+pub type MasterKeyProvider = Box<dyn Fn() -> Option<[u8; 32]> + Send + Sync>;
+
+static KEY_PROVIDER: OnceLock<MasterKeyProvider> = OnceLock::new();
+static INSTALLED_KEY: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+pub fn set_master_key_provider(p: MasterKeyProvider) {
+    let _ = KEY_PROVIDER.set(p);
+}
+
+/// Ключ ядра = `HKDF-SHA256(главный ключ, info = "yandi/core/v1")` — тот же, что узел отдаёт ядру на Python: одни и те же данные открываются любым из двух.
+fn derive_core_key(master: &[u8; 32]) -> [u8; 32] {
+    let mut okm = [0u8; 32];
+    hkdf::Hkdf::<sha2::Sha256>::new(None, master).expand(b"yandi/core/v1", &mut okm).expect("32 байта — допустимая длина HKDF-SHA256");
+    okm
+}
+
+/// Ставит ключ защиты полей (один раз на смену ключа). `Ok(false)` — провайдера нет (защита не используется), `Err` — узел заперт (вход не выполнен).
+fn ensure_key() -> Result<bool, String> {
+    let Some(provider) = KEY_PROVIDER.get() else {
+        return Ok(false);
+    };
+    let Some(master) = provider() else {
+        return Err("Личная память заперта: сначала войдите в узел (мастер-пароль).".into());
+    };
+    let core = derive_core_key(&master);
+    let mut installed = INSTALLED_KEY.lock().unwrap_or_else(|e| e.into_inner());
+    if *installed != Some(core) {
+        yandi_db::repo::field_protection::install_key(&core).map_err(|e| format!("не удалось установить ключ защиты: {e}"))?;
+        *installed = Some(core);
+    }
+    Ok(true)
+}
+
+/// Готовит базу к ходу: ключ установлен; если защита ещё не включена, слова человека запечатываются (утилита измеряет содержимое до и после — при любом расхождении откат). Заперто
+/// (защита включена, а ключа нет) — честная ошибка вместо тихой потери памяти.
+fn prepare(conn: &yandi_db::rusqlite::Connection) -> Result<(), String> {
+    let keyed = ensure_key()?;
+    let mode = yandi_db::repo::field_protection::read_mode(conn).map_err(|e| format!("не удалось прочитать режим защиты: {e}"))?;
+    if !keyed {
+        return if mode == "on" { Err("Личная память защищена, а ключа нет: откройте узел через вход.".into()) } else { Ok(()) };
+    }
+    if mode == "off" {
+        let key = INSTALLED_KEY.lock().unwrap_or_else(|e| e.into_inner()).ok_or("нет ключа")?;
+        yandi_db::protect::seal_all(conn, &key, &mut |m| eprintln!("[защита] {m}")).map_err(|e| format!("Не удалось включить шифрование личной памяти: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Какая логическая модель отвечает на СТРУКТУРНЫЕ вызовы: указанная владельцем через окружение, иначе сама модель чата. Скрытой подмены нет.
 fn structured_target(chat_model: &str, envs: &[&str]) -> String {
     for name in envs {
@@ -67,6 +118,7 @@ fn semantic_call(model: &str, system: &[Option<String>], messages: &[Value], tem
 /// Один ход в блокирующем потоке (база и модель синхронные).
 fn run_turn(model: String, messages: Vec<Value>, temperature: f64, turn_id: Option<String>) -> Result<String, String> {
     let guard = db()?.lock().map_err(|_| "база занята другим сбоем".to_string())?;
+    prepare(guard.conn())?;
     let cx = Ctx::new(guard.conn());
     // «Кто Я» (метаданные характера); недоступно — просто без этого сообщения, ответ от него не зависит
     let character: Option<Value> = self_model::init(&cx).ok().and_then(|_| self_model::row(&cx).ok()).map(|r| r["metadata"].get("character").cloned().unwrap_or_else(|| json!({})));

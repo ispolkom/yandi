@@ -381,6 +381,11 @@ impl WebServer {
 
     /// Создать роутер
     fn create_router(&self, state_for_auth: AppState) -> Router<AppState> {
+        {
+            // личная память Помощницы запечатывается ключом, выведенным из главного ключа узла (он появляется после входа)
+            let auth = self.state.auth_state.clone();
+            crate::web::pet_chat::set_master_key_provider(Box::new(move || auth.get_master_key()));
+        }
         Router::new()
             // HTML pages (protected)
             .route("/", get(index_handler))
