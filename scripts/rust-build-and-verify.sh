@@ -25,7 +25,7 @@ export VIRTUAL_ENV="$(dirname "$VENV_BIN")"
 ( cd rustlib/yandi_rs && PATH="$VENV_BIN:$PATH" maturin develop --release 2>&1 | tail -3 ) || { echo "ОШИБКА: сборка не удалась"; exit 1; }
 "$PY" -c "import yandi_rs; print('yandi_rs собран и импортируется:', yandi_rs.__file__)" || exit 1
 # родной шлюз к моделям (rustlib/yandi_llm): юнит-тесты без Python + мост для дифференциальных тестов против llm_gateway
-( cd rustlib/yandi_llm && cargo test --no-default-features --lib 2>&1 | tail -3 && PATH="$VENV_BIN:$PATH" maturin develop --release 2>&1 | tail -2 ) || { echo "ОШИБКА: сборка yandi_llm не удалась"; exit 1; }
+( cd rustlib/yandi_llm && cargo test --no-default-features --lib 2>&1 | tail -3 && cargo test --no-default-features --test server_engine_test -- --test-threads=1 2>&1 | tail -3 && PATH="$VENV_BIN:$PATH" maturin develop --release 2>&1 | tail -2 ) || { echo "ОШИБКА: сборка yandi_llm не удалась"; exit 1; }
 # встроенное хранилище состояния (замена Redis): юнит-тесты + мост для сверки с НАСТОЯЩИМ redis-server (нужен redis-server в PATH, иначе тест пропускается)
 ( cd rustlib/yandi_state && cargo test --no-default-features --lib 2>&1 | tail -3 && PATH="$VENV_BIN:$PATH" maturin develop --release 2>&1 | tail -2 ) || { echo "ОШИБКА: сборка yandi_state не удалась"; exit 1; }
 

@@ -11,6 +11,7 @@ pub mod messages;
 pub mod pyfmt;
 pub mod remote;
 pub mod secure_store;
+pub mod server_engine;
 pub mod semantic;
 pub mod transport;
 pub mod types;
