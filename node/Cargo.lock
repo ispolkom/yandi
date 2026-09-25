@@ -5078,6 +5078,7 @@ dependencies = [
  "x25519-dalek",
  "yandi-core-supervisor",
  "yandi-key-root",
+ "yandi_core",
  "yandi_db",
  "yandi_llm",
  "yandi_rs",
@@ -5118,6 +5119,18 @@ dependencies = [
  "sha2",
  "tempfile",
  "zeroize",
+]
+
+[[package]]
+name = "yandi_core"
+version = "0.1.0"
+dependencies = [
+ "once_cell",
+ "rand 0.8.6",
+ "regex",
+ "serde_json",
+ "yandi_db",
+ "yandi_rs",
 ]
 
 [[package]]
