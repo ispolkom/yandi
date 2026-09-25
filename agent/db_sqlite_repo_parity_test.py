@@ -128,10 +128,7 @@ def main() -> int:
             rows = []
             for r in cur.fetchall():
                 r = norm(r)
-                for c in list(r):
-                    if (t, c) in json_cols and isinstance(r[c], str):
-                        r[c] = json.loads(r[c])
-                rows.append(r)
+                rows.append(r)   # JSON-столбцы сравниваются СЫРЫМ текстом: MySQL нормализует JSON, родная версия обязана записать то же самое
             out[t] = rows
         return out
 
@@ -140,10 +137,6 @@ def main() -> int:
         for t in tables:
             order = ", ".join(pk.get(t, ["1"]))
             rows = json.loads(yandi_db.query(state["h"], f"SELECT * FROM {t} ORDER BY {order}"))
-            for r in rows:
-                for c in list(r):
-                    if (t, c) in json_cols and isinstance(r[c], str):
-                        r[c] = json.loads(r[c])
             out[t] = rows
         return out
 
@@ -214,6 +207,8 @@ def main() -> int:
         ("get_or_create_claim_family", dict(family_id="f1", domain="science", canonical_text="ДРУГОЙ ТЕКСТ", created_at=T2)),
         ("get_or_create_claim_family", dict(family_id="f2", domain="science", canonical_text="Вода мокрая", created_at=T0)),
         ("get_or_create_claim_family", dict(family_id="f3", domain="history", canonical_text="Рим пал", created_at=T1)),
+        ("get_or_create_claim_family", dict(family_id="f4", domain="science", canonical_text="Лёд холодный", created_at=T2)),
+        ("get_or_create_claim_family", dict(family_id="f0", domain="science", canonical_text="Огонь горячий", created_at="2026-02-01 00:00:00")),
         ("link_family_member", dict(family_id="f1", claim_id="c1", linked_at=T0)),
         ("link_family_member", dict(family_id="f1", claim_id="c1", linked_at=T2)),
         ("link_family_member", dict(family_id="f1", claim_id="c2", linked_at=T1)),
@@ -275,7 +270,7 @@ def main() -> int:
     misc = [
         ("resolve_question", dict(raw_text="вопрос", anonymized_text=None, asked_at=T0)),
         ("start_run", dict(run_id="r1", occurrence_id=1, started_at=T0)),
-        ("record_trace_record", dict(run_id="r1", execution={"a": 1, "б": [1, 2.5, None, True]}, reasoning="строка", cost={"tokens": 12}, epistemic=None, outcome={"ok": True}, learning=[], confidence_evolution={"k": {"x": 0.1}}, rejected_claims=["a"], claims_filtered_count=3, claims_rejected_count=1, created_at=T0)),
+        ("record_trace_record", dict(run_id="r1", execution={"a": 1, "б": [1, 2.5, None, True], "длинный_ключ": {"zz": 1, "a": 2, "bbb": 3, "B": 4}, "k": 0.5}, reasoning="строка", cost={"tokens": 12}, epistemic=None, outcome={"ok": True}, learning=[], confidence_evolution={"k": {"x": 0.1}}, rejected_claims=["a"], claims_filtered_count=3, claims_rejected_count=1, created_at=T0)),
         ("get_trace_record", dict(run_id="r1")),
         ("get_trace_record", dict(run_id="none")),
         ("record_delayed_validation_event", dict(event_id="e1", run_id="r1", trace_found=True, original_trust="HIGH", source="peer", verdict="confirmed", reason="р" * 700, raw="x" * 2500, created_at=T0)),
@@ -360,6 +355,7 @@ def main() -> int:
         ("record_grievance", dict(grievance_id="g2", user_id="u1", event_type="rude", description="yp1:похоже на запечатанное", severity=0.3, created_at=T1)),
         ("record_grievance", dict(grievance_id="g3", user_id="u1", event_type="rude", description="yp0:ещё хитрее", severity=0.2, context=None, created_at=T2)),
         ("record_grievance", dict(grievance_id="g4", user_id="u2", event_type="x", description="Другой человек", severity=0.9, context=[1, 2], created_at=T0)),
+        ("record_grievance", dict(grievance_id="g5", user_id="u1", event_type="insult", description="Ты сказал мне что-то обидное снова, и опять", severity=0.8, created_at="2026-03-01 10:05:00")),
         ("get_grievance", dict(grievance_id="g1")),
         ("get_grievance", dict(grievance_id="g2")),
         ("get_grievance", dict(grievance_id="g3")),
@@ -667,6 +663,24 @@ def main() -> int:
         ("claim_causal_event", dict(user_id="u1", source_turn_id="t1", event_type="x", created_at=TS[0])),
     ])   # NULL в NOT NULL при INSERT IGNORE MySQL молча превращает в '' — вызывающие никогда так не делают, не воспроизводится
 
+    # ---- reconcile_stale_running_runs: зависит от часов, поэтому проверяется отдельно (время завершения не сравнивается) ----
+    reset()
+    n += 1
+    for f, kw in [("resolve_question", dict(raw_text="q", anonymized_text=None, asked_at=TS[0])),
+                  ("start_run", dict(run_id="old", occurrence_id=1, started_at="2020-01-01 00:00:00")),
+                  ("start_run", dict(run_id="future", occurrence_id=1, started_at="2099-01-01 00:00:00")),
+                  ("start_run", dict(run_id="done", occurrence_id=1, started_at="2020-01-01 00:00:00")),
+                  ("complete_run", dict(run_id="done", completed_at=TS[1]))]:
+        py_call(f, kw), rs_call(f, kw)
+    p1, r1 = py_call("reconcile_stale_running_runs", dict()), rs_call("reconcile_stale_running_runs", dict())
+    check("K1 reconcile: число строк", p1 == {"ok": 1} and r1 == {"ok": 1}, f"{p1} {r1}")
+    cur.execute("SELECT run_id, status FROM verification_run ORDER BY run_id")
+    st_py = {r["run_id"]: r["status"] for r in cur.fetchall()}
+    st_rs = {r["run_id"]: r["status"] for r in json.loads(yandi_db.query(state["h"], "SELECT run_id, status FROM verification_run"))}
+    check("K1 reconcile: статусы запусков", st_py == st_rs == {"old": "aborted", "future": "running", "done": "completed"}, f"{st_py} {st_rs}")
+    p2, r2 = py_call("reconcile_stale_running_runs", dict(older_than_seconds=10**9)), rs_call("reconcile_stale_running_runs", dict(older_than_seconds=10**9))
+    check("K1 reconcile: очень большой порог", p2 == r2, f"{p2} {r2}")
+
     # ---- защита полей ВКЛЮЧЕНА: значения запечатаны, запись без ключа отвергается, чужой ключ — подделка ----
     core_key = bytes(range(1, 33))
     def enable_protection(mode, key=core_key, proof_key_from=core_key):
@@ -760,7 +774,7 @@ def main() -> int:
         check(f"H5 чужой ключ · {func}", p.get("error") == "StorageTampered" and rc == "StorageTampered", f"py={p} rs={r}")
     fp.clear_key(); yandi_db.fp_clear_key()
     with_key(core_key)
-    cur.execute("INSERT INTO storage_protection_event (mode, nonce, proof, created_at) VALUES ('on', 'ab', UNHEX(REPEAT('00',32)), %s)", (T2,)); yandi_db.exec_sql(state["h"], "INSERT INTO storage_protection_event (mode, nonce, proof, created_at) VALUES ('on', 'ab', ?, ?)", json.dumps([{"hex": "00" * 32}, T2]))
+    cur.execute("INSERT INTO storage_protection_event (mode, nonce, proof, created_at) VALUES ('off', 'ab', UNHEX(REPEAT('00',32)), %s)", (T2,)); yandi_db.exec_sql(state["h"], "INSERT INTO storage_protection_event (mode, nonce, proof, created_at) VALUES ('off', 'ab', ?, ?)", json.dumps([{"hex": "00" * 32}, T2]))
     fp.forget_mode(); yandi_db.fp_forget_mode()
     ins = "INSERT INTO grievance (id, user_id, event_type, description, severity, status, created_at, updated_at) VALUES (%s,%s,%s,%s,%s,'registered',%s,%s)"
     plain = ("gy", "u1", "e", "открытый текст", 0.1, T0, T0)
