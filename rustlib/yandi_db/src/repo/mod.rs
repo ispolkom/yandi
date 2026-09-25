@@ -21,13 +21,13 @@ pub mod views;
 pub type Row = Map<String, Value>;
 pub type R<T> = Result<T, String>;
 
-pub(crate) fn err<T: std::fmt::Display>(x: T) -> String {
+pub fn err<T: std::fmt::Display>(x: T) -> String {
     x.to_string()
 }
 
 // ---------------------------------------------------------------- SQL-помощники
 
-pub(crate) fn rows(c: &Connection, sql: &str, args: Vec<Sql>) -> R<Vec<Row>> {
+pub fn rows(c: &Connection, sql: &str, args: Vec<Sql>) -> R<Vec<Row>> {
     let mut st = c.prepare(sql).map_err(err)?;
     let names: Vec<String> = st.column_names().iter().map(|s| s.to_string()).collect();
     let mut q = st.query(params_from_iter(args)).map_err(err)?;
@@ -49,12 +49,12 @@ pub(crate) fn rows(c: &Connection, sql: &str, args: Vec<Sql>) -> R<Vec<Row>> {
     Ok(out)
 }
 
-pub(crate) fn row(c: &Connection, sql: &str, args: Vec<Sql>) -> R<Option<Row>> {
+pub fn row(c: &Connection, sql: &str, args: Vec<Sql>) -> R<Option<Row>> {
     Ok(rows(c, sql, args)?.into_iter().next())
 }
 
 /// Выполнить изменяющий запрос: `(число затронутых строк, последний rowid)`.
-pub(crate) fn exec(c: &Connection, sql: &str, args: Vec<Sql>) -> R<(usize, i64)> {
+pub fn exec(c: &Connection, sql: &str, args: Vec<Sql>) -> R<(usize, i64)> {
     let n = c.prepare(sql).map_err(err)?.execute(params_from_iter(args)).map_err(err)?;
     Ok((n, c.last_insert_rowid()))
 }
@@ -69,13 +69,13 @@ pub(crate) fn exec_ignore(c: &Connection, sql: &str, args: Vec<Sql>) -> R<(usize
 
 // ---------------------------------------------------------------- значения
 
-pub(crate) fn sv(x: &str) -> Sql {
+pub fn sv(x: &str) -> Sql {
     Sql::Text(x.to_string())
 }
 pub(crate) fn osv(x: Option<&str>) -> Sql {
     x.map(sv).unwrap_or(Sql::Null)
 }
-pub(crate) fn iv(x: i64) -> Sql {
+pub fn iv(x: i64) -> Sql {
     Sql::Integer(x)
 }
 pub(crate) fn oiv(x: Option<i64>) -> Sql {
@@ -222,7 +222,7 @@ pub(crate) fn dt_or_now(v: Option<&Value>) -> R<String> {
 }
 
 /// `YYYY-MM-DD[ T]HH:MM:SS[.дробь]` → `YYYY-MM-DD HH:MM:SS` с округлением дроби (MySQL DATETIME(0)); прочее остаётся как есть.
-pub(crate) fn normalize_dt_string(s: &str) -> String {
+pub fn normalize_dt_string(s: &str) -> String {
     let b = s.as_bytes();
     let ok = b.len() >= 19 && b[4] == b'-' && b[7] == b'-' && (b[10] == b' ' || b[10] == b'T') && b[13] == b':' && b[16] == b':';
     if !ok {

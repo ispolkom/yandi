@@ -10,6 +10,7 @@ use rusqlite::{params, Connection};
 
 /// Версия схемы, из которой сгенерированы `schema_sqlite.sql` / `triggers_sqlite.sql`.
 pub mod integrity;
+pub mod protect;
 pub mod repo;
 
 #[cfg(feature = "python")]

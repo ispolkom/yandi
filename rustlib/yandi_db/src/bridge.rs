@@ -105,6 +105,40 @@ fn integrity_call(name: &str, args_json: &str) -> PyResult<String> {
     .to_string())
 }
 
+/// Утилита защиты личного журнала: `protect_call(handle, name, args_json) -> {"ok": …, "log": […]} | {"error": "…", "log": […]}`.
+#[pyfunction]
+fn protect_call(py: Python<'_>, handle: u64, name: &str, args_json: &str) -> PyResult<String> {
+    let args: Value = serde_json::from_str(args_json).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let name = name.to_string();
+    let out = py.allow_threads(move || {
+        with_db(handle, |db| {
+            let hex = |k: &str| -> Vec<u8> {
+                let h = args.get(k).and_then(|v| v.as_str()).unwrap_or("");
+                (0..h.len() / 2).map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).unwrap_or(0)).collect()
+            };
+            let path = std::path::PathBuf::from(args.get("path").and_then(|v| v.as_str()).unwrap_or(""));
+            let mut log: Vec<String> = Vec::new();
+            let mut lg = |m: &str| log.push(m.to_string());
+            let c = db.conn();
+            let r = match name.as_str() {
+                "status" => crate::protect::status(c),
+                "seal" => crate::protect::seal_all(c, &hex("key"), &mut lg),
+                "unseal" => crate::protect::unseal_all(c, &hex("key"), &mut lg),
+                "backup" => crate::protect::backup(c, &hex("key"), &path, &mut lg),
+                "restore" => crate::protect::restore(c, &hex("key"), &path, &mut lg),
+                other => Err(format!("неизвестная функция {other}")),
+            };
+            (r, log)
+        })
+    });
+    Ok(match out {
+        Ok((Ok(v), log)) => json!({"ok": v, "log": log}),
+        Ok((Err(e), log)) => json!({"error": e, "log": log}),
+        Err(e) => json!({"error": e, "log": []}),
+    }
+    .to_string())
+}
+
 #[pymodule]
 fn yandi_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(open_memory, m)?)?;
@@ -116,5 +150,6 @@ fn yandi_db(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fp_forget_mode, m)?)?;
     m.add_function(wrap_pyfunction!(exec_sql, m)?)?;
     m.add_function(wrap_pyfunction!(integrity_call, m)?)?;
+    m.add_function(wrap_pyfunction!(protect_call, m)?)?;
     Ok(())
 }

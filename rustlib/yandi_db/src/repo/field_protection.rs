@@ -81,7 +81,7 @@ pub fn mode_proof(proof_key: &[u8], nonce: &str, mode: &str) -> Vec<u8> {
     m.finalize().into_bytes().to_vec()
 }
 
-fn read_mode(c: &Connection) -> R<String> {
+pub fn read_mode(c: &Connection) -> R<String> {
     let rec = c.query_row("SELECT mode, nonce, proof FROM storage_protection_event ORDER BY event_id DESC LIMIT 1", [], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<Vec<u8>>>(2)?)));
     let (mode, nonce, proof) = match rec {
         Ok(x) => x,
@@ -206,4 +206,23 @@ pub fn open_rows(c: &Connection, table: &str, rows: &mut [Row], known: Option<&M
         open_row(c, table, r, known)?;
     }
     Ok(())
+}
+
+/// Запись нового режима (режим, nonce, proof) — только процесс с ключом (`new_mode_record`).
+pub fn new_mode_record(mode: &str) -> R<(String, String, Vec<u8>)> {
+    use rand::RngCore;
+    if !["off", "migrating", "on"].contains(&mode) {
+        return Err("ValueError: unknown mode".into());
+    }
+    let pk = st().proof_key.clone().ok_or("StorageLocked: a mode record can only be written by a process that holds the key")?;
+    let mut b = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut b);
+    let nonce: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    let proof = mode_proof(&pk, &nonce, mode);
+    Ok((mode.to_string(), nonce, proof))
+}
+
+/// Ключ хранения, установленный в этом процессе (только для утилиты перепечатывания).
+pub fn storage_key() -> Option<Vec<u8>> {
+    st().key.clone()
 }
