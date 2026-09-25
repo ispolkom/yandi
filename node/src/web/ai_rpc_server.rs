@@ -77,10 +77,28 @@ fn build_router(state: AppState) -> Router {
         .route("/api/ai-rpc/fetch", post(handle_fetch))
         .route("/api/ai-rpc/knowledge/store", post(handle_kb_store))
         .route("/api/ai-rpc/knowledge/search", post(handle_kb_search))
+        .merge(gateway_router())
         .with_state(state)
 }
 
+/// Единый шлюз к моделям для ядра на Python: настройки владельца → собственный движок узла (loopback, как и весь этот сервер).
+pub fn gateway_router<S: Clone + Send + Sync + 'static>() -> Router<S> {
+    Router::new().route("/api/gateway/call", post(handle_gateway_call).layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
+}
+
 // ── Handlers ───────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct GatewayCallRequest {
+    name: String,
+    #[serde(default)]
+    args: serde_json::Value,
+}
+
+async fn handle_gateway_call(Json(req): Json<GatewayCallRequest>) -> impl IntoResponse {
+    let (status, body) = crate::ai_rpc::intelligence_bridge::gateway_call(req.name, req.args).await;
+    (StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), Json(body))
+}
 
 async fn handle_status(State(state): State<AppState>) -> impl IntoResponse {
     let status = state.svc.lock().await.status().await;

@@ -6,6 +6,7 @@
 //! перечислены в README и в тестах); (2) тексты ошибок JSON — точные тексты Python (`yandi_rs::py_json`); (3) порядок ключей словарей сохраняется
 //! (`serde_json` с `preserve_order`) — он виден вызывающим при `json.dumps`/сравнении.
 
+pub mod api;
 pub mod client;
 pub mod engine_binary;
 pub mod intelligence;

@@ -94,6 +94,27 @@ impl NativeIntelligence {
     }
 }
 
+impl NativeIntelligence {
+    /// Общий вызов шлюза для ядра на Python (`complete`/`embed`/…): те же настройки владельца и тот же движок, что у моста интеллекта.
+    fn call_blocking(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+        use yandi_llm::client::{Gateway, GatewayOptions, SecureStoreConfig};
+        static TRANSPORT: OnceLock<yandi_llm::transport::ReqwestTransport> = OnceLock::new();
+        let transport = TRANSPORT.get_or_init(yandi_llm::transport::ReqwestTransport::new);
+        let gw = Gateway { transport, config: &SecureStoreConfig, engine: &self.engine, opts: GatewayOptions::from_env() };
+        yandi_llm::api::gateway_call(&gw, name, args)
+    }
+}
+
+/// Для локального HTTP узла (`POST /api/gateway/call`): `(HTTP-статус, тело)`. Тело — `{"ok": …}` / `{"error": {"class", "msg"}}` как у `yandi_llm::api`.
+pub async fn gateway_call(name: String, args: serde_json::Value) -> (u16, serde_json::Value) {
+    let native = NativeIntelligence::shared();
+    match tokio::task::spawn_blocking(move || native.call_blocking(&name, &args)).await {
+        Ok(Ok(v)) => (200, v),
+        Ok(Err(e)) => (400, serde_json::json!({"error": {"class": "BadRequest", "msg": e}})),
+        Err(e) => (500, serde_json::json!({"error": {"class": "InternalError", "msg": e.to_string()}})),
+    }
+}
+
 /// Какой мост использовать: `YANDI_INTELLIGENCE_ENGINE=native|python`; по умолчанию — родной, если в бинарник вшит движок
 /// (`YANDI_EMBED_LLAMA_SERVER` при сборке), иначе прежний Python-мост.
 pub fn use_native() -> bool {

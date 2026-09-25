@@ -3,11 +3,11 @@
 use pyo3::prelude::*;
 use serde_json::{json, Map, Value};
 
-use crate::messages::{append_system_instruction, build_messages, SystemArg};
+use crate::messages::{append_system_instruction, build_messages};
 use crate::remote::{self, GenerateParams};
 use crate::transport::ReqwestTransport;
 use crate::secure_store as store;
-use crate::client::{self, ConfigSource, CompleteParams, Gateway, GatewayOptions, ModelSpec, UnavailableEngine};
+use crate::client::{self, ConfigSource, Gateway, GatewayOptions, ModelSpec, UnavailableEngine};
 use crate::semantic::*;
 use crate::types::*;
 use crate::vector_space::*;
@@ -40,34 +40,7 @@ fn gateway_parts(a: &dyn Fn(&str) -> Value) -> (MockConfig, UnavailableEngine, G
     (cfg, eng, opts)
 }
 
-fn complete_params(a: &dyn Fn(&str) -> Value) -> CompleteParams {
-    CompleteParams {
-        temperature: a("temperature").as_f64(),
-        max_tokens: a("max_tokens").as_i64(),
-        timeout: a("timeout").as_u64().unwrap_or(client::DEFAULT_TIMEOUT),
-        strip_think: a("strip_think").as_bool().unwrap_or(true),
-        extra_options: match a("extra_options") {
-            Value::Object(o) => Some(o),
-            _ => None,
-        },
-        response_format: match a("response_format") {
-            Value::Null => None,
-            v => Some(v),
-        },
-        stop: match a("stop") {
-            Value::Array(x) => Some(x.iter().filter_map(|v| v.as_str().map(String::from)).collect()),
-            _ => None,
-        },
-    }
-}
-
-fn system_arg(v: &Value) -> SystemArg {
-    match v {
-        Value::String(s) => SystemArg::One(s.clone()),
-        Value::Array(a) => SystemArg::Many(a.iter().filter_map(|x| x.as_str().map(String::from)).collect()),
-        _ => SystemArg::None,
-    }
-}
+use crate::api::system_arg;
 
 fn dispatch(name: &str, args: &Value) -> Result<Value, String> {
     let a = |k: &str| args.get(k).cloned().unwrap_or(Value::Null);
@@ -163,37 +136,11 @@ fn dispatch(name: &str, args: &Value) -> Result<Value, String> {
             Ok(m) => json!({"ok": m}),
             Err(e) => json!({"error": {"kind": e.kind(), "msg": e.message()}}),
         },
-        "gw_complete" | "gw_complete_meta" | "gw_complete_semantic" => {
+        "gw_complete" | "gw_complete_meta" | "gw_complete_semantic" | "gw_embed" => {
             let (cfg, eng, opts) = gateway_parts(&a);
             let t = ReqwestTransport::new();
             let gw = Gateway { transport: &t, config: &cfg, engine: &eng, opts };
-            let msgs: Option<Vec<Value>> = match a("messages") {
-                Value::Array(m) => Some(m),
-                _ => None,
-            };
-            let prompt = a("prompt");
-            let model = a("model");
-            let base = a("base_url");
-            let sys = system_arg(&a("system"));
-            let p = complete_params(&a);
-            let err = |class: &str, msg: String| json!({"error": {"class": class, "msg": msg}});
-            match name {
-                "gw_complete" => match gw.complete_with_raw(prompt.as_str(), model.as_str().unwrap_or(""), &sys, msgs.as_deref(), base.as_str().unwrap_or(""), &p) {
-                    Ok((text, raw)) => json!({"ok": {"text": text, "raw": raw}}),
-                    Err(e) => err("LLMError", e.0),
-                },
-                "gw_complete_meta" => match gw.complete_with_meta(prompt.as_str(), model.as_str().unwrap_or(""), &sys, msgs.as_deref(), base.as_str().unwrap_or(""), &p) {
-                    Ok((text, truncated, count)) => json!({"ok": {"text": text, "truncated": truncated, "token_count": count}}),
-                    Err(e) => err("LLMError", e.0),
-                },
-                _ => {
-                    let req: SemanticOutputRequirement = serde_json::from_value(a("requirement")).map_err(|e| e.to_string())?;
-                    match gw.complete_semantic(prompt.as_str(), model.as_str().unwrap_or(""), &req, &sys, msgs.as_deref(), base.as_str().unwrap_or(""), &p) {
-                        Ok(r) => json!({"ok": serde_json::to_value(r).map_err(|e| e.to_string())?}),
-                        Err(e) => err("LLMError", e.0),
-                    }
-                }
-            }
+            crate::api::gateway_call(&gw, name, args)?
         }
         "intel_infer" => {
             let (cfg, eng, opts) = gateway_parts(&a);
@@ -203,20 +150,6 @@ fn dispatch(name: &str, args: &Value) -> Result<Value, String> {
             json!({"status": status, "body": body})
         }
         "location_kind" => json!(client::location_kind(&a("location").as_str().map(String::from))),
-        "gw_embed" => {
-            let (cfg, eng, opts) = gateway_parts(&a);
-            let t = ReqwestTransport::new();
-            let gw = Gateway { transport: &t, config: &cfg, engine: &eng, opts };
-            let texts: Vec<String> = match a("texts") {
-                Value::Array(x) => x.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
-                Value::String(s) => vec![s],
-                _ => vec![],
-            };
-            match gw.embed(&texts, a("model").as_str().unwrap_or(""), a("base_url").as_str().unwrap_or(""), a("timeout").as_u64().unwrap_or(client::DEFAULT_TIMEOUT)) {
-                Ok(r) => json!({"ok": {"vectors": r.vectors, "space": r.space.to_dict()}}),
-                Err(e) => json!({"error": {"class": "EmbedError", "msg": e.0}}),
-            }
-        }
         "remote_embed" => {
             let texts: Vec<String> = match a("texts") {
                 Value::Array(x) => x.iter().filter_map(|v| v.as_str().map(String::from)).collect(),

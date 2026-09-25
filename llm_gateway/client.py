@@ -83,6 +83,7 @@ from .types import (
 # заворачивают даже localhost-трафик — тот же самый источник багов,
 # что не раз всплывал в других частях проекта. trust_env=False обходит
 # это раз и навсегда прямо тут, а не в каждом файле по отдельности.
+from . import node_gateway
 _session = ollama_backend._session
 
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
@@ -705,6 +706,18 @@ def _do_complete(
     фоллбэк, как и раньше, только для NO_CONFIGURED_BACKEND случая.
 
     Возвращает очищенный текст и сырой словарь метаданных."""
+    if node_gateway.enabled():
+        # шлюз узла (Rust): настройки владельца и собственный движок живут там; локальный Python-путь не задействуется и не служит откатом
+        res = node_gateway.call(
+            "gw_complete",
+            dict(prompt=prompt, model=model, system=system, messages=messages, temperature=temperature, max_tokens=max_tokens,
+                 timeout=timeout, base_url=base_url, strip_think=strip_think, extra_options=extra_options,
+                 response_format=response_format, stop=stop),
+            timeout=timeout,
+        )
+        if "error" in res:
+            raise LLMError(res["error"]["msg"])
+        return res["ok"]["text"], res["ok"]["raw"]
     if prompt is None and messages is None:
         raise LLMError("complete() требует либо prompt, либо messages — ни один не задан")
     if prompt is not None and messages is not None:
@@ -785,6 +798,18 @@ def complete_semantic(
     an output contract from that target's capabilities, generates on
     the same target, and normalizes the response before returning it.
     """
+    if node_gateway.enabled():
+        import dataclasses
+        res = node_gateway.call(
+            "gw_complete_semantic",
+            dict(prompt=prompt, model=model, requirement=dataclasses.asdict(requirement), system=system, messages=messages,
+                 temperature=temperature, max_tokens=max_tokens, timeout=timeout, base_url=base_url,
+                 extra_options=extra_options, stop=stop),
+            timeout=timeout,
+        )
+        if "error" in res:
+            raise LLMError(res["error"]["msg"])
+        return SemanticCompletionResult(**res["ok"])
     if prompt is None and messages is None:
         raise LLMError("complete_semantic() требует либо prompt, либо messages — ни один не задан")
     if prompt is not None and messages is not None:
@@ -1171,6 +1196,11 @@ def embed(
     text_list = [texts] if isinstance(texts, str) else list(texts)
     if not text_list:
         raise EmbedError("embed() вызван с пустым списком текстов")
+    if node_gateway.enabled():
+        res = node_gateway.call("gw_embed", dict(texts=text_list, model=model, base_url=base_url, timeout=timeout), timeout=timeout)
+        if "error" in res:
+            raise EmbedError(res["error"]["msg"])
+        return EmbeddingResult(vectors=res["ok"]["vectors"], space=vector_space.VectorSpaceId(**{k: v for k, v in res["ok"]["space"].items() if k != "fingerprint"}))
 
     vectors: list[list[float]] | None = None
     space: vector_space.VectorSpaceId | None = None
