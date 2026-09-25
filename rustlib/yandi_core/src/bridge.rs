@@ -209,6 +209,23 @@ fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
             };
             json!({"out": out, "prompts": prompts.into_inner()})
         }
+        "cp_call" => {
+            use crate::chat_prompts as cp;
+            let v = a.get("value");
+            match a_str(a, "fn").as_deref().unwrap_or("") {
+                "memory_context" => json!(cp::memory_context_message(v.filter(|x| !x.is_null()))?),
+                "past" => json!(cp::past_conversation_message(v)?),
+                "facts" => json!(cp::personal_facts_message(v)?),
+                "verified" => json!(cp::verified_digest_message(v)),
+                "self" => json!(cp::self_knowledge_message(v.filter(|x| !x.is_null()))),
+                "relation" => json!(cp::interlocutor_relation_message()),
+                "quote" => json!(cp::memory_quote(v.and_then(|x| x.as_str()).unwrap_or(""))),
+                "clean" => json!(cp::clean_response(v.and_then(|x| x.as_str()).unwrap_or(""))),
+                "dedup" => json!(cp::dedup_paragraphs(v.and_then(|x| x.as_str()).unwrap_or(""))),
+                "constants" => json!({"prompt": cp::BASE_CHARACTER_PROMPT, "stop": cp::stop_tokens(), "failure": cp::failure_reply()}),
+                other => return Err(format!("нет функции {other}")),
+            }
+        }
         "pf_list_facts" => json!(pf::list_facts(cx, &uid)?),
         "pf_record_turn_facts" => {
             let facts: Vec<pf::ExtractedFact> = a.get("facts").and_then(|v| v.as_array()).map(|x| x.iter().map(pf::ExtractedFact::from_json).collect()).unwrap_or_default();

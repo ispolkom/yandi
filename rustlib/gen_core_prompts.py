@@ -15,7 +15,23 @@ JOBS = [
 ]
 
 
+DATA_JOBS = [
+    # (модуль, {имя_в_модуле: файл}) — значения любого типа сохраняются как JSON
+    ("pet.chat_local", {"_BASE_CHARACTER_PROMPT": "chat_character_prompt.txt"}),
+]
+
+
 def main():
+    import json
+    sys.path.insert(0, str(ROOT))
+    for modname, mapping in DATA_JOBS:
+        mod = importlib.import_module(modname)
+        for var, fn in mapping.items():
+            (OUT / fn).write_text(getattr(mod, var), encoding="utf-8")
+            print(f"{modname}:{var} → {fn}")
+    cl = importlib.import_module("pet.chat_local")
+    (OUT / "chat_tokens.json").write_text(json.dumps({"stop": cl._STOP_TOKENS, "cleanup": list(cl._CLEANUP_TOKENS), "failure_reply": cl._SEMANTIC_FAILURE_REPLY}, ensure_ascii=False, indent=1), encoding="utf-8")
+    print("pet.chat_local: токены → chat_tokens.json")
     sys.path.insert(0, str(ROOT))
     for rel, mapping in JOBS:
         mod = importlib.import_module(rel[:-3].replace("/", "."))   # значения — ровно те, что видит Python (в т.ч. склеенные из кусков)
