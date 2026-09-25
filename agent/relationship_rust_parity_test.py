@@ -85,7 +85,7 @@ def main() -> int:
                 raise
     for _, trg in immutability_triggers():
         cur.execute(trg)
-    tables = ["grievance", "forgiveness_capacity", "inner_state", "inner_state_event", "causal_event", "interaction_turn", "personal_fact", "personal_fact_event"]
+    tables = ["grievance", "forgiveness_capacity", "inner_state", "inner_state_event", "causal_event", "interaction_turn", "personal_fact", "personal_fact_event", "commitment", "commitment_event"]
     all_tables = [n for n, _ in S.ALL_TABLES_IN_ORDER]
 
     clock = {"t": 1_770_000_000.0}
@@ -100,6 +100,9 @@ def main() -> int:
     import agent.personal_facts as _pf
     _pf._now = fixed_now
     _pf.uuid = rm.uuid
+    import agent.relationship_commitments as _rc
+    _rc.time = rm.time
+    _rc.uuid = rm.uuid
 
     def reset(t0=1_770_000_000.0):
         cur.execute("SET FOREIGN_KEY_CHECKS=0")
@@ -122,6 +125,12 @@ def main() -> int:
                 if fn == "observed_trust_reward":
                     return {"ok": rs.observed_trust_reward(a["prior_observed"])}
                 return {"ok": norm(getattr(rs, fn)(conn, uid, **{k: v for k, v in a.items() if k != "user_id"}))}
+            if name.startswith("rc_"):
+                import agent.relationship_commitments as rcm
+                kwargs = {k: v for k, v in a.items() if k not in ("user_id", "span")}
+                if a.get("span"):
+                    kwargs["span"] = tuple(a["span"])
+                return {"ok": norm(getattr(rcm, name[3:])(conn, uid, **kwargs))}
             if name.startswith("pf_"):
                 import agent.personal_facts as pfm
                 from pet.fact_extraction import ExtractedFact
@@ -183,6 +192,7 @@ def main() -> int:
             name, args = st
             saved = list(idq)
             p = py_call(name, args)
+            used = len(saved) - len(idq)          # сколько идентификаторов израсходовал Python
             idq.clear(); idq.extend(saved)
             r = rs_call(name, args)
             # Rust израсходовал те же идентификаторы: синхронизируем очередь Python (он израсходовал свои при вызове)
@@ -190,13 +200,12 @@ def main() -> int:
                 ok = ("error" in p) == ("error" in r)
             else:
                 ok = canon(p["ok"]) == canon(r["ok"])
-            if os.environ.get("YANDI_TRACE") and label.startswith("B5"):
+            if os.environ.get("YANDI_TRACE") and label.startswith("ZZ"):
                 print("TRACE", i, name, json.dumps(p, ensure_ascii=False)[:200])
             check(f"{label} · шаг {i} {name}", ok, f"\n args={json.dumps(args, ensure_ascii=False)[:300]}\n py={json.dumps(p, ensure_ascii=False)[:600]}\n rs={json.dumps(r, ensure_ascii=False)[:600]}")
             if not ok:
                 return
-            # очередь идентификаторов после вызова: Python уже сделал pop-ы на первой копии — берём остаток из неё
-            idq.clear(); idq.extend(saved[len(saved) - len(rest_after(saved, p)):] if False else consume(saved, name, args, p))
+            idq.clear(); idq.extend(saved[used:])
         dp, dr = dump_py(), dump_rs()
         for t in tables:
             diff = [(a, b) for a, b in zip(dp[t], dr[t]) if canon(a) != canon(b)]
@@ -375,6 +384,90 @@ def main() -> int:
     steps += add(20, F("misc", "Аквариум комната лампа подставка водоросли камни песок фильтр стекло", evidence="аквариум комната лампа подставка водоросли камни песок фильтр стекло"), "q20")
     steps += [("pf_select_for_prompt", {"user_id": U, "current_text": "аквариум сарай гараж", "profile": False})]
     scenario("P3 границы и нормализация фактов", steps)
+
+    def cturn(tid, text):
+        return ("record_interaction_turn", {"user_id": U, "source_turn_id": tid, "turn_id_origin": "client", "user_text": text, "assistant_text": None, "created_at": "2026-02-02 02:40:00"})
+
+    def mkc(text, evidence, kind="in_chat", turn=None, due=None):
+        a = {"user_id": U, "text": text, "evidence": evidence, "kind": kind}
+        if turn:
+            a["source_turn_id"] = turn
+            a["span"] = [0, 4]
+        if due is not None:
+            a["due_at"] = due
+        return ("rc_create_commitment", a)
+
+    scenario("C1 обещания: создание, идемпотентность, фокус", [
+        ("ids", [f"{i:08x}" for i in range(1, 30)]),
+        cturn("k1", "Я обещаю прислать тебе фото котёнка"), mkc("прислать фото котёнка", "обещаю прислать", turn="k1"), mkc("прислать фото котёнка", "дубль", turn="k1"),
+        ("t", 50), cturn("k2", "Ещё обещаю рассказать про Париж"), mkc("рассказать про Париж", "обещаю рассказать", turn="k2", due="2026-02-02 02:41:00"),
+        mkc("Заплачу за подписку", "заплачу", kind="external", due=1770000010), mkc("нет реплики", "без реплики"),
+        ("t", 100), ("rc_commitment_statuses", {"user_id": U}),
+        ("rc_resolve_commitment_focus", {"user_id": U, "current_text": "вот фото котёнка, как обещал"}),
+        ("rc_resolve_commitment_focus", {"user_id": U, "current_text": "расскажу про Париж потом"}),
+        ("rc_resolve_commitment_focus", {"user_id": U, "current_text": "совсем не о том"}),
+        ("rc_resolve_commitment_focus", {"user_id": U, "current_text": ""}),
+        ("rc_verifiable_commitments", {"user_id": U, "current_turn_id": "k2"}), ("rc_verifiable_commitments", {"user_id": U, "current_turn_id": None}),
+        ("rc_verifiable_commitments", {"user_id": "чужой", "current_turn_id": None}), ("rc_resolve_commitment_focus", {"user_id": "чужой", "current_text": "фото"}),
+    ])
+    scenario("C2 заявления, проверка и прямое выполнение", [
+        ("ids", [f"{i:08x}" for i in range(1, 30)]),
+        cturn("d1", "Обещаю принести чертёж дома"), mkc("принести чертёж дома", "обещаю принести", turn="d1"),
+        mkc("Куплю хлеб", "куплю", kind="external"), mkc("Расскажу сказку про волка", "расскажу", turn="d1x"),
+        ("t", 30), cturn("d2", "Вот чертёж дома, как договаривались"),
+        ("rc_record_fulfillment_claim", {"user_id": U, "commitment_id": "c_1770000000_00000001", "evidence": "как договаривались", "source_turn_id": "d2", "span": [22, 40]}),
+        ("rc_record_fulfillment_claim", {"user_id": U, "commitment_id": "c_1770000000_00000001", "evidence": "повтор", "source_turn_id": "d2", "span": [22, 40]}),
+        ("rc_record_fulfillment_claim", {"user_id": "чужой", "commitment_id": "c_1770000000_00000001", "evidence": "x"}),
+        ("rc_record_fulfillment_claim", {"user_id": U, "commitment_id": None, "evidence": "x"}),
+        ("rc_commitment_statuses", {"user_id": U}),
+        ("rc_record_direct_fulfilment", {"user_id": U, "commitment_id": "c_1770000000_00000001", "evidence": "Вот чертёж дома", "source_turn_id": "d2", "span": [0, 15]}),
+        ("rc_record_direct_fulfilment", {"user_id": U, "commitment_id": "c_1770000000_00000001", "evidence": "Вот чертёж дома", "source_turn_id": "d2", "span": [0, 15]}),
+        ("rc_record_direct_fulfilment", {"user_id": U, "commitment_id": "c_1770000000_00000002", "evidence": "Вот чертёж", "source_turn_id": "d2", "span": [0, 10]}),
+        ("rc_commitment_statuses", {"user_id": U}), ("rs_get_state", {"user_id": U}), ("rs_replay", {"user_id": U}),
+        ("rc_record_verification", {"user_id": U, "commitment_id": "c_1770000000_00000002", "kept": False, "source": "peer_check", "evidence": "не пришло"}),
+        ("rc_record_verification", {"user_id": U, "commitment_id": "c_1770000000_00000002", "kept": True, "source": "peer_check"}),
+        ("rc_record_verification", {"user_id": U, "commitment_id": "c_1770000000_00000002", "kept": True, "source": "user_report"}),
+        ("rc_record_verification", {"user_id": U, "commitment_id": "c_1770000000_00000002", "kept": True, "source": ""}),
+        ("rc_record_verification", {"user_id": "чужой", "commitment_id": "c_1770000000_00000002", "kept": True, "source": "x"}),
+        ("rc_commitment_statuses", {"user_id": U}), ("rs_get_state", {"user_id": U}), ("rs_replay", {"user_id": U}),
+    ])
+    refuse = [("нет реплики", dict(source_turn_id=None, span=[0, 5], evidence="Вот")), ("нет отрезка", dict(source_turn_id="e2", span=None, evidence="Вот")),
+              ("пустое доказательство", dict(source_turn_id="e2", span=[0, 4], evidence="")), ("не то доказательство", dict(source_turn_id="e2", span=[0, 4], evidence="Нет ")),
+              ("реплики нет в БД", dict(source_turn_id="e9", span=[0, 4], evidence="Вот ")), ("та же реплика", dict(source_turn_id="e1", span=[0, 4], evidence="Обещ")),
+              ("отрицательный отрезок", dict(source_turn_id="e2", span=[-9, -5], evidence="дома")), ("выходит за пределы", dict(source_turn_id="e2", span=[20, 400], evidence="дома"))]
+    for label, kw in refuse:
+        a = {"user_id": U, "commitment_id": "c_1770000000_00000001", **kw}
+        scenario(f"C3 отказ прямого выполнения: {label}", [
+            ("ids", ["00000001"]), cturn("e1", "Обещаю принести чертёж дома"), mkc("принести чертёж дома", "обещаю", turn="e1"),
+            ("t", 30), cturn("e2", "Вот чертёж дома"), ("rc_record_direct_fulfilment", a), ("rc_commitment_statuses", {"user_id": U}), ("rs_get_state", {"user_id": U})])
+    scenario("C3 внешнее обещание нельзя проверить прямо", [
+        ("ids", ["00000001"]), mkc("Куплю хлеб", "куплю", kind="external"), cturn("e2", "Вот хлеб куплен"),
+        ("rc_record_direct_fulfilment", {"user_id": U, "commitment_id": "c_1770000000_00000001", "evidence": "Вот хлеб", "source_turn_id": "e2", "span": [0, 8]}), ("rc_commitment_statuses", {"user_id": U})])
+    steps = [("ids", [f"{i:08x}" for i in range(1, 40)])]
+    for i in range(7):
+        steps += [cturn(f"v{i}", f"Обещаю сделать задачу номер {i} для тебя"), mkc(f"сделать задачу {i}", "обещаю", turn=f"v{i}"), ("t", 10)]
+    steps += [("rc_verifiable_commitments", {"user_id": U, "current_turn_id": None}), ("rc_verifiable_commitments", {"user_id": U, "current_turn_id": "v6"})]
+    for i in range(7):
+        steps += [cturn(f"w{i}", f"Вот задача номер {i} готова"), ("rc_record_direct_fulfilment", {"user_id": U, "commitment_id": f"c_{1770000000 + i*10}_{i+1:08x}", "evidence": "Вот задача", "source_turn_id": f"w{i}", "span": [0, 10]}), ("t", 10)]
+    steps += [("rc_commitment_statuses", {"user_id": U}), ("rs_get_state", {"user_id": U}), ("rs_replay", {"user_id": U}), ("rc_verifiable_commitments", {"user_id": U, "current_turn_id": None})]
+    scenario("C4 несколько обещаний, награды убывают", steps)
+    ok_n = json.loads(yandi_core.query(state["h"], "SELECT COUNT(*) AS n FROM commitment_event WHERE event_type='verified_fulfilled'"))[0]["n"]
+    obs_n = json.loads(yandi_core.query(state["h"], "SELECT COUNT(*) AS n FROM inner_state_event WHERE event_type='commitment_observed'"))[0]["n"]
+    check("C4 контроль: прямые выполнения действительно записаны (не все отказы)", ok_n == 7 and obs_n == 7, f"verified={ok_n} observed={obs_n}")
+
+    scenario("C5 границы: просрочка ровно в срок, отрицательные отрезки, слова-наполнители, ничья", [
+        ("ids", [f"{i:08x}" for i in range(1, 30)]),
+        cturn("h1", "Обещаю принести чертёж дома"), mkc("принести чертёж дома", "обещаю", turn="h1", due=1770000100),
+        mkc("сделал бы отчёт", "обещаю", kind="in_chat"), mkc("картошку почистить", "обещаю", kind="in_chat"), mkc("картошку пожарить", "обещаю", kind="in_chat"),
+        ("t", 100), ("rc_commitment_statuses", {"user_id": U}),
+        cturn("h2", "Вот чертёж дома"), ("rc_record_direct_fulfilment", {"user_id": U, "commitment_id": "c_1770000000_00000001", "evidence": "чертёж", "source_turn_id": "h2", "span": [-11, -5]}),
+        ("rc_commitment_statuses", {"user_id": U}), ("rc_resolve_commitment_focus", {"user_id": U, "current_text": "картошку"}),
+        ("rc_resolve_commitment_focus", {"user_id": U, "current_text": "сделал"}),
+        ("rc_record_fulfillment_claim", {"user_id": U, "commitment_id": "c_1770000100_00000003", "evidence": "готово", "source_turn_id": "h3", "span": [0, 6]}),
+        ("rc_record_fulfillment_claim", {"user_id": U, "commitment_id": "c_1770000100_00000004", "evidence": "готово", "source_turn_id": "h4", "span": [0, 6]}),
+        ("rc_resolve_commitment_focus", {"user_id": U, "current_text": "совсем о другом деле"}),
+        ("rc_resolve_commitment_focus", {"user_id": U, "current_text": "сделал"}),
+    ])
 
     # ---- S8: чистый выбор цели ----
     reset()

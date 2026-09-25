@@ -92,7 +92,7 @@ fn a_span(a: &Value) -> Option<(i64, i64)> {
 }
 
 fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
-    use crate::{causal_events as ce, personal_facts as pf, relationship_memory as rm, relationship_state as rs};
+    use crate::{causal_events as ce, personal_facts as pf, relationship_commitments as rc, relationship_memory as rm, relationship_state as rs};
     let uid = a_str(a, "user_id").unwrap_or_default();
     Ok(match name {
         "causal_claim" => json!(ce::claim(cx, &uid, a_str(a, "source_turn_id").as_deref(), &a_str(a, "event_type").unwrap_or_default(), a_span(a))?),
@@ -124,6 +124,13 @@ fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
             let m = rm::match_grievance_target(&a_str(a, "text").unwrap_or_default(), &list("active"), &list("resolved"), a_f(a, "now"));
             json!({"grievance": m.grievance, "basis": m.basis, "candidates": m.candidates})
         }
+        "rc_commitment_statuses" => json!(rc::commitment_statuses(cx, &uid)?),
+        "rc_create_commitment" => rc::create_commitment(cx, &uid, &a_str(a, "text").unwrap_or_default(), &a_str(a, "evidence").unwrap_or_default(), a.get("due_at"), &a_str(a, "kind").unwrap_or_else(|| "general".into()), a_str(a, "source_turn_id").as_deref(), a_span(a))?,
+        "rc_resolve_commitment_focus" => rc::resolve_commitment_focus(cx, &uid, &a_str(a, "current_text").unwrap_or_default())?,
+        "rc_verifiable_commitments" => json!(rc::verifiable_commitments(cx, &uid, a_str(a, "current_turn_id").as_deref())?),
+        "rc_record_fulfillment_claim" => rc::record_fulfillment_claim(cx, &uid, a_str(a, "commitment_id").as_deref(), &a_str(a, "evidence").unwrap_or_default(), a_str(a, "source_turn_id").as_deref(), a_span(a))?,
+        "rc_record_verification" => rc::record_verification(cx, &uid, a_str(a, "commitment_id").as_deref(), a.get("kept").and_then(|v| v.as_bool()).unwrap_or(false), &a_str(a, "source").unwrap_or_default(), a_str(a, "evidence").as_deref())?,
+        "rc_record_direct_fulfilment" => rc::record_direct_fulfilment(cx, &uid, a_str(a, "commitment_id").as_deref(), &a_str(a, "evidence").unwrap_or_default(), a_str(a, "source_turn_id").as_deref(), a_span(a))?,
         "pf_list_facts" => json!(pf::list_facts(cx, &uid)?),
         "pf_record_turn_facts" => {
             let facts: Vec<pf::ExtractedFact> = a.get("facts").and_then(|v| v.as_array()).map(|x| x.iter().map(pf::ExtractedFact::from_json).collect()).unwrap_or_default();

@@ -3,6 +3,7 @@
 pub mod causal_events;
 pub mod ctx;
 pub mod personal_facts;
+pub mod relationship_commitments;
 pub mod relationship_memory;
 pub mod relationship_state;
 
