@@ -92,7 +92,7 @@ fn a_span(a: &Value) -> Option<(i64, i64)> {
 }
 
 fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
-    use crate::{causal_events as ce, relationship_memory as rm, relationship_state as rs};
+    use crate::{causal_events as ce, personal_facts as pf, relationship_memory as rm, relationship_state as rs};
     let uid = a_str(a, "user_id").unwrap_or_default();
     Ok(match name {
         "causal_claim" => json!(ce::claim(cx, &uid, a_str(a, "source_turn_id").as_deref(), &a_str(a, "event_type").unwrap_or_default(), a_span(a))?),
@@ -123,6 +123,23 @@ fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
             let list = |k: &str| a.get(k).and_then(|v| v.as_array()).cloned().unwrap_or_default();
             let m = rm::match_grievance_target(&a_str(a, "text").unwrap_or_default(), &list("active"), &list("resolved"), a_f(a, "now"));
             json!({"grievance": m.grievance, "basis": m.basis, "candidates": m.candidates})
+        }
+        "pf_list_facts" => json!(pf::list_facts(cx, &uid)?),
+        "pf_record_turn_facts" => {
+            let facts: Vec<pf::ExtractedFact> = a.get("facts").and_then(|v| v.as_array()).map(|x| x.iter().map(pf::ExtractedFact::from_json).collect()).unwrap_or_default();
+            pf::record_turn_facts(cx, &uid, a_str(a, "source_turn_id").as_deref(), &facts)?
+        }
+        "pf_known_for_linking" => {
+            let folded = pf::list_facts(cx, &uid)?;
+            json!(pf::known_for_linking(&folded, a.get("limit").and_then(|v| v.as_u64()).unwrap_or(30) as usize))
+        }
+        "pf_select_for_prompt" => {
+            let folded = pf::list_facts(cx, &uid)?;
+            json!(pf::select_for_prompt(&folded, &a_str(a, "current_text").unwrap_or_default(), a.get("profile").and_then(|v| v.as_bool()).unwrap_or(false)))
+        }
+        "pf_fold" => {
+            let l = |k: &str| a.get(k).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            json!(pf::fold(&l("facts"), &l("events")))
         }
         other => yandi_db::repo::call(cx.conn, other, a)?,
     })

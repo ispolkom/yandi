@@ -63,6 +63,10 @@ def main() -> int:
     import agent.relationship_state as rs
     from agent.db.sql.security_triggers import immutability_triggers
 
+    # Python берёт `datetime.timestamp()` от «наивного» UTC-времени как от местного (сдвиг на пояс машины) — в идентификаторах фактов; для сверки пояс = UTC
+    os.environ["TZ"] = "UTC"
+    import time as _time
+    _time.tzset()
     host, port = target.rsplit(":", 1)
     kw = dict(host=host, port=int(port), user="root", password="", autocommit=True, cursorclass=pymysql.cursors.DictCursor, charset="utf8mb4")
     admin = pymysql.connect(**kw)
@@ -81,7 +85,7 @@ def main() -> int:
                 raise
     for _, trg in immutability_triggers():
         cur.execute(trg)
-    tables = ["grievance", "forgiveness_capacity", "inner_state", "inner_state_event", "causal_event"]
+    tables = ["grievance", "forgiveness_capacity", "inner_state", "inner_state_event", "causal_event", "interaction_turn", "personal_fact", "personal_fact_event"]
     all_tables = [n for n, _ in S.ALL_TABLES_IN_ORDER]
 
     clock = {"t": 1_770_000_000.0}
@@ -93,6 +97,9 @@ def main() -> int:
     rm._now = fixed_now
     rm.time = types.SimpleNamespace(time=lambda: clock["t"])
     rm.uuid = types.SimpleNamespace(uuid4=lambda: types.SimpleNamespace(hex=idq.pop(0)))
+    import agent.personal_facts as _pf
+    _pf._now = fixed_now
+    _pf.uuid = rm.uuid
 
     def reset(t0=1_770_000_000.0):
         cur.execute("SET FOREIGN_KEY_CHECKS=0")
@@ -115,6 +122,19 @@ def main() -> int:
                 if fn == "observed_trust_reward":
                     return {"ok": rs.observed_trust_reward(a["prior_observed"])}
                 return {"ok": norm(getattr(rs, fn)(conn, uid, **{k: v for k, v in a.items() if k != "user_id"}))}
+            if name.startswith("pf_"):
+                import agent.personal_facts as pfm
+                from pet.fact_extraction import ExtractedFact
+                fn = name[3:]
+                if fn == "record_turn_facts":
+                    facts = [ExtractedFact(**{k: v for k, v in f.items()}) for f in a["facts"]]
+                    return {"ok": norm(pfm.record_turn_facts(conn, uid, a.get("source_turn_id"), facts))}
+                if fn == "list_facts":
+                    return {"ok": norm(pfm.list_facts(conn, uid))}
+                if fn == "known_for_linking":
+                    return {"ok": norm(pfm.known_for_linking(pfm.list_facts(conn, uid), a.get("limit", 30)))}
+                if fn == "select_for_prompt":
+                    return {"ok": norm(pfm.select_for_prompt(pfm.list_facts(conn, uid), a["current_text"], profile=a["profile"]))}
             if name == "rm_match_grievance_target":
                 now = dt.datetime.utcfromtimestamp(a["now"])
                 m = rm.match_grievance_target(a["text"], a["active"], a["resolved"], now)
@@ -302,6 +322,59 @@ def main() -> int:
         ("rs_record_insult", {"user_id": U, "severity": 0.8}), ("rs_get_state", {"user_id": U}),
         ("rs_record_observed_commitment", {"user_id": U, "prior_observed": 0}), ("rs_get_state", {"user_id": U}), ("rs_replay", {"user_id": U}),
     ])
+
+    def F(cls, statement, polarity="affirm", temporality="current", evidence=None, start=0, end=5, relation="none", target=None):
+        return {"fact_class": cls, "statement": statement, "polarity": polarity, "temporality": temporality, "evidence": evidence if evidence is not None else statement, "start": start, "end": end, "relation": relation, "target_fact_id": target}
+
+    def turn(tid, text, t=None):
+        return ("record_interaction_turn", {"user_id": U, "source_turn_id": tid, "turn_id_origin": "client", "user_text": text, "assistant_text": None, "created_at": "2026-02-02 02:40:00"})
+
+    scenario("P1 личные факты: новые, повторы, поправки", [
+        ("ids", [f"{i:010x}" for i in range(1, 12)]),
+        turn("f1", "У меня есть кошка Мурка"), ("pf_record_turn_facts", {"user_id": U, "source_turn_id": "f1", "facts": [F("pets", "У меня есть кошка Мурка", evidence="кошка Мурка"), F("home", "Живу в Риге")]}),
+        ("pf_record_turn_facts", {"user_id": U, "source_turn_id": "f1", "facts": [F("pets", "повтор")]}),      # повтор доставки — ничего
+        ("t", 100), turn("f2", "Кошка Мурка — моя"), ("pf_record_turn_facts", {"user_id": U, "source_turn_id": "f2", "facts": [F("pets", "  у меня Есть  КОШКА мурка.  ")]}),   # тот же смысл: повтор
+        ("t", 100), turn("f3", "Живу в Вильнюсе"), ("pf_record_turn_facts", {"user_id": U, "source_turn_id": "f3", "facts": [F("home", "Живу в Вильнюсе", relation="replaces", target="pf_1770000000_0000000001")]}),
+        ("pf_list_facts", {"user_id": U}), ("pf_known_for_linking", {"user_id": U}), ("pf_known_for_linking", {"user_id": U, "limit": 1}),
+        ("t", 100), turn("f4", "Раньше работал таксистом"), ("pf_record_turn_facts", {"user_id": U, "source_turn_id": "f4", "facts": [F("job", "Работал таксистом", temporality="past", evidence="таксистом"), F("pets", "У меня нет собаки", polarity="negated"), F("pets", "У меня нет собаки", polarity="negated", relation="same", target="нет-такого")]}),
+        ("pf_record_turn_facts", {"user_id": U, "source_turn_id": None, "facts": []}),
+        ("pf_record_turn_facts", {"user_id": U, "source_turn_id": None, "facts": [F("x", "без реплики")]}),
+        ("pf_record_turn_facts", {"user_id": U, "source_turn_id": "zz", "facts": [F("x", "реплики нет в БД")]}),
+        ("pf_list_facts", {"user_id": U}), ("pf_list_facts", {"user_id": "чужой"}),
+        ("pf_select_for_prompt", {"user_id": U, "current_text": "что ты знаешь обо мне", "profile": True}),
+        ("pf_select_for_prompt", {"user_id": U, "current_text": "как там моя кошка Мурка", "profile": False}),
+        ("pf_select_for_prompt", {"user_id": U, "current_text": "расскажи про Ригу и Вильнюс", "profile": False}),
+        ("pf_select_for_prompt", {"user_id": U, "current_text": "совсем не по теме", "profile": False}),
+        ("pf_select_for_prompt", {"user_id": "чужой", "current_text": "кошка", "profile": True}),
+    ])
+    steps = [("ids", [f"{i:010x}" for i in range(1, 40)])]
+    for i in range(22):
+        steps += [turn(f"m{i}", f"факт {i}"), ("pf_record_turn_facts", {"user_id": U, "source_turn_id": f"m{i}", "facts": [F("misc", f"У меня есть предмет номер {i} особого рода", evidence=f"предмет {i}")]}), ("t", 10)]
+    steps += [("pf_select_for_prompt", {"user_id": U, "current_text": "", "profile": True}), ("pf_select_for_prompt", {"user_id": U, "current_text": "предмет особого рода номер", "profile": False})]
+    scenario("P2 ограничения профиля и релевантности", steps)
+
+    steps = [("ids", [f"{i:010x}" for i in range(1, 60)])]
+    def add(i, fact, tid=None):
+        tid = tid or f"q{i}"
+        return [turn(tid, f"реплика {i}"), ("pf_record_turn_facts", {"user_id": U, "source_turn_id": tid, "facts": [fact]}), ("t", 5)]
+    for i in range(5):
+        steps += add(i, F("job", f"Когда-то работал профессией номер {i} давно", temporality="past", evidence=f"профессия {i}"))
+    steps += add(10, F("long", "Очень длинное утверждение " + "слово " * 30, evidence="длинное"))
+    steps += add(11, F("home", "Живу возле моря…"), "q11")
+    steps += add(12, F("home", "живу возле моря"), "q12")
+    steps += add(13, F("home", "Живёт бабушка во деревне"), "q13")
+    steps += add(14, F("home", "живет бабушка во деревне"), "q14")
+    steps += add(15, F("home", "Живу возле моря", relation="same", target="нет-такого"), "q15")
+    steps += add(16, F("pets", "Кошка Мурка спит рядом", evidence="кошка мурка"), "q16")
+    steps += add(17, F("pets", "Кошка Мурка любит рыбу тунец лосось креветки морепродукты", evidence="кошка любит рыбу тунец лосось креветки"), "q17")
+    steps += [("pf_select_for_prompt", {"user_id": U, "current_text": "кошка мурка", "profile": False}),
+              ("pf_select_for_prompt", {"user_id": U, "current_text": "кошка спит любит рыбу", "profile": False}),
+              ("pf_select_for_prompt", {"user_id": U, "current_text": "море дом", "profile": False}),
+              ("pf_select_for_prompt", {"user_id": U, "current_text": "", "profile": True}), ("pf_list_facts", {"user_id": U})]
+    # факт с 9 содержательными основами и запрос с 3: связь 1/sqrt(27)=0.1925 — между порогами 0.18 и 0.2
+    steps += add(20, F("misc", "Аквариум комната лампа подставка водоросли камни песок фильтр стекло", evidence="аквариум комната лампа подставка водоросли камни песок фильтр стекло"), "q20")
+    steps += [("pf_select_for_prompt", {"user_id": U, "current_text": "аквариум сарай гараж", "profile": False})]
+    scenario("P3 границы и нормализация фактов", steps)
 
     # ---- S8: чистый выбор цели ----
     reset()
