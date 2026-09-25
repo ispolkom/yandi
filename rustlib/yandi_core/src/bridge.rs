@@ -158,6 +158,26 @@ fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
                 severity: e["severity"].as_f64().unwrap_or(0.0), sincerity: e["sincerity"].as_f64().unwrap_or(0.0)}).collect()).unwrap_or_default();
             ee::to_intensity(&ee::ExtractionResult { events, ..Default::default() }).to_json()
         }
+        "fe_extract" => {
+            use crate::fact_extraction as fe;
+            use std::cell::{Cell, RefCell};
+            let responses: Vec<String> = a.get("responses").and_then(|v| v.as_array()).map(|x| x.iter().map(|s| s.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+            let known: Vec<fe::Known> = a.get("known").and_then(|v| v.as_array()).map(|x| x.iter().map(|k| fe::Known { fact_id: k["fact_id"].as_str().unwrap_or("").to_string(), statement: k["statement"].as_str().unwrap_or("").to_string() }).collect()).unwrap_or_default();
+            let idx = Cell::new(0usize);
+            let prompts: RefCell<Vec<Value>> = RefCell::new(vec![]);
+            let llm = |msgs: &[(String, String)]| -> Result<String, String> {
+                prompts.borrow_mut().push(json!(msgs.iter().map(|(r, c)| json!({"role": r, "content": c})).collect::<Vec<_>>()));
+                let i = idx.get();
+                idx.set(i + 1);
+                let r = responses.get(i).cloned().unwrap_or_default();
+                match r.strip_prefix("__raise__:") {
+                    Some(name) => Err(name.to_string()),
+                    None => Ok(r),
+                }
+            };
+            let res = fe::extract_personal_facts(&a_str(a, "message").unwrap_or_default(), &llm, &known)?;
+            json!({"result": res.to_json(), "prompts": prompts.into_inner()})
+        }
         "pf_list_facts" => json!(pf::list_facts(cx, &uid)?),
         "pf_record_turn_facts" => {
             let facts: Vec<pf::ExtractedFact> = a.get("facts").and_then(|v| v.as_array()).map(|x| x.iter().map(pf::ExtractedFact::from_json).collect()).unwrap_or_default();

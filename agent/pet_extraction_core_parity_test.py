@@ -177,6 +177,129 @@ def main() -> int:
                                     "{}", "плохо", '{"act": "apology"}', "__raise__:KeyError", "[]"]))
         case(f"случайный #{i}", m, resp)
 
+    # ================= извлечение личных фактов =================
+    import pet.fact_extraction as fx
+
+    def run_fx_py(message, responses, known):
+        queue = list(responses)
+        prompts = []
+
+        def llm(msgs):
+            prompts.append(msgs)
+            r = queue.pop(0) if queue else ""
+            if isinstance(r, str) and r.startswith("__raise__:"):
+                raise type(r.split(":", 1)[1], (Exception,), {})()
+            return r
+
+        try:
+            res = fx.extract_personal_facts(message, llm, known)
+        except Exception as e:  # noqa: BLE001
+            return {"error": type(e).__name__}
+        d = dataclasses.asdict(res)
+        d["facts"] = [{"fact_class": f["fact_class"], "statement": f["statement"], "polarity": f["polarity"], "temporality": f["temporality"], "evidence": f["evidence"], "start": f["start"], "end": f["end"],
+                       "relation": f["relation"], "target_fact_id": f["target_fact_id"]} for f in d["facts"]]
+        return {"result": d, "prompts": prompts}
+
+    def run_fx_rs(message, responses, known):
+        r = json.loads(yandi_core.call(h, "fe_extract", json.dumps({"message": message, "responses": responses, "known": known}, ensure_ascii=False)))
+        return r.get("ok") or {"error": r.get("error")}
+
+    def fcase(label, message, responses, known=None):
+        nonlocal n
+        n += 1
+        known = known or []
+        p, r = run_fx_py(message, responses, known), run_fx_rs(message, responses, known)
+        ok = ("error" in p and "error" in r) if ("error" in p or "error" in r) else norm(p) == norm(r)
+        check(f"факты: {label}", ok, f"\n msg={message!r} resp={responses!r} known={known}\n py={norm(p)[:800]}\n rs={norm(r)[:800]}")
+
+    fext = lambda facts, mq="none": json.dumps({"facts": facts, "memory_query": mq}, ensure_ascii=False)  # noqa: E731
+    F1 = lambda span, statement="У пользователя есть кошка по имени Мурка", cls="possession", pol="affirmed", tm="current", stab="stable", **kw: {"span": span, "class": cls, "statement": statement, "polarity": pol, "time": tm, "stability": stab, **kw}  # noqa: E731
+    blind = lambda frame="current", secret=False, pol="affirmed", stab="stable": json.dumps({"frame": frame, "secret": secret, "polarity": pol, "stability": stab})  # noqa: E731
+    sup = lambda supported=True, adds=False: json.dumps({"supported": supported, "adds": adds})  # noqa: E731
+    known2 = [{"fact_id": "pf_1", "statement": "У меня есть собака"}, {"fact_id": "pf_2", "statement": "Живу в Риге \"на окраине\"\nтихо"}]
+    M = "У меня есть кошка Мурка, живу в Вильнюсе."
+
+    fcase("пусто", "", [])
+    fcase("длинное", " ".join(["слово"] * 121), [])
+    fcase("сбой", M, ["__raise__:TimeoutError"])
+    fcase("не JSON", M, ["нет"])
+    fcase("нет facts", M, ['{"memory_query": "general"}'])
+    fcase("факт принят", M, [fext([F1([2, 4])], "specific"), blind(), sup()])
+    fcase("memory_query неизвестный", M, [fext([], "bogus")])
+    fcase("memory_query нет", M, [fext([])])
+    fcase("memory_query не строка", M, [fext([], 5)])
+    fcase("знаки препинания вне доказательства", M, [fext([F1([5, 6], "Пользователь живёт в городе Вильнюс", cls="location")]), blind(), sup()])
+    fcase("слишком много фактов", M, [fext([F1([2, 3])] * 5)])
+    fcase("секрет по классу", M, [fext([F1([2, 4], cls="secret")])])
+    fcase("неизвестный класс", M, [fext([F1([2, 4], cls="hobby")])])
+    fcase("утверждение короткое", M, [fext([F1([2, 4], "Кошка")])])
+    fcase("утверждение с переводом строки", M, [fext([F1([2, 4], "У пользователя есть\nкошка Мурка")])])
+    fcase("утверждение 200 символов", M, [fext([F1([2, 4], "к" * 200)]), blind(), sup()])
+    fcase("утверждение 201 символ", M, [fext([F1([2, 4], "к" * 201)])])
+    fcase("утверждение 8 символов", M, [fext([F1([2, 4], "кошка ес")]), blind(), sup()])
+    fcase("утверждение 7 символов", M, [fext([F1([2, 4], "кошка е")])])
+    fcase("полярность неизвестна", M, [fext([F1([2, 4], pol="maybe")])])
+    fcase("время неизвестно", M, [fext([F1([2, 4], tm="future")])])
+    fcase("нестабильный", M, [fext([F1([2, 4], stab="temporary")])])
+    fcase("relation неизвестен", M, [fext([F1([2, 4], relation="merge")])])
+    fcase("relation null", M, [fext([F1([2, 4], relation=None)])])
+    fcase("same с целью", M, [fext([F1([2, 4], relation="same", target=0)]), blind(), sup()], known2)
+    fcase("same без цели → none", M, [fext([F1([2, 4], relation="same", target=9)]), blind(), sup()], known2)
+    fcase("same цель булево", M, [fext([F1([2, 4], relation="same", target=True)]), blind(), sup()], known2)
+    fcase("replaces без цели", M, [fext([F1([2, 4], relation="replaces", target=9)])], known2)
+    fcase("replaces подтверждена связью", M, [fext([F1([2, 4], relation="replaces", target=1)]), blind(), sup(), '{"revises": true}'], known2)
+    fcase("replaces подтверждена конфликтом", M, [fext([F1([2, 4], relation="replaces", target=1)]), blind(), sup(), '{"revises": false}', '{"conflict": true}'], known2)
+    fcase("replaces не подтверждена", M, [fext([F1([2, 4], relation="replaces", target=1)]), blind(), sup(), '{"revises": false}', '{"conflict": false}'], known2)
+    fcase("replaces: сбой проверки связи", M, [fext([F1([2, 4], relation="replaces", target=1)]), blind(), sup(), "__raise__:KeyError", '{"conflict": true}'], known2)
+    fcase("replaces: revises не булево", M, [fext([F1([2, 4], relation="replaces", target=1)]), blind(), sup(), '{"revises": 1}', '{"conflict": "yes"}'], known2)
+    fcase("слепая: не тот кадр", M, [fext([F1([2, 4])]), blind("past")])
+    fcase("слепая: неизвестный кадр", M, [fext([F1([2, 4])]), blind("dream")])
+    fcase("слепая: секрет", M, [fext([F1([2, 4])]), blind(secret=True)])
+    fcase("слепая: секрет не булево", M, [fext([F1([2, 4])]), blind(secret=0)])
+    fcase("слепая: полярность", M, [fext([F1([2, 4])]), blind(pol="negated")])
+    fcase("слепая: устойчивость", M, [fext([F1([2, 4])]), blind(stab="temporary")])
+    fcase("слепая: пустой объект", M, [fext([F1([2, 4])]), "{}"])
+    fcase("слепая: сбой", M, [fext([F1([2, 4])]), "__raise__:OSError"])
+    fcase("поддержка: не поддержано", M, [fext([F1([2, 4])]), blind(), sup(False)])
+    fcase("поддержка: добавляет", M, [fext([F1([2, 4])]), blind(), sup(True, True)])
+    fcase("поддержка: supported=1", M, [fext([F1([2, 4])]), blind(), '{"supported": 1, "adds": false}'])
+    fcase("поддержка: сбой", M, [fext([F1([2, 4])]), blind(), "__raise__:ValueError"])
+    fcase("секрет в доказательстве", "мой ключ sk-abcdefghijklmnopqrstuvwxyz0123456789 запомни", [fext([F1([2, 2], "Ключ пользователя такой-то")])])
+    fcase("секрет в утверждении", M, [fext([F1([2, 4], "Ключ пользователя sk-abcdefghijklmnopqrstuvwxyz0123456789")])])
+    fcase("пересечение", M, [fext([F1([2, 4]), F1([3, 5], "Пользователь живёт в городе Вильнюс")])])
+    fcase("два факта", M, [fext([F1([2, 4]), F1([5, 6], "Пользователь живёт в городе Вильнюс", cls="location")]), blind(), sup(), blind(), sup()])
+    fcase("дубль факта", "кошка Мурка и опять кошка Мурка", [fext([F1([0, 1]), F1([3, 4], "У ПОЛЬЗОВАТЕЛЯ ЕСТЬ КОШКА ПО ИМЕНИ МУРКА")]), blind(), sup(), blind(), sup()])
+    fcase("известные факты: 31 штука", M, [fext([]) ], [{"fact_id": f"pf_{i}", "statement": f"факт номер {i}"} for i in range(31)])
+    fcase("цель за пределами MAX_KNOWN", M, [fext([F1([2, 4], relation="same", target=30)]), blind(), sup()], [{"fact_id": f"pf_{i}", "statement": f"факт номер {i}"} for i in range(31)])
+    fcase("юникод и эмодзи", "У меня 🌍 есть Ёжик… и кот!", [fext([F1([3, 5], "У пользователя есть ёжик и кот")]), blind(), sup()])
+    fcase("доказательство из двух символов", "да ок...", [fext([F1([0, 0], "У пользователя есть что-то")])])
+
+    Mlong = " ".join(["кошка"] * 40)
+    fcase("31 слово отрезка", Mlong, [fext([F1([0, 30])]), blind(), sup()])
+    fcase("30 слов отрезка", Mlong, [fext([F1([0, 29])]), blind(), sup()])
+    fcase("отрезок из трёх чисел", M, [fext([F1([2, 4, 5])])])
+    fcase("доказательство оканчивается многоточием", "У меня есть кошка Мурка…", [fext([F1([3, 4])]), blind(), sup()])
+    fcase("соседние отрезки с общим словом", "У меня есть кошка Мурка и собака Шарик", [fext([F1([0, 2]), F1([2, 4], "Пользователь имеет кошку Мурку", cls="possession")]), blind(), sup(), blind(), sup()])
+    fcase("соседние отрезки без общих слов", "У меня есть кошка Мурка и собака Шарик", [fext([F1([0, 2]), F1([3, 4], "Пользователь имеет кошку Мурку", cls="possession")]), blind(), sup(), blind(), sup()])
+
+    fkinds = ["possession", "location", "secret", "hobby", None, 5]
+    for i in range(250):
+        m = rnd.choice(["У меня есть кошка Мурка", "Живу в Риге уже пять лет", "Раньше работал таксистом в Москве", "Мой пароль abc123def456ghi789jkl012mno345", "Как дела?", "Я люблю пельмени, а не суши.", "Моего брата зовут Иван"])
+        nw = len(m.split())
+        facts = []
+        for _ in range(rnd.choice([0, 1, 1, 2, 3, 5])):
+            a = rnd.randint(-1, nw)
+            b = rnd.choice([a, a + 1, rnd.randint(-1, nw + 1)])
+            f = F1(rnd.choice([[a, b], [a, b], [a], "x"]), rnd.choice(["У пользователя есть кошка Мурка", "Пользователь живёт в городе Рига", "короткое", "с\nпереводом строки внутри", "к" * 210, "Ключ abcdefghij1234567890KLMNOP"]),
+                   cls=rnd.choice(fkinds), pol=rnd.choice(["affirmed", "negated", "x", None]), tm=rnd.choice(["current", "past", "future"]), stab=rnd.choice(["stable", "stable", "temporary"]),
+                   relation=rnd.choice(["none", "same", "replaces", "bogus", None, "none"]), target=rnd.choice([0, 1, 5, None, True, "x"]))
+            facts.append(f)
+        resp = [rnd.choice([fext(facts, rnd.choice(["none", "general", "specific", "x"])), fext(facts), "мусор", "__raise__:OSError", '{"facts": 3}'])]
+        for _ in range(8):
+            resp.append(rnd.choice([blind(rnd.choice(["current", "past", "question", "x"]), rnd.choice([False, False, True, None]), rnd.choice(["affirmed", "negated"]), rnd.choice(["stable", "stable", "temporary"])), sup(rnd.choice([True, True, False]), rnd.choice([False, False, True])),
+                                    '{"revises": true}', '{"conflict": true}', '{"revises": false}', '{"conflict": false}', "{}", "плохо", "__raise__:KeyError"]))
+        fcase(f"случайные #{i}", m, resp, rnd.choice([[], known2, known2[:1]]))
+
     print(f"\n(сценариев: {n}; успешных проверок: {_OK} из {_OK + len(FAILURES)})")
     print("=" * 72)
     if FAILURES:
