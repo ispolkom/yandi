@@ -1,0 +1,2965 @@
+{
+ "schema_version": 20,
+ "tables": {
+  "schema_migrations": {
+   "class": "A",
+   "columns": [
+    {
+     "name": "version",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "applied_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "description",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "question": {
+   "class": "A",
+   "columns": [
+    {
+     "name": "question_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "canonical_hash",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "first_asked_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "question_occurrence": {
+   "class": "A",
+   "columns": [
+    {
+     "name": "occurrence_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "question_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "raw_text",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "anonymized_text",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "asked_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "session_id",
+     "notnull": false,
+     "pk": false
+    }
+   ]
+  },
+  "verification_run": {
+   "class": "D",
+   "columns": [
+    {
+     "name": "run_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "occurrence_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "started_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "completed_at",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "status",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "web_enabled",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "validation_enabled",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "pipeline_version",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "schema_version",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "final_answer_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "failed_stage",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "error_class",
+     "notnull": false,
+     "pk": false
+    }
+   ]
+  },
+  "answer_version": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "answer_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "question_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "version_number",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "answer_text",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "answer_hash",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_by_run_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "supersedes_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "answer_assessment": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "assessment_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "answer_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "run_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "synthesizer_strand",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "trust_gate_strand",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "canonical_trust",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "diverged",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "stricter_strand",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "reason",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "claim_family": {
+   "class": "A",
+   "columns": [
+    {
+     "name": "family_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "domain",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "canonical_text",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "family_member": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "family_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "claim_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "linked_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "claim_occurrence": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "claim_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "run_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "claim_text",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "content_hash",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "claim_type",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "claim_confidence",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "verification_status",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "family_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "query_context",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "support_count",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "contradiction_count",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "source_resource": {
+   "class": "A",
+   "columns": [
+    {
+     "name": "resource_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "resource_type",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "canonical_uri",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "uri_hash",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "node_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "validator_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "model_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "first_observed_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "source_observation": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "observation_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "resource_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "run_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "observation_route",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "origin_observation_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "observed_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "source_class",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "quality_score",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "content_excerpt",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "rejection_reason",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "evidence_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "source_title",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "retrieval_query",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "retrieval_rank",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "relevance_to_query",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "authority",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "traceability",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "primaryness",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "is_meta_pipeline_output",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "is_subject_matter_evidence",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "source_cluster_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "origin_source_cluster_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "retrieval_claim_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "route_side",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "subject_entities",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "fact_candidates",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "supports_query_aspect",
+     "notnull": false,
+     "pk": false
+    }
+   ]
+  },
+  "evidence_relation": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "relation_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "claim_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "observation_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "relation",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "directness",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "evidence_eligible",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "evidence_role",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "counted_via",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "trace_record": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "run_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "execution",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "reasoning",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "cost",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "epistemic",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "outcome",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "learning",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "confidence_evolution",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "rejected_claims",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "claims_filtered_count",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "claims_rejected_count",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "delayed_validation_event": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "event_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "run_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "trace_found",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "original_trust",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "source",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "verdict",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "reason",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "raw",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "belief": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "belief_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "topic",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "statement",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "confidence",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "status",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "evidence_for",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "evidence_against",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "claim_ids",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "prior",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "likelihood",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "contradiction_score",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "decay_factor",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "superseded_by",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "belief_assessment_history": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "history_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "belief_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "run_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "old_confidence",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "new_confidence",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "reason",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "change_type",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "semantic_edge": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "edge_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "family_a",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "family_b",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "edge_type",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "reason",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "observation_count",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "triggering_claim_ids",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "last_seen_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "recheck_event": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "event_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "family_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "run_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "trigger_reason",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "started_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "outcome",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "reason",
+     "notnull": false,
+     "pk": false
+    }
+   ]
+  },
+  "epistemic_contradiction_observation": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "observation_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "edge_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "run_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "roots_a",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "roots_b",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "overlap",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "distinct_union",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "candidate",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "reason",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "ai_observation": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "ai_observation_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "provider",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "model_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "run_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "prompt_identity",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "answer_excerpt",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "provenance_mode_reported",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "live_search_used_reported",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "provenance_parse_status",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "observed_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "ai_reported_source": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "ai_reported_source_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "ai_observation_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "ordinal",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "reported_name",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "reported_uri",
+     "notnull": false,
+     "pk": false
+    }
+   ]
+  },
+  "run_error": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "error_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "run_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "failed_stage",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "error_class",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "short_message",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "decision_event": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "event_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "run_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "event_type",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "entity_type",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "entity_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "verdict",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "domain",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "confidence",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "delta",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "delta_factors",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "reason",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "meta",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "parent_event_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "duration_ms",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "policy_snapshot",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "policy_version",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "orchestrator_version",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "integrity_journal": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "seq",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "table_name",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "row_pk",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "row_content_hash",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "prev_hash",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "entry_hash",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "grievance": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "event_type",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "description",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "severity",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "status",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "apology_sincerity",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "context",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "apology_at",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "understood_at",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "forgiven_at",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "forgiveness_capacity": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "capacity",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "last_forgiveness",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "personality": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "name",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "version",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "traits",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "goals",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "principles",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "limitations",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "preferences",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "total_cycles",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "total_decisions",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "total_learnings",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "personality_change": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "change_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "what_changed",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "reason",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "episode": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "episode_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "event_type",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "summary",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "details",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "importance",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "tags",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "related_episodes",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "self_state": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "identity",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "version",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "total_cycles",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "total_decisions",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "total_learnings",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "total_reflections",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "total_errors",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "total_queries",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "total_belief_updates",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "capabilities",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "limitations",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "current_uncertainties",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "metadata",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "is_alive",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "self_event": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "event_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "event_type",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "description",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "details",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "importance",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "reflection_policy": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "policy_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "policy_type",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "rule",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "rule_hash",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "confidence",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "status",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "observed_count",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "applied_count",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "activated_at",
+     "notnull": false,
+     "pk": false
+    }
+   ]
+  },
+  "family_status_state": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "family_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "last_status",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "knowledge_record": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "record_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "question",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "answer",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "trust_level",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "verdict",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "topic",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "tags",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "sources",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "meta",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "peer_config": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "peers",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "sync_token",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "sync_enabled",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "biography": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "birth",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "cycles",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "saved_memories",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "forgotten_memories",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "reconsidered_decisions",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "changed_habits",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "total_decisions",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "total_reflections",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "last_principles_change",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "biography_event": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "event_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "event_type",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "payload",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "context_topic": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "topic",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "last_activity",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "total_instances",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "context_instance": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "instance_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "topic",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "query",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "response",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "type",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "source",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "decision_journal_entry": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "decision_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "event_type",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "event_text",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "context",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "analysis",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "alternatives",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "decision",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "confidence",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "outcome",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "self_correction",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "experience": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "experience_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "speech_act",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "topic",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "query",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "response",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "user_reaction",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "success",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "used_count",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "context",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "secret_archive_question": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "question_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "query",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "reason",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "context",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "answered",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "answer",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "answer_time",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "inner_state": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "mood",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "energy",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "curiosity",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "patience",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "openness",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "trust",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "respect",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "forgiveness",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "affection",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "pattern",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "current_feeling",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "current_intent",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "current_tone",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "inner_state_event": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "event_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "event_type",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "description",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "sincerity",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "weight",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "resolved",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "commitment": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "commitment_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "kind",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "text",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "evidence",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "due_at",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "source_turn_id",
+     "notnull": false,
+     "pk": false
+    }
+   ]
+  },
+  "commitment_event": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "event_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "commitment_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "event_type",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "source",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "evidence",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "source_turn_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "span_start",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "span_end",
+     "notnull": false,
+     "pk": false
+    }
+   ]
+  },
+  "causal_event": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "event_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "source_turn_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "event_type",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "span_start",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "span_end",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "interaction_turn": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "interaction_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "source_turn_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "turn_id_origin",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "user_text",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "assistant_text",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "model",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "adapter",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "recalled_turn_ids",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "personal_fact": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "fact_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "fact_class",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "statement",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "polarity",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "temporality",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "evidence",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "span_start",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "span_end",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "source_turn_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "personal_fact_event": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "event_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "fact_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "user_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "event_type",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "by_fact_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "evidence",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "span_start",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "span_end",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "source_turn_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "disagreement": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "disagreement_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "topic",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "old_position",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "challenge",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "analysis",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "new_position",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "confidence_before",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "confidence_after",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "resolved",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "related_belief_id",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "trait_graph": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "nodes",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "edges",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "trait_change": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "change_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "node",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "new_value",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "source",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "trait_edge_change": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "change_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "source_node",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "target_node",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "old_weight",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "new_weight",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "internal_question": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "question_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "question_text",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "internal_question_answer": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "answer_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "question_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "answer_text",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "self_reflection_profile": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "desires",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "fears",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "likes",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "dislikes",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "limitations",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "reflections_count",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "social_knowledge": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "speech_act",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "topic",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "description",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "typical_reactions",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "cultural_context",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "boundaries",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "recommended_approach",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "examples",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "source",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "confidence",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "knowledge_query_archive": {
+   "class": "C",
+   "columns": [
+    {
+     "name": "entry_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "query",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "answer",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "tag",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "category",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "trust_level",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "confidence",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "sources",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "node_id",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "version",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "meta",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "updated_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  },
+  "instance_identity": {
+   "class": "A",
+   "columns": [
+    {
+     "name": "id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "instance_uuid",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "created_by_host",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "label",
+     "notnull": false,
+     "pk": false
+    }
+   ]
+  },
+  "storage_protection_event": {
+   "class": "B",
+   "columns": [
+    {
+     "name": "event_id",
+     "notnull": true,
+     "pk": true
+    },
+    {
+     "name": "mode",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "nonce",
+     "notnull": true,
+     "pk": false
+    },
+    {
+     "name": "proof",
+     "notnull": false,
+     "pk": false
+    },
+    {
+     "name": "created_at",
+     "notnull": true,
+     "pk": false
+    }
+   ]
+  }
+ }
+}

@@ -1,0 +1,11 @@
+[package]
+name = "yandi_db"
+version = "0.1.0"
+edition = "2021"
+description = "Родной слой базы данных YANDI: встроенная SQLite (по умолчанию), схема и триггеры неизменяемости генерируются из Python-схемы MySQL. Без Python и без внешнего сервера."
+license = "MIT"
+
+[dependencies]
+# SQLite прямо в бинарнике (bundled) — база = один файл в каталоге данных пользователя, переживает удаление программы
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
