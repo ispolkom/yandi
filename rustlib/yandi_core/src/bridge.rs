@@ -178,6 +178,37 @@ fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
             let res = fe::extract_personal_facts(&a_str(a, "message").unwrap_or_default(), &llm, &known)?;
             json!({"result": res.to_json(), "prompts": prompts.into_inner()})
         }
+        "cv_run" => {
+            use crate::commitment_verification as cv;
+            use std::cell::{Cell, RefCell};
+            let responses: Vec<String> = a.get("responses").and_then(|v| v.as_array()).map(|x| x.iter().map(|s| s.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+            let idx = Cell::new(0usize);
+            let prompts: RefCell<Vec<Value>> = RefCell::new(vec![]);
+            let llm = |msgs: &[(String, String)]| -> Result<String, String> {
+                prompts.borrow_mut().push(json!(msgs.iter().map(|(r, c)| json!({"role": r, "content": c})).collect::<Vec<_>>()));
+                let i = idx.get();
+                idx.set(i + 1);
+                let r = responses.get(i).cloned().unwrap_or_default();
+                match r.strip_prefix("__raise__:") {
+                    Some(name) => Err(name.to_string()),
+                    None => Ok(r),
+                }
+            };
+            let message = a_str(a, "message").unwrap_or_default();
+            let out = match a_str(a, "op").as_deref() {
+                Some("classify") => json!(cv::classify_commitment(&message, &a_str(a, "evidence").unwrap_or_default(), &llm)?),
+                _ => {
+                    let cands: Vec<(String, String)> = a.get("candidates").and_then(|v| v.as_array()).map(|x| x.iter().map(|c| (c["commitment_id"].as_str().unwrap_or("").to_string(), c["evidence"].as_str().unwrap_or("").to_string())).collect()).unwrap_or_default();
+                    let mut res = cv::verify_direct_fulfilment(&message, &llm, &cands)?;
+                    let spans: Vec<(String, usize, usize)> = a.get("event_spans").and_then(|v| v.as_array()).map(|x| x.iter().map(|s| (s[0].as_str().unwrap_or("").to_string(), s[1].as_u64().unwrap_or(0) as usize, s[2].as_u64().unwrap_or(0) as usize)).collect()).unwrap_or_default();
+                    if a.get("drop").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        res = cv::drop_if_reported(res, &spans);
+                    }
+                    res.to_json()
+                }
+            };
+            json!({"out": out, "prompts": prompts.into_inner()})
+        }
         "pf_list_facts" => json!(pf::list_facts(cx, &uid)?),
         "pf_record_turn_facts" => {
             let facts: Vec<pf::ExtractedFact> = a.get("facts").and_then(|v| v.as_array()).map(|x| x.iter().map(pf::ExtractedFact::from_json).collect()).unwrap_or_default();

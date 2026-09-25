@@ -300,6 +300,102 @@ def main() -> int:
                                     '{"revises": true}', '{"conflict": true}', '{"revises": false}', '{"conflict": false}', "{}", "плохо", "__raise__:KeyError"]))
         fcase(f"случайные #{i}", m, resp, rnd.choice([[], known2, known2[:1]]))
 
+    # ================= проверка наблюдаемого выполнения =================
+    import pet.commitment_verification as cvm
+
+    def cv_py(op, message, responses, cands=None, evidence="", spans=None, drop=False):
+        queue = list(responses)
+        prompts = []
+
+        def llm(msgs):
+            prompts.append(msgs)
+            r = queue.pop(0) if queue else ""
+            if isinstance(r, str) and r.startswith("__raise__:"):
+                raise type(r.split(":", 1)[1], (Exception,), {})()
+            return r
+
+        try:
+            if op == "classify":
+                return {"out": cvm.classify_commitment(message, evidence, llm), "prompts": prompts}
+            res = cvm.verify_direct_fulfilment(message, llm, cands or [])
+            if drop:
+                res = cvm.drop_if_reported(res, [tuple(x) for x in (spans or [])])
+            d = dataclasses.asdict(res)
+            d["verified"] = None if d["verified"] is None else {k: d["verified"][k] for k in ("commitment_id", "evidence", "start", "end")}
+            return {"out": d, "prompts": prompts}
+        except Exception as e:  # noqa: BLE001
+            return {"error": type(e).__name__}
+
+    def cv_rs(op, message, responses, cands=None, evidence="", spans=None, drop=False):
+        a = {"op": op, "message": message, "responses": responses, "candidates": cands or [], "evidence": evidence, "event_spans": spans or [], "drop": drop}
+        r = json.loads(yandi_core.call(h, "cv_run", json.dumps(a, ensure_ascii=False)))
+        return r.get("ok") or {"error": r.get("error")}
+
+    def ccase(label, op, message, responses, **kw):
+        nonlocal n
+        n += 1
+        p, r = cv_py(op, message, responses, **kw), cv_rs(op, message, responses, **kw)
+        ok = ("error" in p and "error" in r) if ("error" in p or "error" in r) else norm(p) == norm(r)
+        check(f"проверка: {label}", ok, f"\n msg={message!r} resp={responses!r} kw={kw}\n py={norm(p)[:800]}\n rs={norm(r)[:800]}")
+
+    dv = lambda span, target=0: json.dumps({"delivery": {"span": span, "target": target}})  # noqa: E731
+    dl = lambda delivers=True, frame="current": json.dumps({"delivers": delivers, "frame": frame})  # noqa: E731
+    C1 = [{"commitment_id": "c1", "evidence": "напишу кодовое слово"}]
+    C2 = C1 + [{"commitment_id": "c2", "evidence": "пришлю число"}]
+    MM = "Кодовое слово: облако."
+
+    ccase("классификация: in_chat", "classify", MM, ['{"deliverable": "in_chat"}'], evidence="напишу кодовое слово")
+    ccase("классификация: external", "classify", MM, ['{"deliverable": "external"}'], evidence="оплачу счёт")
+    ccase("классификация: пусто", "classify", MM, ['{}'], evidence="x")
+    ccase("классификация: без доказательства", "classify", MM, ['{"deliverable": "in_chat"}'], evidence="")
+    ccase("классификация: сбой", "classify", MM, ["__raise__:OSError"], evidence="x")
+    ccase("классификация: не JSON", "classify", MM, ["да"], evidence="x")
+    ccase("классификация: deliverable не строка", "classify", MM, ['{"deliverable": ["in_chat"]}'], evidence="x")
+    ccase("нет кандидатов", "verify", MM, [], cands=[])
+    ccase("пустое сообщение", "verify", "  ", [], cands=C1)
+    ccase("длинное сообщение", "verify", " ".join(["слово"] * 121), [], cands=C1)
+    ccase("проверено", "verify", MM, [dv([2, 2]), dl()], cands=C1)
+    ccase("нет delivery", "verify", MM, ['{"x": 1}'], cands=C1)
+    ccase("delivery null", "verify", MM, ['{"delivery": null}'], cands=C1)
+    ccase("delivery не объект", "verify", MM, ['{"delivery": [1, 2]}'], cands=C1)
+    ccase("delivery строка", "verify", MM, ['{"delivery": "да"}'], cands=C1)
+    ccase("span вне диапазона", "verify", MM, [dv([0, 9])], cands=C1)
+    ccase("span не числа", "verify", MM, [dv(["a", 1])], cands=C1)
+    ccase("span слишком длинный", "verify", " ".join(["слово"] * 40), [dv([0, 30])], cands=C1)
+    ccase("span ровно 30", "verify", " ".join(["слово"] * 40), [dv([0, 29]), dl()], cands=C1)
+    ccase("target вне диапазона", "verify", MM, [dv([2, 2], 3)], cands=C1)
+    ccase("target булево", "verify", MM, ['{"delivery": {"span": [2, 2], "target": true}}'], cands=C1)
+    ccase("target отрицательный", "verify", MM, [dv([2, 2], -1)], cands=C1)
+    ccase("доказательство из знаков препинания", "verify", "Слово ...", [dv([1, 1])], cands=C1)
+    ccase("в цитате", "verify", "Он сказал «кодовое слово облако» вчера", [dv([3, 4]), dl()], cands=C1)
+    ccase("в незакрытой цитате", "verify", "Он сказал \"кодовое слово облако вчера", [dv([2, 3]), dl()], cands=C1)
+    ccase("рядом с цитатой", "verify", "«Привет» кодовое слово облако", [dv([1, 3]), dl()], cands=C1)
+    ccase("слепая: не доставка", "verify", MM, [dv([2, 2]), dl(False)], cands=C1)
+    ccase("слепая: другой кадр", "verify", MM, [dv([2, 2]), dl(True, "quotation")], cands=C1)
+    ccase("слепая: неизвестный кадр", "verify", MM, [dv([2, 2]), dl(True, "dream")], cands=C1)
+    ccase("слепая: delivers не булево", "verify", MM, [dv([2, 2]), '{"delivers": 1, "frame": "current"}'], cands=C1)
+    ccase("слепая: пусто", "verify", MM, [dv([2, 2]), "{}"], cands=C1)
+    ccase("слепая: сбой", "verify", MM, [dv([2, 2]), "__raise__:KeyError"], cands=C1)
+    ccase("два обещания: подходит названное", "verify", MM, [dv([2, 2], 1), dl(False), dl(True)], cands=C2)
+    ccase("два обещания: подходят оба", "verify", MM, [dv([2, 2], 0), dl(True), dl(True)], cands=C2)
+    ccase("два обещания: подходит другое", "verify", MM, [dv([2, 2], 0), dl(False), dl(True)], cands=C2)
+    ccase("два обещания: не подходит ни одно", "verify", MM, [dv([2, 2], 0), dl(False), dl(False)], cands=C2)
+    ccase("два обещания: сбой второго", "verify", MM, [dv([2, 2], 0), dl(True), "__raise__:OSError"], cands=C2)
+    ccase("семь обещаний берутся последние пять", "verify", MM, [dv([2, 2], 4)] + [dl(True) if i == 4 else dl(False) for i in range(5)], cands=[{"commitment_id": f"c{i}", "evidence": f"обещание {i}"} for i in range(7)])
+    ccase("отбрасывание: внутри заявления", "verify", MM, [dv([2, 2]), dl()], cands=C1, spans=[["fulfilment_claim", 0, 30]], drop=True)
+    ccase("отбрасывание: внутри обещания", "verify", MM, [dv([2, 2]), dl()], cands=C1, spans=[["promise", 5, 12]], drop=True)
+    ccase("отбрасывание: касается границей", "verify", MM, [dv([2, 2]), dl()], cands=C1, spans=[["promise", 0, 15]], drop=True)
+    ccase("отбрасывание: касается границей справа", "verify", MM, [dv([2, 2]), dl()], cands=C1, spans=[["promise", 21, 30]], drop=True)
+    ccase("многоточие в конце доставки", "verify", "Кодовое слово: облако…", [dv([2, 2]), dl()], cands=C1)
+    ccase("отбрасывание: другой тип", "verify", MM, [dv([2, 2]), dl()], cands=C1, spans=[["insult", 0, 30]], drop=True)
+    ccase("отбрасывание: без проверки", "verify", MM, ['{"delivery": null}'], cands=C1, spans=[["promise", 0, 30]], drop=True)
+    for i in range(200):
+        m = rnd.choice(["Кодовое слово: облако.", "Вот число 42, как обещал", "Он написал «привет мир» и ушёл", "Пароль был \"abc\" вчера", "Готово!", "Просто сообщение без доставки"])
+        nw = len(m.split())
+        d = rnd.choice([dv([rnd.randint(-1, nw), rnd.randint(-1, nw + 1)], rnd.choice([0, 1, 2, -1, None])), '{"delivery": null}', "{}", "мусор", "__raise__:OSError", '{"delivery": {"span": [0, 0], "target": 0}}'])
+        rs_ = [d] + [rnd.choice([dl(rnd.choice([True, False]), rnd.choice(["current", "quotation", "report", "x"])), "{}", "плохо", "__raise__:KeyError"]) for _ in range(4)]
+        ccase(f"случайная проверка #{i}", "verify", m, rs_, cands=rnd.choice([C1, C2, [], C2 + C2]), spans=rnd.choice([[], [["promise", 0, 5]], [["fulfilment_claim", 3, 12]], [["insult", 0, 40]]]), drop=rnd.choice([False, True]))
+
     print(f"\n(сценариев: {n}; успешных проверок: {_OK} из {_OK + len(FAILURES)})")
     print("=" * 72)
     if FAILURES:

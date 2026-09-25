@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "rustlib" / "yandi_core" / "src"
 JOBS = [
     ("pet/event_extraction.py", {"_EXTRACT_SYSTEM": "event_extract_system.txt", "_CHECK_SYSTEM": "event_check_system.txt"}),
+    ("pet/commitment_verification.py", {"_CLASSIFY_SYSTEM": "commit_classify_system.txt", "_VERIFY_SYSTEM": "commit_verify_system.txt", "_DELIVERS_SYSTEM": "commit_delivers_system.txt"}),
     ("pet/fact_extraction.py", {"_EXTRACT_SYSTEM": "fact_extract_system.txt", "_CHECK_SYSTEM": "fact_check_system.txt", "_SUPPORT_SYSTEM": "fact_support_system.txt",
                                 "_LINK_SYSTEM": "fact_link_system.txt", "_CONFLICT_SYSTEM": "fact_conflict_system.txt"}),
 ]
