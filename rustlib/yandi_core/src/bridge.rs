@@ -433,6 +433,63 @@ fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
             };
             json!({"out": out, "embed_calls": embed_calls.into_inner(), "prompts": prompts.into_inner()})
         }
+        name if name.starts_with("me_") => {
+            use crate::memory_episodic as me;
+            let st = |k: &str| a_str(a, k).unwrap_or_default();
+            let f = |k: &str, d: f64| a.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+            let lim = |d: i64| a.get("limit").and_then(|v| v.as_i64()).unwrap_or(d);
+            let eps = |v: Vec<me::Episode>| json!(v.iter().map(|e| e.to_json()).collect::<Vec<_>>());
+            match &name[3..] {
+                "add" => {
+                    let tags: Vec<String> = a.get("tags").and_then(|v| v.as_array()).map(|x| x.iter().map(|t| t.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+                    json!(me::add(cx, &st("event_type"), &st("summary"), a.get("details").cloned().unwrap_or(Value::Null), f("importance", 0.5), &tags)?)
+                }
+                "add_query" => json!(me::add_query(cx, &st("query"), &st("domain"), &st("answer_mode"), &st("trust"), f("confidence", 0.0))?),
+                "add_decision" => json!(me::add_decision(cx, &st("decision_type"), &st("reason"), a.get("details").cloned().unwrap_or(Value::Null), f("importance", 0.5))?),
+                "add_error" => json!(me::add_error(cx, &st("error"), a.get("context").cloned().unwrap_or(Value::Null), f("severity", 0.7))?),
+                "add_reflection" => json!(me::add_reflection(cx, a.get("reflection").ok_or("KeyError")?)?),
+                "add_learning" => json!(me::add_learning(cx, &st("lesson"), a.get("context").ok_or("KeyError")?, f("importance", 0.6))?),
+                "get_by_type" => eps(me::get_by_type(cx, &st("event_type"), lim(20))?),
+                "get_by_tag" => eps(me::get_by_tag(cx, &st("tag"), lim(20))?),
+                "get_by_importance" => eps(me::get_by_importance(cx, f("min_importance", 0.7), lim(20))?),
+                "get_recent" => eps(me::get_recent(cx, lim(20))?),
+                "get_timeline" => json!(me::get_timeline(cx, lim(50))?),
+                "get_stats" => me::get_stats(cx)?,
+                "summary" => json!(me::summary(cx)?),
+                other => return Err(format!("нет метода {other}")),
+            }
+        }
+        // состояние мотивации проходит через вызовы явно (в Python оно живёт в экземпляре): {"state": …|null, "method": …, "args": …}
+        "mo_call" => {
+            use crate::motivation as mo;
+            let mut sys = match a.get("state").filter(|v| !v.is_null()) {
+                None => mo::MotivationSystem::load(cx)?,
+                Some(s) => mo::MotivationSystem { m: mo::Motivation::from_state(s) },
+            };
+            let args = a.get("args").cloned().unwrap_or(json!({}));
+            let f = |k: &str| args.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let st = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let out = match a_str(a, "method").as_deref().unwrap_or("") {
+                "init" => Value::Null,
+                "set" => {
+                    sys.set(cx, &st("which"), f("value"))?;
+                    Value::Null
+                }
+                "should_explore" => json!(sys.should_explore(args.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.5), args.get("uncertainty").and_then(|v| v.as_f64()).unwrap_or(0.5))),
+                "should_verify" => json!(sys.should_verify(&st("trust"), f("confidence"))),
+                "should_ask_clarification" => json!(sys.should_ask_clarification(f("uncertainty"))),
+                "should_use_web" => json!(sys.should_use_web(&st("testability"), f("confidence"))),
+                "get_answer_mode_preference" => json!(sys.get_answer_mode_preference(&st("domain"), &st("testability"))),
+                "update_from_experience" => {
+                    sys.update_from_experience(cx, args.get("result").ok_or("KeyError")?)?;
+                    Value::Null
+                }
+                "get_summary" => sys.get_summary(),
+                "summary_text" => json!(sys.summary_text()),
+                other => return Err(format!("нет метода {other}")),
+            };
+            json!({"out": out, "state": sys.m.to_json()})
+        }
         other => yandi_db::repo::call(cx.conn, other, a)?,
     })
 }

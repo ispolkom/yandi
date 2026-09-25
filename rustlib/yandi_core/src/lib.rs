@@ -7,6 +7,8 @@ pub mod chat_turn;
 pub mod commitment_verification;
 pub mod event_extraction;
 pub mod fact_extraction;
+pub mod memory_episodic;
+pub mod motivation;
 pub mod ctx;
 pub mod personal_facts;
 pub mod personal_memory;
