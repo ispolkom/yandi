@@ -10,6 +10,7 @@ pub mod messages;
 pub mod ollama;
 pub mod pyfmt;
 pub mod remote;
+pub mod secure_store;
 pub mod semantic;
 pub mod transport;
 pub mod types;

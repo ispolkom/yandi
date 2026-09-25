@@ -7,6 +7,7 @@ use crate::messages::{append_system_instruction, build_messages, SystemArg};
 use crate::ollama::{self, OllamaParams};
 use crate::remote::{self, GenerateParams};
 use crate::transport::ReqwestTransport;
+use crate::secure_store as store;
 use crate::semantic::*;
 use crate::types::*;
 use crate::vector_space::*;
@@ -125,6 +126,22 @@ fn dispatch(name: &str, args: &Value) -> Result<Value, String> {
                 Err(e) => json!({"error": e.0}),
             }
         }
+        "store_get" => match store::get_model_entry(a("model").as_str().unwrap_or("")) {
+            Ok(v) => json!({"ok": v}),
+            Err(e) => json!({"error": {"kind": e.kind(), "msg": e.message()}}),
+        },
+        "store_set" => match store::set_model_entry(a("model").as_str().unwrap_or(""), &a("entry")) {
+            Ok(()) => json!({"ok": null}),
+            Err(e) => json!({"error": {"kind": e.kind(), "msg": e.message()}}),
+        },
+        "store_remove" => match store::remove_model_entry(a("model").as_str().unwrap_or("")) {
+            Ok(b) => json!({"ok": b}),
+            Err(e) => json!({"error": {"kind": e.kind(), "msg": e.message()}}),
+        },
+        "store_list" => match store::list_models() {
+            Ok(m) => json!({"ok": m}),
+            Err(e) => json!({"error": {"kind": e.kind(), "msg": e.message()}}),
+        },
         "remote_embed" => {
             let texts: Vec<String> = match a("texts") {
                 Value::Array(x) => x.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
