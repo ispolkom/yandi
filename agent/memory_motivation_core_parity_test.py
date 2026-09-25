@@ -30,7 +30,23 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
+def _round_floats(v):
+    """MySQL разбирает/печатает double в JSON не всегда так же, как Python и SQLite (0.9500000000000001 ↔ 0.95): сверяем до 12 значащих цифр."""
+    if isinstance(v, float):
+        return float(f"{v:.12g}")
+    if isinstance(v, dict):
+        return {k: _round_floats(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_round_floats(x) for x in v]
+    return v
+
+
 def norm(v):
+    if isinstance(v, str) and v[:1] in "{[":
+        try:
+            return json.dumps(_round_floats(json.loads(v)), ensure_ascii=False, sort_keys=True)
+        except ValueError:
+            return v
     if isinstance(v, decimal.Decimal):
         return int(v) if v == v.to_integral_value() else float(v)
     if isinstance(v, dt.datetime):

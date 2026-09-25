@@ -490,6 +490,61 @@ fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
             };
             json!({"out": out, "state": sys.m.to_json()})
         }
+        // рефлексивный цикл: состояние экземпляра (счётчик и список рефлексий) проходит через вызовы явно
+        "rl_call" => {
+            use crate::reflection_loop as rl;
+            let mut lp = match a.get("state").filter(|v| !v.is_null()) {
+                None => rl::ReflectionLoop::new(cx)?,
+                Some(s) => rl::ReflectionLoop::from_json(s),
+            };
+            let args = a.get("args").cloned().unwrap_or(json!({}));
+            let out = match a_str(a, "method").as_deref().unwrap_or("") {
+                "init" => Value::Null,
+                "reflect_on_query" => {
+                    let errors: Vec<String> = args.get("errors").and_then(|v| v.as_array()).map(|x| x.iter().map(|e| e.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+                    let r = lp.reflect_on_query(
+                        cx,
+                        args.get("query").unwrap_or(&Value::Null),
+                        args.get("epistemic").ok_or("KeyError")?,
+                        args.get("trust").unwrap_or(&Value::Null),
+                        args.get("confidence").unwrap_or(&Value::Null),
+                        &errors,
+                        args.get("validation_result").filter(|v| !v.is_null()),
+                        args.get("context").filter(|v| !v.is_null()),
+                    )?;
+                    r.to_json()
+                }
+                "get_policies" => lp.get_policies(cx)?,
+                "get_summary" => lp.get_summary(cx)?,
+                "summary_text" => json!(lp.summary_text(cx)?),
+                other => return Err(format!("нет метода {other}")),
+            };
+            json!({"out": out, "state": lp.to_json()})
+        }
+        // главный цикл жизни: состояние экземпляра (счётчики, рефлексия, мотивация) проходит через вызовы явно
+        "cl_call" => {
+            use crate::core_loop as cl;
+            let mut lp = match a.get("state").filter(|v| !v.is_null()) {
+                None => cl::CoreLoop::new(cx)?,
+                Some(s) => cl::CoreLoop::from_json(s),
+            };
+            let args = a.get("args").cloned().unwrap_or(json!({}));
+            let out = match a_str(a, "method").as_deref().unwrap_or("") {
+                "init" => Value::Null,
+                "run_cycle" => lp.run_cycle(cx, args.get("input").filter(|v| !v.is_null()))?,
+                "perceive" => lp.perceive(cx, args.get("input").filter(|v| !v.is_null()))?,
+                "update_world_model" => lp.update_world_model(cx, args.get("perception").ok_or("KeyError")?)?,
+                "update_self_model" => lp.update_self_model(cx)?,
+                "evaluate_goals" => lp.evaluate_goals(cx)?,
+                "reflect" => lp.reflect(cx)?,
+                "act" => lp.act(cx, args.get("action_type").and_then(|v| v.as_str()).unwrap_or(""), args.get("data").ok_or("KeyError")?)?,
+                "remember" => lp.remember(cx, args.get("action_result").ok_or("KeyError")?)?,
+                "get_status" => lp.get_status(cx)?,
+                "summary_text" => json!(lp.summary_text(cx)?),
+                other => return Err(format!("нет метода {other}")),
+            };
+            json!({"out": out, "state": lp.to_json()})
+        }
         other => yandi_db::repo::call(cx.conn, other, a)?,
     })
 }

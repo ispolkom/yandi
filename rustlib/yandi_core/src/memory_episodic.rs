@@ -79,12 +79,35 @@ fn episodes(cx: &Ctx, rows: Value) -> Vec<Episode> {
 
 /// Добавить эпизод; важность зажимается в 0..1; идентификатор — `ep_` + 12 знаков.
 pub fn add(cx: &Ctx, event_type: &str, summary: &str, details: Value, importance: f64, tags: &[String]) -> R<String> {
+    add_v(cx, event_type, summary, details, importance, json!(tags))
+}
+
+/// То же, но теги — произвольные значения JSON (в оригинале в теги может попасть любое значение).
+pub fn add_v(cx: &Ctx, event_type: &str, summary: &str, details: Value, importance: f64, tags: Value) -> R<String> {
     let id = format!("ep_{}", cut(&cx.uuid_hex(), 12));
     cx.repo(
         "record_episode",
         json!({"episode_id": id, "event_type": event_type, "summary": summary, "details": details, "importance": importance.min(1.0).max(0.0), "tags": tags, "created_at": cx.now_value()}),
     )?;
     Ok(id)
+}
+
+/// `add_query` для значений произвольного вида: запрос — строка (срез `[:60]`), домен / режим / доверие попадают в детали и теги как есть, уверенность — число.
+pub fn add_query_values(cx: &Ctx, query: &Value, domain: &Value, answer_mode: &Value, trust: &Value, confidence: &Value) -> R<String> {
+    let q = query.as_str().ok_or_else(|| "TypeError".to_string())?;
+    let conf = match confidence {
+        Value::Number(n) => n.as_f64().unwrap_or(0.0),
+        Value::Bool(b) => *b as i64 as f64,
+        _ => return Err("TypeError".into()),
+    };
+    add_v(
+        cx,
+        "query",
+        &format!("Запрос: {}", cut(q, 60)),
+        json!({"query": query, "domain": domain, "answer_mode": answer_mode, "trust": trust, "confidence": confidence}),
+        conf,
+        json!([domain, answer_mode]),
+    )
 }
 
 pub fn add_query(cx: &Ctx, query: &str, domain: &str, answer_mode: &str, trust: &str, confidence: f64) -> R<String> {
