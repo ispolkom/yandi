@@ -10,7 +10,9 @@ use rusqlite::{params_from_iter, Connection};
 use serde_json::{Map, Value};
 
 pub mod epistemic;
+pub mod beliefs;
 pub mod evidence;
+pub mod views;
 
 pub type Row = Map<String, Value>;
 pub type R<T> = Result<T, String>;
@@ -90,7 +92,8 @@ pub(crate) fn jv(x: Option<&Value>) -> Sql {
     }
 }
 
-/// `json.dumps` Python по умолчанию (разделители `, ` и `: `, non-ASCII экранируется) — для JSON-столбцов.
+/// Текст JSON-столбца ТАК, как его отдаёт MySQL (нормализованный тип JSON): ключи объектов отсортированы (сначала короче, затем по байтам), разделители `, ` и `: `,
+/// не-ASCII символы как есть (не `\\uXXXX`). Так читатели «сырого» текста столбца видят то же, что и раньше.
 pub(crate) fn py_json_dumps(v: &Value) -> String {
     fn go(v: &Value, out: &mut String) {
         match v {
@@ -108,12 +111,7 @@ pub(crate) fn py_json_dumps(v: &Value) -> String {
                         '\t' => out.push_str("\\t"),
                         '\u{8}' => out.push_str("\\b"),
                         '\u{c}' => out.push_str("\\f"),
-                        c if (c as u32) < 0x20 || (c as u32) > 0x7f => {
-                            let mut b = [0u16; 2];
-                            for u in c.encode_utf16(&mut b) {
-                                out.push_str(&format!("\\u{:04x}", u));
-                            }
-                        }
+                        c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
                         c => out.push(c),
                     }
                 }
@@ -130,14 +128,16 @@ pub(crate) fn py_json_dumps(v: &Value) -> String {
                 out.push(']');
             }
             Value::Object(m) => {
+                let mut keys: Vec<&String> = m.keys().collect();
+                keys.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.as_bytes().cmp(b.as_bytes())));
                 out.push('{');
-                for (i, (k, x)) in m.iter().enumerate() {
+                for (i, k) in keys.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    go(&Value::String(k.clone()), out);
+                    go(&Value::String((*k).clone()), out);
                     out.push_str(": ");
-                    go(x, out);
+                    go(&m[*k], out);
                 }
                 out.push('}');
             }
@@ -305,6 +305,12 @@ pub fn call(c: &Connection, name: &str, args: &Value) -> R<Value> {
         return Ok(v);
     }
     if let Some(v) = evidence::dispatch(c, name, &a)? {
+        return Ok(v);
+    }
+    if let Some(v) = beliefs::dispatch(c, name, &a)? {
+        return Ok(v);
+    }
+    if let Some(v) = views::dispatch(c, name, &a)? {
         return Ok(v);
     }
     Err(format!("неизвестная функция {name}"))

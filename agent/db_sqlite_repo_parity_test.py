@@ -35,7 +35,7 @@ def norm(v):
     if isinstance(v, dt.datetime):
         return v.strftime("%Y-%m-%d %H:%M:%S")
     if isinstance(v, decimal.Decimal):
-        return float(v)
+        return int(v) if v == v.to_integral_value() else float(v)
     if isinstance(v, (bytes, bytearray)):
         return bytes(v).hex()
     if isinstance(v, bool):
@@ -155,7 +155,7 @@ def main() -> int:
                     and (p.get("error") != "AssertionError" or r.get("error") == "AssertionError")
             else:
                 ok = canon(p["ok"]) == canon(r["ok"])
-            check(f"{label} · вызов {i} {func}", ok, f"\n args={json.dumps(kwargs, ensure_ascii=False)[:300]}\n py={json.dumps(p, ensure_ascii=False)[:600]}\n rs={json.dumps(r, ensure_ascii=False)[:600]}")
+            check(f"{label} · вызов {i} {func}", ok, f"\n args={json.dumps(kwargs, ensure_ascii=False)[:300]}\n py={json.dumps(p, ensure_ascii=False)[:2500]}\n rs={json.dumps(r, ensure_ascii=False)[:2500]}")
             if not ok:
                 return
         dp, dr = dump_py(), dump_rs()
@@ -293,6 +293,61 @@ def main() -> int:
         ("get_ai_observations_for_run", dict(run_id="none")),
     ]
     scenario("D1 трассы, решения, наблюдения ИИ", misc)
+
+    bel = [
+        ("upsert_belief", dict(belief_id="b1", topic="космос", statement="Планет восемь", confidence=0.83, evidence_for=["e1", "e2"], evidence_against=[], claim_ids=["c1"], created_at=T0, updated_at=T0)),
+        ("upsert_belief", dict(belief_id="b2", topic="космос", statement="Плутон — планета", confidence=0.3, status="revised", contradiction_score=0.6, prior=0.2, likelihood=0.7, decay_factor=0.9, created_at=T1, updated_at=T1)),
+        ("upsert_belief", dict(belief_id="b3", topic="история", statement="Рим пал", confidence=0.95, status="superseded", superseded_by="b4", created_at=T2, updated_at=T2)),
+        ("upsert_belief", dict(belief_id="b1", topic="ДРУГАЯ", statement="Планет восемь (уточнено)", confidence=0.91, status="active", evidence_for=["e1", "e3"], claim_ids=None, contradiction_score=0.5, created_at=T2, updated_at=T2)),
+        ("get_belief", dict(belief_id="b1")),
+        ("get_belief", dict(belief_id="nope")),
+        ("list_beliefs_by_topic", dict(topic="космос")),
+        ("list_beliefs_by_topic", dict(topic="космос", statuses=["active"])),
+        ("list_beliefs_by_topic", dict(topic="история", statuses=["superseded", "rejected"])),
+        ("list_beliefs_by_topic", dict(topic="история")),
+        ("list_all_beliefs", dict()),
+        ("list_active_beliefs", dict()),
+        ("list_contradictory_beliefs", dict()),
+        ("list_contradictory_beliefs", dict(min_score=0.55)),
+        ("list_contradictory_beliefs", dict(min_score=0.0)),
+        ("get_belief_stats", dict()),
+        ("record_belief_assessment", dict(belief_id="b1", change_type="challenge", old_confidence=0.83, new_confidence=0.91, reason="ы" * 300, run_id="r1", created_at=T0)),
+        ("record_belief_assessment", dict(belief_id="b1", change_type="decay", created_at=T1)),
+        ("record_belief_assessment", dict(belief_id="b1", change_type="decay", reason="", created_at=T1)),
+        ("list_belief_history", dict(belief_id="b1")),
+        ("list_belief_history", dict(belief_id="zz")),
+        ("record_recheck_event", dict(family_id="f1", outcome="confirmed", run_id="r1", trigger_reason="age", started_at=T0, reason="р")),
+        ("record_recheck_event", dict(family_id="f1", outcome="changed", started_at=T1)),
+    ]
+    scenario("E1 убеждения, история, перепроверки", bel)
+    scenario("E2 статистика убеждений на пустой таблице", [("get_belief_stats", dict()), ("list_all_beliefs", dict()), ("list_active_beliefs", dict())])
+    views = ev_calls[:-3] + [
+        ("record_answer_version", dict(question_id=1, answer_text="v1", run_id="r1", created_at=T0)),
+        ("record_answer_version", dict(question_id=1, answer_text="v2", run_id="r2", created_at=T1)),
+        ("record_answer_assessment", dict(answer_id=1, run_id="r1", canonical_trust="LOW", created_at=T0)),
+        ("record_answer_assessment", dict(answer_id=2, run_id="r2", canonical_trust="MID", created_at=T1)),
+        ("record_answer_assessment", dict(answer_id=2, run_id="r3", canonical_trust="HIGH", diverged=True, created_at=T2)),
+        ("get_or_create_claim_family", dict(family_id="fx", domain="d", canonical_text="t", created_at=T0)),
+        ("link_family_member", dict(family_id="fx", claim_id="c1", linked_at=T0)),
+        ("get_current_answer", dict(question_id=1)),
+        ("get_current_answer", dict(question_id=99)),
+        ("get_answer_history", dict(question_id=1)),
+        ("get_answer_history", dict(question_id=99)),
+        ("explain_answer", dict(answer_id=1)),
+        ("explain_answer", dict(answer_id=2)),
+        ("explain_answer", dict(answer_id=99)),
+        ("get_verification_runs", dict(question_id=1)),
+        ("get_sources_for_run", dict(run_id="r1")),
+        ("get_sources_for_run", dict(run_id="r2")),
+        ("get_claim_history", dict(family_id="fx")),
+        ("get_route_history", dict(resource_id=1)),
+        ("get_last_checked", dict(question_id=1)),
+        ("get_last_checked", dict(question_id=99)),
+        ("compare_runs", dict(run_id_a="r1", run_id_b="r2")),
+        ("compare_runs", dict(run_id_a="r2", run_id_b="r1")),
+        ("compare_runs", dict(run_id_a="r1", run_id_b="r3")),
+    ]
+    scenario("F1 API чтения локальной памяти", views)
 
     print(f"\n(сценариев: {n}; успешных проверок: {_OK} из {_OK + len(FAILURES)})")
     print("=" * 72)
