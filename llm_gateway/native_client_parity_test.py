@@ -8,9 +8,10 @@ llm_gateway/native_client_parity_test.py — доказательство, чт�
 (2) результат — текст, метаданные вместе с `_llm_gateway_trace` (адаптер, источник, причина выбора, возможности, контракт вывода, класс и текст ошибки) — либо ошибка (класс + текст).
 Настройки узла подменяются ОДНОЙ и той же картой «имя → запись» (и Python, и Rust); встроенный движок недоступен, как в песочнице (`Llama is None`).
 Цели: явная настройка remote openai/anthropic (с ключом/без, с/без `model`, `protocol` по умолчанию), плохой протокол, неизвестный backend, запись без backend, llamacpp с несуществующим файлом,
-запись без обязательного поля (KeyError), исключение хранилища; НЕ настроенное имя → Ollama-фоллбэк; встроенный реестр (включён и файл есть) → провал движка → откат на Ollama ТОЛЬКО для builtin-цели;
-явный base_url ≠ по умолчанию → Ollama-совместимая цель. Ответы сервера: норма / 500 / мусор. Параметры: prompt и messages, system строкой и списком, json-режим, strip_think, temperature/max_tokens/stop/extra_options.
-Семантика: три контракта (json_schema у Ollama, json_object у OpenAI, «маркерный» у Anthropic) × ответы модели. Эмбеддинги: настроено remote / не настроено (Ollama /api/embed) / битые батчи / отказ Anthropic.
+запись без обязательного поля (KeyError), исключение хранилища. OLLAMA ИСКЛЮЧЁН (решение владельца 2026-09-25): сценарии «не настроено → Ollama», «реестр → откат на Ollama», Ollama-эмбеддинги и явный base_url как Ollama
+УДАЛЕНЫ из сверки с Python (у Python они остаются) и заменены проверками ТОЛЬКО родной версии («NO*» ниже): ни одного запроса к /api/, честная ошибка «backend не настроен», явный base_url — OpenAI-совместимый.
+Ответы сервера: норма / 500 / мусор. Параметры: prompt и messages, system строкой и списком, json-режим, strip_think, temperature/max_tokens/stop/extra_options.
+Семантика: два контракта (json_object у OpenAI, «маркерный» у Anthropic) × ответы модели. Эмбеддинги: настроено remote / битые батчи / отказ Anthropic.
 РАСХОЖДЕНИЯ (не считаются ошибкой): деталь ошибки СОЕДИНЕНИЯ (текст исключения Python) — там сравнивается класс и наличие ключевой фразы.
 
 Требует собранного моста yandi_llm — если не установлен, SKIP.
@@ -193,28 +194,17 @@ def main() -> int:
         # ошибки входа
         scenario("A3 нет prompt/messages", "complete", OPENAI_OK, model="m_openai")
         scenario("A4 и prompt и messages", "complete", OPENAI_OK, model="m_openai", prompt="x", messages=[{"role": "user", "content": "y"}])
-        # ---- B. НЕ настроено → Ollama; явный base_url; встроенный реестр ----
-        for params in PARAMS:
-            for reply in (OLLAMA_OK, E500, GARBAGE):
-                scenario("B1 не настроено → Ollama", "complete", reply, model="plain-model", **params)
-        for params in PARAMS[:3]:
-            scenario("B2 явный base_url ≠ по умолчанию (Ollama-совместимая цель)", "complete", OLLAMA_OK, model="m_openai", base_url=SRV + "/other", **params)
+        # ---- B. явная настройка сильнее включённого реестра; явная ошибка НЕ откатывается (сверка с Python) ----
         state["local_enabled"] = True
-        for params in PARAMS:
-            for reply in (OLLAMA_OK, E500, GARBAGE):
-                scenario("B3 встроенный реестр: движок недоступен → откат на Ollama", "complete", reply, model="builtin-m", **params)
-        scenario("B4 реестр: файла нет → Ollama сразу", "complete", OLLAMA_OK, model="builtin-missing", prompt="x")
         scenario("B5 явная настройка сильнее включённого реестра", "complete", OPENAI_OK, model="m_openai", prompt="x")
-        scenario("B6 явная ошибка НЕ откатывается на Ollama (включённый движок)", "complete", E500, model="m_openai", prompt="x")
+        scenario("B6 явная ошибка НЕ откатывается (включённый движок)", "complete", E500, model="m_openai", prompt="x")
         state["local_enabled"] = False
-        scenario("B7 реестр выключен → Ollama", "complete", OLLAMA_OK, model="builtin-m", prompt="x")
         # ---- B8. очистка ответа: закрытые think-блоки удаляются, ОДИНОЧНЫЕ теги остаются; strip — питоновский (U+001C..1F, U+0085, U+00A0) ----
         for content in ("x<think>без закрытия", "закрыт</think> висит", "<think>a</think>b<think>c", "\x1c\x1d ответ \x1e\x1f", "\u0085\u00a0ответ\u2028", "  <think>x</think>  ", "<think>\nмного\nстрок\n</think>\nответ", "<THINK>x</THINK>y"):
             for strip in (True, False):
-                scenario("B8 очистка ответа (Ollama)", "complete", (200, {"message": {"content": content}, "done": True}), model="plain-model", prompt="x", strip_think=strip)
                 scenario("B8 очистка ответа (OpenAI)", "complete", (200, {"choices": [{"message": {"content": content}}]}), model="m_openai", prompt="x", strip_think=strip)
         # ---- C. complete_with_meta ----
-        for model, reply in (("m_openai", OPENAI_OK), ("m_anth", ANTH_OK), ("plain-model", OLLAMA_OK), ("m_openai", (200, {"choices": [{"message": {"content": "x"}, "finish_reason": "stop"}]}))):
+        for model, reply in (("m_openai", OPENAI_OK), ("m_anth", ANTH_OK), ("m_openai", (200, {"choices": [{"message": {"content": "x"}, "finish_reason": "stop"}]}))):
             for params in PARAMS[:2]:
                 scenario(f"C1 complete_with_meta {model}", "meta", reply, model=model, **params)
         # ---- D. семантический результат ----
@@ -227,7 +217,6 @@ def main() -> int:
         SEM_BODIES = {
             "m_openai": lambda t: (200, {"choices": [{"message": {"content": t}, "finish_reason": "stop"}]}),
             "m_anth": lambda t: (200, {"content": [{"type": "text", "text": t}], "stop_reason": "end_turn"}),
-            "plain-model": lambda t: (200, {"message": {"content": t}, "done": True}),
         }
         CONTENTS = ['{"reply": "Привет!", "state": {"severity": 0.5, "is_insult": false}}', '{"reply": "x", "state": null}', '{"reply": "", "state": {}}', "не JSON",
                     'Привет!\n###YANDI_STATE###\n{"severity": 0.3}', 'Только текст без маркера', '<think>x</think>{"reply": "ok", "state": {"a": 1}}', '{"state": {"severity": 1}}']
@@ -238,37 +227,58 @@ def main() -> int:
         scenario("D2 семантика: явная ошибка", "semantic", E500, model="m_openai", prompt="x", requirement=REQS[0])
         scenario("D3 семантика: system-список и messages", "semantic", SEM_BODIES["m_openai"](CONTENTS[0]), model="m_openai", messages=[{"role": "user", "content": "q"}], system=["a"], requirement=REQS[0])
         scenario("D4 семантика: нет входа", "semantic", SEM_BODIES["m_openai"](CONTENTS[0]), model="m_openai", requirement=REQS[0])
-        state["local_enabled"] = True
-        scenario("D5 семантика: реестр → откат на Ollama", "semantic", SEM_BODIES["plain-model"](CONTENTS[0]), model="builtin-m", prompt="x", requirement=REQS[0])
-        state["local_enabled"] = False
         # ---- E. эмбеддинги ----
         VEC = [[1.0, 2.0], [3.0, 4.0]]
-        E_OLL = (200, {"embeddings": VEC})
         E_OAI = (200, {"data": [{"index": 1, "embedding": [3.0, 4.0]}, {"index": 0, "embedding": [1.0, 2.0]}]})
-        for texts in (["a", "б"], ["a"], "строка"):
-            scenario("E1 не настроено → Ollama /api/embed", "embed", E_OLL if len(texts) != 1 else (200, {"embeddings": [[1.0, 2.0]]}), model="plain-emb", texts=texts)
         scenario("E2 настроено remote openai", "embed", E_OAI, model="m_openai", texts=["a", "б"])
         scenario("E3 настроено remote anthropic → отказ", "embed", E_OAI, model="m_anth", texts=["a"])
         scenario("E4 плохой backend в настройке", "embed", E_OAI, model="m_badbackend", texts=["a"])
         scenario("E5 llamacpp с несуществующим файлом", "embed", E_OAI, model="m_llama_missing", texts=["a"])
         scenario("E6 исключение хранилища", "embed", E_OAI, model="m_raise", texts=["a"])
         scenario("E7 пустой список", "embed", E_OAI, model="m_openai", texts=[])
-        scenario("E8 явный base_url ≠ по умолчанию → без настройки", "embed", E_OLL, model="m_openai", texts=["a", "б"], base_url=SRV + "/other")
-        for name, body in (
-            ("batch не тот размер", (200, {"embeddings": [[1.0, 2.0]]})), ("пустой батч", (200, {"embeddings": []})), ("вектор пуст", (200, {"embeddings": [[], [1.0]]})),
-            ("разной размерности", (200, {"embeddings": [[1.0, 2.0], [1.0]]})), ("не число", (200, {"embeddings": [["a", 1.0], [1.0, 2.0]]})),
-            ("bool", (200, {"embeddings": [[True, 1.0], [1.0, 2.0]]})), ("целые допустимы", (200, {"embeddings": [[1, 2], [3, 4]]})), ("не тот ключ", (200, {"vectors": VEC})),
-            ("не список", (200, {"embeddings": "x"})), ("мусор", (200, b"not json")), ("HTTP 500", (500, {})), ("вектор не список", (200, {"embeddings": [1, 2]})),
-        ):
-            scenario(f"E9 Ollama-эмбеддинги: {name}", "embed", body, model="plain-emb", texts=["a", "б"], loose=name in ("мусор",))
         for name, body in (("пустой data", (200, {"data": []})), ("вектор пуст", (200, {"data": [{"index": 0, "embedding": []}]})), ("HTTP 401", (401, {}))):
             scenario(f"E10 remote-эмбеддинги: {name}", "embed", body, model="m_openai", texts=["a"])
         # ---- F. соединение отклонено (деталь ошибки не сравнивается) ----
-        for model in ("m_openai", "plain-model"):
-            for kind, kw in (("complete", {"prompt": "x"}), ("embed", {"texts": ["a"]})):
-                b0 = SRV
-                CONFIG["m_dead"] = {"backend": "remote", "protocol": "openai", "base_url": "http://127.0.0.1:1"}
-                scenario(f"F1 соединение отклонено {model}/{kind}", kind, OPENAI_OK, model="m_dead" if model == "m_openai" else model, base_url="http://127.0.0.1:1" if model != "m_openai" else SRV, loose=True, **kw)
+        CONFIG["m_dead"] = {"backend": "remote", "protocol": "openai", "base_url": "http://127.0.0.1:1"}
+        for kind, kw in (("complete", {"prompt": "x"}), ("embed", {"texts": ["a"]})):
+            scenario(f"F1 соединение отклонено {kind}", kind, OPENAI_OK, model="m_dead", loose=True, **kw)
+        # ---- NO*. OLLAMA ИСКЛЮЧЁН: проверки ТОЛЬКО родной версии (у Python эти пути остаются) ----
+        def native_only(label, fname, args, *, err_sub=None, ok_text=None, path=None):
+            nonlocal n
+            b = len(srv.records)
+            r = rs(fname, **args)
+            new = srv.records[b:]
+            n += 1
+            if err_sub is not None:
+                cond = "error" in r and err_sub in r["error"]["msg"] and not new
+            else:
+                cond = "ok" in r and (ok_text is None or r["ok"].get("text") == ok_text) and [x["path"] for x in new] == [path]
+            check(label, cond, f"r={json.dumps(r, ensure_ascii=False)[:500]} new={[x['path'] for x in new]}")
+
+        NOBACK = "не настроен ни один backend"
+        srv.reply = (200, b"{}", 0.0)
+        for local in (False, True):
+            state["local_enabled"] = local
+            native_only(f"NO1 не настроено (local={local}) → ошибка без запросов", "gw_complete", dict(prompt="x", model="plain-model", base_url=SRV), err_sub=NOBACK if not local else NOBACK)
+            native_only(f"NO1b то же для meta (local={local})", "gw_complete_meta", dict(prompt="x", model="plain-model", base_url=SRV), err_sub=NOBACK)
+            native_only(f"NO1c то же для семантики (local={local})", "gw_complete_semantic", dict(prompt="x", model="plain-model", base_url=SRV, requirement=REQS[0]), err_sub=NOBACK)
+            native_only(f"NO1d эмбеддинги не настроены (local={local})", "gw_embed", dict(texts=["a"], model="plain-model", base_url=SRV), err_sub="не настроен embedding-backend")
+        state["local_enabled"] = False
+        native_only("NO2 встроенный реестр выключен → ошибка (не Ollama)", "gw_complete", dict(prompt="x", model="builtin-m", base_url=SRV), err_sub=NOBACK)
+        state["local_enabled"] = True
+        native_only("NO3 реестр включён, движок недоступен → честная ошибка движка, БЕЗ отката и без запросов", "gw_complete", dict(prompt="x", model="builtin-m", base_url=SRV), err_sub=f"llama_cpp недоступен: {engine_reason}")
+        native_only("NO3b то же для семантики", "gw_complete_semantic", dict(prompt="x", model="builtin-m", base_url=SRV, requirement=REQS[0]), err_sub=f"llama_cpp недоступен: {engine_reason}")
+        native_only("NO3c эмбеддинги встроенного движка: движок недоступен → ошибка, без запросов", "gw_embed", dict(texts=["a"], model="builtin-m", base_url=SRV), err_sub=f"llama_cpp недоступен: {engine_reason}")
+        native_only("NO3d реестр: файла нет → «не настроен»", "gw_complete", dict(prompt="x", model="builtin-missing", base_url=SRV), err_sub=NOBACK)
+        state["local_enabled"] = False
+        # явный base_url — OpenAI-совместимый сервер (например llama-server соседнего узла), путь /chat/completions, НИКАКОГО /api/
+        srv.reply = (200, json.dumps({"choices": [{"message": {"content": "ответ соседа"}, "finish_reason": "stop"}]}).encode(), 0.0)
+        native_only("NO4 явный base_url → OpenAI-протокол", "gw_complete", dict(prompt="x", model="any", base_url=SRV + "/other"), ok_text="ответ соседа", path="/other/chat/completions")
+        srv.reply = (200, b"{}", 0.0)
+        native_only("NO5 эмбеддинги для внешнего base_url не поддерживаются", "gw_embed", dict(texts=["a"], model="m_openai", base_url=SRV + "/other"), err_sub="не поддерживается")
+        # глобально: за ВЕСЬ прогон ни одного запроса к /api/ (Ollama)
+        n += 1
+        check("NO6 ни одного запроса к /api/ (Ollama) за весь прогон", not any(x["path"].startswith("/api/") for x in srv.records), str([x["path"] for x in srv.records if x["path"].startswith("/api/")][:5]))
     finally:
         srv.stop()
         os.environ.pop("YANDI_TEST_KEY", None)

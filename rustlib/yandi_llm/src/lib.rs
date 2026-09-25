@@ -8,7 +8,6 @@
 
 pub mod client;
 pub mod messages;
-pub mod ollama;
 pub mod pyfmt;
 pub mod remote;
 pub mod secure_store;

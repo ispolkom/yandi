@@ -2,9 +2,12 @@
 //! `complete_semantic`) и эмбеддинги (`embed`).
 //!
 //! ГЛАВНЫЙ ИНВАРИАНТ (сохранён дословно): явный выбор владельца узла сильнее любого автоматического отката. Если владелец настроил backend для ТОЧНОГО имени модели
-//! (secure_store), есть только два исхода — этот backend ответил, либо наружу выходит честная ошибка ИМЕННО этого backend'а. Никакого тихого перехода на Ollama,
-//! встроенный движок или что-либо ещё; проверяется ВСЕГДА, независимо от флага `local_enabled`. Флаг управляет ТОЛЬКО автоматической загрузкой встроенного движка,
+//! (secure_store), есть только два исхода — этот backend ответил, либо наружу выходит честная ошибка ИМЕННО этого backend'а. Никакого тихого перехода на встроенный движок или что-либо ещё; проверяется ВСЕГДА, независимо от флага `local_enabled`. Флаг управляет ТОЛЬКО автоматической загрузкой встроенного движка,
 //! когда владелец НИЧЕГО явно не настраивал. Эмбеддинги — отдельная способность узла с тем же инвариантом.
+//!
+//! OLLAMA ИСКЛЮЧЁН ПОЛНОСТЬЮ (решение владельца, 2026-09-25: «даже как фолбэк — только свои инструменты»): ни бэкенда, ни отката, ни эмбеддингов через Ollama. Цели: явная настройка владельца
+//! (remote OpenAI/Anthropic-совместимый сервер, включая собственный `llama-server` узла, или локальный GGUF), встроенный реестр + встроенный движок, либо явный `base_url`
+//! (OpenAI-совместимый сервер, напр. `llama-server` соседнего узла). Иначе — честная ошибка «backend не настроен».
 //!
 //! Что подключается снаружи (трейты): `Transport` (HTTP), `ConfigSource` (secure_store), `LocalEngine` (встроенный движок llama.cpp; в Rust-варианте это будет
 //! supervised-процесс `llama-server` + тот же OpenAI-протокол — пока `UnavailableEngine`, как `Llama is None` в оригинале).
@@ -12,10 +15,9 @@
 use serde_json::{json, Map, Value};
 
 use crate::messages::{append_system_instruction, build_messages, SystemArg};
-use crate::ollama::{self, OllamaParams};
 use crate::pyfmt::py_truthy;
 use crate::remote::{self, GenerateParams};
-use crate::semantic::{contract_from_response_format, normalize_semantic_completion, semantic_contract_from_target, strip_think_blocks};
+use crate::semantic::{contract_from_response_format, normalize_semantic_completion, semantic_contract_from_target};
 use crate::transport::Transport;
 use crate::types::{BackendCapabilities, LlmError, OutputContract, SemanticCompletionResult, SemanticOutputRequirement};
 use crate::vector_space::VectorSpaceId;
@@ -61,6 +63,8 @@ pub struct ModelSpec {
 pub trait LocalEngine {
     fn registry_error(&self) -> Option<String>;
     fn has_model(&self, model: &str) -> bool;
+    /// Спецификация встроенного реестра для имени (для эмбеддингов встроенной модели).
+    fn registry_spec(&self, model: &str) -> Option<ModelSpec>;
     fn generate(&self, alias_or_spec: &LocalTarget, messages: &[Value], p: &LocalParams) -> Result<(String, Map<String, Value>), String>;
     fn embed(&self, spec: &ModelSpec, texts: &[String]) -> Result<(Vec<Value>, Map<String, Value>), String>;
 }
@@ -98,6 +102,9 @@ impl LocalEngine for UnavailableEngine {
     }
     fn has_model(&self, model: &str) -> bool {
         self.registry.iter().any(|(n, s)| n == model && std::path::Path::new(&s.path).exists())
+    }
+    fn registry_spec(&self, model: &str) -> Option<ModelSpec> {
+        self.registry.iter().find(|(n, _)| n == model).map(|(_, s)| s.clone())
     }
     fn generate(&self, target: &LocalTarget, _m: &[Value], _p: &LocalParams) -> Result<(String, Map<String, Value>), String> {
         if let LocalTarget::Registry(alias) = target {
@@ -138,7 +145,6 @@ pub struct Gateway<'a> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Adapter {
     LlamaCpp,
-    OllamaCompat,
     OpenAiCompat,
     Anthropic,
 }
@@ -147,7 +153,6 @@ impl Adapter {
     pub fn id(&self) -> &'static str {
         match self {
             Adapter::LlamaCpp => "llama_cpp",
-            Adapter::OllamaCompat => "ollama_compatible",
             Adapter::OpenAiCompat => "openai_compatible",
             Adapter::Anthropic => "anthropic",
         }
@@ -155,7 +160,6 @@ impl Adapter {
     pub fn capabilities(&self) -> BackendCapabilities {
         match self {
             Adapter::LlamaCpp => BackendCapabilities { json_object: true, json_schema: false, ..Default::default() },
-            Adapter::OllamaCompat => BackendCapabilities { json_object: true, json_schema: true, ..Default::default() },
             Adapter::OpenAiCompat => BackendCapabilities { json_object: true, json_schema: false, ..Default::default() },
             Adapter::Anthropic => BackendCapabilities { json_object: false, json_schema: false, ..Default::default() },
         }
@@ -164,7 +168,6 @@ impl Adapter {
 
 #[derive(Debug, Clone)]
 pub enum TargetData {
-    Ollama { base_url: String },
     Remote { base_url: String, api_key_env: Option<String> },
     Local(LocalTarget),
 }
@@ -182,7 +185,6 @@ pub struct ResolvedTarget {
     pub runtime: Option<&'static str>,
     pub provider: Option<&'static str>,
     pub config_ref: Option<String>,
-    pub fallback_allowed: bool,
     pub fallback_reason: Option<String>,
     pub target: TargetData,
 }
@@ -199,39 +201,31 @@ fn entry_str(entry: &Map<String, Value>, key: &str) -> Result<String, String> {
     }
 }
 
-fn base_target(model: &str, adapter: Adapter, base_url: &str, reason: String, attempt: u32, source: &'static str, config_ref: &str) -> ResolvedTarget {
+/// Явный `base_url` ≠ по умолчанию: OpenAI-совместимый сервер по этому адресу (напр. `llama-server` соседнего узла).
+fn explicit_url_target(model: &str, base_url: &str, attempt: u32) -> ResolvedTarget {
     ResolvedTarget {
         logical_model: model.to_string(),
         resolved_model: model.to_string(),
-        adapter,
-        capabilities: adapter.capabilities(),
-        resolution_reason: reason,
+        adapter: Adapter::OpenAiCompat,
+        capabilities: Adapter::OpenAiCompat.capabilities(),
+        resolution_reason: "explicit non-default base_url normalized as OpenAI-compatible target".to_string(),
         attempt,
-        source,
+        source: "explicit_base_url",
         location: Some(base_url.to_string()),
         runtime: Some("external_server"),
-        provider: Some("ollama_compatible"),
-        config_ref: Some(config_ref.to_string()),
-        fallback_allowed: false,
+        provider: Some("openai_compatible"),
+        config_ref: Some("explicit_base_url".to_string()),
         fallback_reason: None,
-        target: TargetData::Ollama { base_url: base_url.to_string() },
+        target: TargetData::Remote { base_url: base_url.to_string(), api_key_env: None },
     }
 }
 
 impl<'a> Gateway<'a> {
     /// `resolve_target`: ровно ОДНА цель для ОДНОЙ попытки; только решает личность и возможности, ничего не генерирует.
     /// Err — текст исключения оригинала (`RuntimeError`/`KeyError`/исключение хранилища).
-    pub fn resolve_target(&self, model: &str, base_url: &str, attempt: u32, fallback_from: Option<&ResolvedTarget>) -> Result<ResolvedTarget, String> {
-        if let Some(prev) = fallback_from {
-            if prev.source != "builtin_registry" {
-                return Err(format!("target from {} has no automatic fallback", py_repr_str(prev.source)));
-            }
-            let mut t = base_target(model, Adapter::OllamaCompat, base_url, "legacy compatibility fallback after builtin llama.cpp failed".to_string(), attempt, "builtin_fallback", "legacy:ollama_fallback");
-            t.fallback_reason = Some(format!("fallback after {} target failed", prev.adapter.id()));
-            return Ok(t);
-        }
+    pub fn resolve_target(&self, model: &str, base_url: &str, attempt: u32) -> Result<ResolvedTarget, String> {
         if base_url != self.opts.default_base_url {
-            return Ok(base_target(model, Adapter::OllamaCompat, base_url, "legacy non-default base_url normalized as Ollama-compatible target".to_string(), attempt, "explicit_base_url", "legacy:explicit_base_url"));
+            return Ok(explicit_url_target(model, base_url, attempt));
         }
         if let Some(entry) = self.config.get_model_entry(model)? {
             let obj = match &entry {
@@ -259,7 +253,6 @@ impl<'a> Gateway<'a> {
                         runtime: Some("llama_cpp"),
                         provider: Some("local"),
                         config_ref: Some(format!("secure_store:{model}")),
-                        fallback_allowed: false,
                         fallback_reason: None,
                         target: TargetData::Local(LocalTarget::Spec(spec)),
                     });
@@ -296,7 +289,6 @@ impl<'a> Gateway<'a> {
                         runtime: Some(if is_anth { "provider" } else { "external_server" }),
                         provider: Some(if is_anth { "anthropic" } else { "openai_compatible" }),
                         config_ref: Some(format!("secure_store:{model}")),
-                        fallback_allowed: false,
                         fallback_reason: None,
                         target: TargetData::Remote { base_url: base, api_key_env },
                     });
@@ -323,12 +315,14 @@ impl<'a> Gateway<'a> {
                 runtime: Some("llama_cpp"),
                 provider: Some("local"),
                 config_ref: Some("builtin_registry".to_string()),
-                fallback_allowed: true,
                 fallback_reason: None,
                 target: TargetData::Local(LocalTarget::Registry(model.to_string())),
             });
         }
-        Ok(base_target(model, Adapter::OllamaCompat, base_url, "no explicit config and no builtin local candidate; legacy Ollama-compatible fallback".to_string(), attempt, "ollama_fallback", "legacy:ollama_fallback"))
+        Err(format!(
+            "для модели {} не настроен ни один backend: нет явной настройки владельца узла (llm_gateway.setup / secure_store) и нет во встроенном реестре с работающим локальным движком — внешние источники (в т.ч. Ollama) не используются",
+            py_repr_str(model)
+        ))
     }
 }
 
@@ -409,21 +403,6 @@ impl<'a> Gateway<'a> {
         let wire = build_messages(prompt, system, messages);
         let model = target.resolved_model.as_str();
         match (&target.adapter, &target.target) {
-            (Adapter::OllamaCompat, TargetData::Ollama { base_url }) => {
-                let op = OllamaParams {
-                    temperature: p.temperature,
-                    max_tokens: p.max_tokens,
-                    timeout: p.timeout,
-                    extra_options: p.extra_options.clone(),
-                    response_format: contract.response_format.clone(),
-                    stop: p.stop.clone(),
-                };
-                match ollama::generate(self.transport, &wire, model, base_url, &op) {
-                    Ok((text, raw)) => Ok((text, raw.as_object().cloned().unwrap_or_default())),
-                    // OllamaBackendError → LLMError(str(e)) в _generate_with_target
-                    Err(e) => Err(AttemptError { class: "LLMError", message: e.0 }),
-                }
-            }
             (Adapter::OpenAiCompat, TargetData::Remote { base_url, api_key_env }) | (Adapter::Anthropic, TargetData::Remote { base_url, api_key_env }) => {
                 let protocol = if target.adapter == Adapter::Anthropic { "anthropic" } else { "openai" };
                 let gp = GenerateParams {
@@ -470,7 +449,7 @@ impl<'a> Gateway<'a> {
         self.check_inputs("complete", prompt, messages)?;
         let mut trace: Vec<Value> = Vec::new();
         let contract = contract_from_response_format(p.response_format.as_ref());
-        let target = self.resolve_target(model, base_url, 1, None).map_err(|e| explicit_failed(model, &e))?;
+        let target = self.resolve_target(model, base_url, 1).map_err(|e| explicit_failed(model, &e))?;
         let (text, raw) = match self.generate_with_target(&target, prompt, system, messages, p, &contract) {
             Ok(ok) => {
                 trace.push(trace_attempt(&target, &contract, "success", None));
@@ -479,24 +458,11 @@ impl<'a> Gateway<'a> {
             Err(e) => {
                 trace.push(trace_attempt(&target, &contract, "failed", Some(&e)));
                 if target.source == "explicit_config" {
+                    // CONFIGURED_TARGET_FAILED — владелец явно выбрал этот target; переход на другой источник запрещён категорически
                     return Err(explicit_failed(model, &e.message));
                 }
-                if !target.fallback_allowed {
-                    return Err(LlmError(e.message));
-                }
-                println!("[llm_gateway] встроенный дефолт не справился с {} ({}), откат на Ollama", py_repr_str(model), e.message);
-                let fallback = self.resolve_target(model, base_url, target.attempt + 1, Some(&target)).map_err(LlmError)?;
-                let fc = contract_from_response_format(p.response_format.as_ref());
-                match self.generate_with_target(&fallback, prompt, system, messages, p, &fc) {
-                    Ok(ok) => {
-                        trace.push(trace_attempt(&fallback, &fc, "success", None));
-                        ok
-                    }
-                    Err(fe) => {
-                        trace.push(trace_attempt(&fallback, &fc, "failed", Some(&fe)));
-                        return Err(LlmError(fe.message));
-                    }
-                }
+                // без автоматического отката (в т.ч. на Ollama — исключён): честная ошибка именно этой цели
+                return Err(LlmError(e.message));
             }
         };
         let text = if p.strip_think { crate::semantic::strip_think_closed(&text) } else { text };
@@ -527,8 +493,8 @@ impl<'a> Gateway<'a> {
     ) -> Result<SemanticCompletionResult, LlmError> {
         self.check_inputs("complete_semantic", prompt, messages)?;
         let mut trace: Vec<Value> = Vec::new();
-        let target = self.resolve_target(model, base_url, 1, None).map_err(|e| explicit_failed(model, &e))?;
-        let (mut contract, instruction) = semantic_contract_from_target(requirement, &target.capabilities)?;
+        let target = self.resolve_target(model, base_url, 1).map_err(|e| explicit_failed(model, &e))?;
+        let (contract, instruction) = semantic_contract_from_target(requirement, &target.capabilities)?;
         let sem_system = system_from_value(&append_system_instruction(system, &instruction));
         let first = self.generate_with_target(&target, prompt, &sem_system, messages, p, &contract);
         let (text, raw) = match first {
@@ -541,24 +507,7 @@ impl<'a> Gateway<'a> {
                 if target.source == "explicit_config" {
                     return Err(explicit_failed(model, &e.message));
                 }
-                if !target.fallback_allowed {
-                    return Err(LlmError(e.message));
-                }
-                println!("[llm_gateway] встроенный дефолт не справился с {} ({}), откат на Ollama", py_repr_str(model), e.message);
-                let fallback = self.resolve_target(model, base_url, target.attempt + 1, Some(&target)).map_err(LlmError)?;
-                let (fc, fi) = semantic_contract_from_target(requirement, &fallback.capabilities)?;
-                let fs = system_from_value(&append_system_instruction(system, &fi));
-                match self.generate_with_target(&fallback, prompt, &fs, messages, p, &fc) {
-                    Ok(ok) => {
-                        trace.push(trace_attempt(&fallback, &fc, "success", None));
-                        contract = fc;
-                        ok
-                    }
-                    Err(fe) => {
-                        trace.push(trace_attempt(&fallback, &fc, "failed", Some(&fe)));
-                        return Err(LlmError(fe.message));
-                    }
-                }
+                return Err(LlmError(e.message));
             }
         };
         let mut raw = raw;
@@ -671,48 +620,143 @@ impl<'a> Gateway<'a> {
         Ok(Some((vectors, VectorSpaceId { backend: backend_kind, protocol, model: model_identity, dimension, normalized, schema_version: 1 })))
     }
 
-    /// `_do_embed_ollama`: Ollama-совместимый фоллбэк — единственный автоматический путь, когда владелец ничего явно не настроил (`/api/embed`, batch).
-    fn embed_ollama(&self, texts: &[String], model: &str, base_url: &str, timeout: u64) -> Result<(Vec<Value>, VectorSpaceId), EmbedError> {
-        let req = crate::transport::HttpRequest { url: format!("{base_url}/api/embed"), headers: vec![], body: json!({"model": model, "input": texts}) };
-        let resp = self.transport.post_json(&req, timeout).map_err(|e| EmbedError(format!("{model}: {}", e.0)))?;
-        if let Some(d) = crate::remote::status_error(resp.status, &resp.reason, &req.url) {
-            return Err(EmbedError(format!("{model}: {d}")));
-        }
-        let bad = |d: String| EmbedError(format!("{model}: неожиданный формат embedding-ответа: {d}"));
-        let raw: Value = crate::remote::parse_json(&resp.body).map_err(bad)?;
-        let vectors = match raw.get("embeddings") {
-            Some(Value::Array(a)) => a.clone(),
-            // ключ есть, но это не список — до проверки батча доходит как есть (`_validate_embedding_batch("x", …)`)
-            Some(_) => return Err(EmbedError(format!("Ollama/{model}: пустой или некорректный список векторов"))),
-            None => return Err(bad(py_repr_str("embeddings"))), // KeyError('embeddings')
-        };
-        validate_embedding_batch(&vectors, texts.len(), &format!("Ollama/{model}"))?;
-        let dimension = vectors.first().and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0) as i64;
-        Ok((vectors, VectorSpaceId { backend: "ollama-compat".into(), protocol: "ollama-embed".into(), model: model.to_string(), dimension, normalized: false, schema_version: 1 }))
+    /// Встроенный движок для эмбеддингов ИМЕНИ из встроенного реестра (свой инструмент вместо Ollama): та же модель, отдельный экземпляр в режиме эмбеддингов.
+    fn embed_builtin(&self, texts: &[String], model: &str) -> Result<(Vec<Value>, VectorSpaceId), EmbedError> {
+        let spec = self.engine.registry_spec(model).ok_or_else(|| EmbedError(format!("нет встроенной GGUF-записи для модели {}", py_repr_str(model))))?;
+        let (vectors, meta) = self.engine.embed(&spec, texts).map_err(EmbedError)?;
+        let dimension = meta.get("dimension").and_then(|d| d.as_i64()).unwrap_or(0);
+        validate_embedding_batch(&vectors, texts.len(), &format!("встроенный движок для {}", py_repr_str(model)))?;
+        let normalized = meta.get("normalized").map(py_truthy).unwrap_or(false);
+        Ok((vectors, VectorSpaceId { backend: "llamacpp".into(), protocol: "llamacpp-embed".into(), model: spec.path, dimension, normalized, schema_version: 1 }))
     }
 
-    /// `embed`: STEP 1 — явная настройка владельца (успех или честная ошибка, без перехода на другой источник); встроенного локального дефолта для
-    /// эмбеддингов нет; STEP 3 — Ollama-совместимый фоллбэк только если ничего не настроено. Только для локального base_url.
-    pub fn embed(&self, texts: &[String], model: &str, base_url: &str, timeout: u64) -> Result<EmbeddingResult, EmbedError> {
+    /// `embed`: STEP 1 — явная настройка владельца (успех или честная ошибка, без перехода на другой источник); STEP 2 — имя из встроенного реестра при
+    /// включённом локальном движке (`local_enabled`); иначе — ошибка «embedding-backend не настроен». OLLAMA ИСКЛЮЧЁН: никакого отката на внешний сервер.
+    /// Только для локального base_url.
+    pub fn embed(&self, texts: &[String], model: &str, base_url: &str, _timeout: u64) -> Result<EmbeddingResult, EmbedError> {
         if texts.is_empty() {
             return Err(EmbedError("embed() вызван с пустым списком текстов".to_string()));
         }
-        let mut found: Option<(Vec<Value>, VectorSpaceId)> = None;
-        if base_url == self.opts.default_base_url {
-            match self.try_configured_embedding(model, texts) {
-                Err(e) => {
-                    return Err(EmbedError(format!(
-                        "настроенный владельцем узла embedding-backend для модели {} не сработал — автоматический переход на другой источник эмбеддингов запрещён явным выбором владельца: {}",
-                        py_repr_str(model), e
-                    )))
-                }
-                Ok(r) => found = r,
-            }
+        if base_url != self.opts.default_base_url {
+            return Err(EmbedError(format!(
+                "embed() для внешнего base_url {} не поддерживается: эмбеддинги — только через явную настройку владельца узла или встроенный движок",
+                py_repr_str(base_url)
+            )));
         }
-        let (vectors, space) = match found {
-            Some(x) => x,
-            None => self.embed_ollama(texts, model, base_url, if timeout == 0 { DEFAULT_TIMEOUT } else { timeout })?,
-        };
-        Ok(EmbeddingResult { vectors, space })
+        match self.try_configured_embedding(model, texts) {
+            Err(e) => {
+                return Err(EmbedError(format!(
+                    "настроенный владельцем узла embedding-backend для модели {} не сработал — автоматический переход на другой источник эмбеддингов запрещён явным выбором владельца: {}",
+                    py_repr_str(model), e
+                )))
+            }
+            Ok(Some((vectors, space))) => return Ok(EmbeddingResult { vectors, space }),
+            Ok(None) => {}
+        }
+        if self.opts.local_enabled && self.engine.has_model(model) {
+            let (vectors, space) = self.embed_builtin(texts, model)?;
+            return Ok(EmbeddingResult { vectors, space });
+        }
+        Err(EmbedError(format!(
+            "для модели {} не настроен embedding-backend: нет явной настройки владельца узла (llm_gateway.setup / secure_store) и нет во встроенном реестре с работающим локальным движком — внешние источники (в т.ч. Ollama) не используются",
+            py_repr_str(model)
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Родной шлюз БЕЗ Ollama: рабочий фальшивый движок + транспорт, который паникует при любом запросе
+    //! (доказательство «сеть не трогалась»).
+    use super::*;
+    use crate::transport::{HttpRequest, HttpResponse, TransportError};
+
+    struct NoNet;
+    impl Transport for NoNet {
+        fn post_json(&self, req: &HttpRequest, _t: u64) -> Result<HttpResponse, TransportError> {
+            panic!("неожиданный сетевой запрос: {}", req.url);
+        }
+    }
+    struct Cfg;
+    impl ConfigSource for Cfg {
+        fn get_model_entry(&self, _m: &str) -> Result<Option<Value>, String> {
+            Ok(None)
+        }
+    }
+    struct Fake;
+    impl LocalEngine for Fake {
+        fn registry_error(&self) -> Option<String> {
+            None
+        }
+        fn has_model(&self, m: &str) -> bool {
+            m == "b"
+        }
+        fn registry_spec(&self, m: &str) -> Option<ModelSpec> {
+            (m == "b").then(|| ModelSpec { path: "/m/b.gguf".into(), n_ctx: 1, n_gpu_layers: 0 })
+        }
+        fn generate(&self, _t: &LocalTarget, _m: &[Value], _p: &LocalParams) -> Result<(String, Map<String, Value>), String> {
+            Ok(("свой ответ".into(), Map::new()))
+        }
+        fn embed(&self, _s: &ModelSpec, texts: &[String]) -> Result<(Vec<Value>, Map<String, Value>), String> {
+            let mut meta = Map::new();
+            meta.insert("dimension".into(), json!(2));
+            meta.insert("normalized".into(), json!(true));
+            Ok((texts.iter().map(|_| json!([0.5, 0.25])).collect(), meta))
+        }
+    }
+
+    fn gw<'a>(t: &'a NoNet, c: &'a Cfg, e: &'a Fake, local: bool) -> Gateway<'a> {
+        Gateway { transport: t, config: c, engine: e, opts: GatewayOptions { default_base_url: DEFAULT_BASE_URL.into(), local_enabled: local } }
+    }
+
+    #[test]
+    fn builtin_embed_uses_own_engine_without_network() {
+        let (t, c, e) = (NoNet, Cfg, Fake);
+        let r = gw(&t, &c, &e, true).embed(&["x".into(), "y".into()], "b", DEFAULT_BASE_URL, 5).unwrap();
+        assert_eq!(r.vectors.len(), 2);
+        assert_eq!(r.space.backend, "llamacpp");
+        assert_eq!(r.space.protocol, "llamacpp-embed");
+        assert_eq!(r.space.model, "/m/b.gguf");
+        assert_eq!(r.space.dimension, 2);
+        assert!(r.space.normalized);
+    }
+
+    #[test]
+    fn embed_without_config_or_engine_is_honest_error_no_network() {
+        let (t, c, e) = (NoNet, Cfg, Fake);
+        // локальный движок выключен → ошибка, не Ollama
+        let err = gw(&t, &c, &e, false).embed(&["x".into()], "b", DEFAULT_BASE_URL, 5).unwrap_err();
+        assert!(err.0.contains("не настроен embedding-backend"), "{}", err.0);
+        // модели нет в реестре → ошибка
+        let err = gw(&t, &c, &e, true).embed(&["x".into()], "zzz", DEFAULT_BASE_URL, 5).unwrap_err();
+        assert!(err.0.contains("не настроен embedding-backend"), "{}", err.0);
+        // пустой список и внешний адрес
+        let err = gw(&t, &c, &e, true).embed(&[], "b", DEFAULT_BASE_URL, 5).unwrap_err();
+        assert!(err.0.contains("пустым списком"), "{}", err.0);
+        let err = gw(&t, &c, &e, true).embed(&["x".into()], "b", "http://other:1", 5).unwrap_err();
+        assert!(err.0.contains("не поддерживается"), "{}", err.0);
+    }
+
+    #[test]
+    fn builtin_generation_works_and_unknown_model_never_reaches_network() {
+        let (t, c, e) = (NoNet, Cfg, Fake);
+        let p = CompleteParams { timeout: 5, strip_think: true, ..Default::default() };
+        let sys = SystemArg::None;
+        let ok = gw(&t, &c, &e, true).complete(Some("q"), "b", &sys, None, DEFAULT_BASE_URL, &p).unwrap();
+        assert_eq!(ok, "свой ответ");
+        // реестр выключен → честная ошибка «не настроен ни один backend»
+        let err = gw(&t, &c, &e, false).complete(Some("q"), "b", &sys, None, DEFAULT_BASE_URL, &p).unwrap_err();
+        assert!(err.0.contains("не настроен ни один backend"), "{}", err.0);
+        let err = gw(&t, &c, &e, true).complete(Some("q"), "nope", &sys, None, DEFAULT_BASE_URL, &p).unwrap_err();
+        assert!(err.0.contains("не настроен ни один backend"), "{}", err.0);
+    }
+
+    #[test]
+    fn explicit_base_url_is_openai_compatible_target() {
+        let (t, c, e) = (NoNet, Cfg, Fake);
+        let r = gw(&t, &c, &e, false).resolve_target("m", "http://peer:9", 1).unwrap();
+        assert_eq!(r.source, "explicit_base_url");
+        assert_eq!(r.location.as_deref(), Some("http://peer:9"));
+        assert!(matches!(r.adapter, Adapter::OpenAiCompat));
     }
 }
