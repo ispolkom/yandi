@@ -251,3 +251,27 @@ fn gateway_end_to_end_with_own_engine_no_ollama_no_network_config() {
     assert!(gw_off.complete(Some("q"), "brain", &SystemArg::None, None, DEFAULT_BASE_URL, &p).unwrap_err().0.contains("не настроен ни один backend"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Работает только если сборка сделана с `YANDI_EMBED_LLAMA_SERVER=…` (иначе пропуск): пользователь ничего не ставит и не указывает —
+/// движок сам распаковывается из бинарника и запускается.
+#[test]
+fn embedded_engine_runs_with_zero_setup() {
+    if !yandi_llm::engine_binary::has_embedded() {
+        eprintln!("SKIP: сборка без вшитого llama-server");
+        return;
+    }
+    let d = tmp("zero");
+    let home = d.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::remove_var("YANDI_LLAMA_SERVER");
+    std::env::remove_var("FAKE_LOG");
+    let spec = gguf(&d, "m.gguf");
+    let e = ServerEngine::new(ServerEngineConfig::new(vec![]));
+    assert!(e.registry_error().is_none(), "{:?}", e.registry_error());
+    let (text, _) = e.generate(&LocalTarget::Spec(spec), &[json!({"role": "user", "content": "привет"})], &LocalParams::default()).unwrap();
+    assert!(text.contains("привет"));
+    let bin = home.join(".local/share/yandi/bin");
+    assert_eq!(std::fs::read_dir(&bin).unwrap().count(), 1, "распакован ровно один файл");
+    let _ = std::fs::remove_dir_all(&d);
+}

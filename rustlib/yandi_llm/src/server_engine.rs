@@ -18,12 +18,11 @@ use crate::remote::{openai_embed_parse, openai_embed_request, openai_generate_pa
 use crate::transport::{HttpRequest, ReqwestTransport, Transport};
 use yandi_rs::py_text::py_repr_str;
 
-pub const DEFAULT_BINARY: &str = "llama-server";
 pub const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Clone)]
 pub struct ServerEngineConfig {
-    /// Имя или путь бинарника `llama-server` (по умолчанию ищется в PATH; переопределяется `YANDI_LLAMA_SERVER`).
+    /// Путь к `llama-server`: вшитый в бинарник узла (распаковывается сам) → рядом с узлом → каталог данных → PATH; `YANDI_LLAMA_SERVER` — явное переопределение (см. `engine_binary`).
     pub binary: String,
     pub registry: Vec<(String, ModelSpec)>,
     pub startup_timeout: Duration,
@@ -33,7 +32,7 @@ pub struct ServerEngineConfig {
 
 impl ServerEngineConfig {
     pub fn new(registry: Vec<(String, ModelSpec)>) -> Self {
-        let binary = std::env::var("YANDI_LLAMA_SERVER").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| DEFAULT_BINARY.to_string());
+        let binary = crate::engine_binary::resolve();
         ServerEngineConfig { binary, registry, startup_timeout: Duration::from_secs(DEFAULT_STARTUP_TIMEOUT_SECS), extra_args: vec![] }
     }
 }

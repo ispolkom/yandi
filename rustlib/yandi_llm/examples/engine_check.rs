@@ -34,7 +34,7 @@ fn main() {
         // отдельный движок на каждую модель: при выходе из итерации его процессы завершаются (память не копится)
         let engine = ServerEngine::new(ServerEngineConfig::new(vec![]));
         if let Some(e) = engine.registry_error() {
-            eprintln!("ПРОВАЛ: {e}\nНужна программа llama-server (часть llama.cpp): поставьте её в PATH или задайте путь в переменной YANDI_LLAMA_SERVER.");
+            eprintln!("ПРОВАЛ: {e}\nВ эту сборку движок не вшит (для пользователя он будет внутри бинарника). Для проверки: соберите его scripts/build-llama-server.sh и запустите проверку так:\nYANDI_EMBED_LLAMA_SERVER=$PWD/../../dist/llama-server cargo run --release --no-default-features --example engine_check");
             std::process::exit(1);
         }
         let transport = ReqwestTransport::new();

@@ -56,3 +56,7 @@ Thumbs.db
 /goodwin.su/
 /*.pdf
 rustlib/target/
+
+# вшиваемый движок (собирается scripts/build-llama-server.sh)
+/dist/
+/build/llama.cpp/
