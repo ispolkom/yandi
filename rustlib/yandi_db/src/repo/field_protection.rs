@@ -170,7 +170,7 @@ pub fn seal(c: &Connection, table: &str, column: &str, row_key: &Map<String, Val
     Ok(Some(seal_with(&key, table, column, row_key, value)?))
 }
 
-fn open_value(c: &Connection, table: &str, column: &str, row_key: &Map<String, Value>, stored: Option<&str>) -> R<Option<String>> {
+pub fn open_value(c: &Connection, table: &str, column: &str, row_key: &Map<String, Value>, stored: Option<&str>) -> R<Option<String>> {
     let Some(stored) = stored else {
         return Ok(None);
     };

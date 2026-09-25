@@ -115,7 +115,7 @@ pub fn dispatch(c: &Connection, name: &str, a: &A) -> R<Option<Value>> {
             args.extend(seed_json_columns(a, &["capabilities", "limitations", "current_uncertainties", "metadata"]));
             args.push(sv(&created_at));
             args.push(sv(&created_at));
-            exec(c, "INSERT OR IGNORE INTO self_state (id, identity, version, capabilities, limitations, current_uncertainties, metadata, created_at, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)", args)?;
+            exec_ignore(c, "INSERT OR IGNORE INTO self_state (id, identity, version, capabilities, limitations, current_uncertainties, metadata, created_at, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)", args)?;
             get_self_state(c)?
         }
         "update_self_state_lists" => {
@@ -176,7 +176,7 @@ pub fn dispatch(c: &Connection, name: &str, a: &A) -> R<Option<Value>> {
             let (fa, fb, et) = (a.str("family_a")?, a.str("family_b")?, a.str("edge_type")?);
             let now = dt_or_now(a.get("created_at"))?;
             for fam in [&fa, &fb] {
-                exec(c, "INSERT OR IGNORE INTO claim_family (family_id, domain, canonical_text, created_at, updated_at) VALUES (?, 'unknown', ?, ?, ?)", vec![sv(fam), sv(fam), sv(&now), sv(&now)])?;
+                exec_ignore(c, "INSERT OR IGNORE INTO claim_family (family_id, domain, canonical_text, created_at, updated_at) VALUES (?, 'unknown', ?, ?, ?)", vec![sv(fam), sv(fam), sv(&now), sv(&now)])?;
             }
             let claims: Vec<String> = match a.get("triggering_claim_ids") {
                 Some(Value::Array(x)) => x.iter().filter_map(|v| v.as_str().map(String::from)).filter(|s| !s.is_empty()).collect(),
@@ -205,7 +205,7 @@ pub fn dispatch(c: &Connection, name: &str, a: &A) -> R<Option<Value>> {
         "upsert_family_status" => {
             let fid = a.str("family_id")?;
             let at = dt_or_now(a.get("updated_at"))?;
-            exec(c, "INSERT OR IGNORE INTO claim_family (family_id, domain, canonical_text, created_at, updated_at) VALUES (?, 'unknown', ?, ?, ?)", vec![sv(&fid), sv(&fid), sv(&at), sv(&at)])?;
+            exec_ignore(c, "INSERT OR IGNORE INTO claim_family (family_id, domain, canonical_text, created_at, updated_at) VALUES (?, 'unknown', ?, ?, ?)", vec![sv(&fid), sv(&fid), sv(&at), sv(&at)])?;
             exec(c, "INSERT INTO family_status_state (family_id, last_status, updated_at) VALUES (?,?,?) ON CONFLICT(family_id) DO UPDATE SET last_status=excluded.last_status, updated_at=excluded.updated_at", vec![sv(&fid), osv(a.opt_str("last_status")?.as_deref()), sv(&at)])?;
             Value::Null
         }
@@ -242,7 +242,7 @@ pub fn dispatch(c: &Connection, name: &str, a: &A) -> R<Option<Value>> {
         // ---- настройки пиров ----
         "get_peer_config" => get_peer_config(c)?,
         "get_or_create_peer_config" => {
-            exec(c, "INSERT OR IGNORE INTO peer_config (id, peers, sync_token, sync_enabled, updated_at) VALUES (1, ?, NULL, 0, ?)", vec![sv("[]"), sv(&dt_or_now(a.get("updated_at"))?)])?;
+            exec_ignore(c, "INSERT OR IGNORE INTO peer_config (id, peers, sync_token, sync_enabled, updated_at) VALUES (1, ?, NULL, 0, ?)", vec![sv("[]"), sv(&dt_or_now(a.get("updated_at"))?)])?;
             get_peer_config(c)?
         }
         // ---- биография ----
@@ -250,7 +250,7 @@ pub fn dispatch(c: &Connection, name: &str, a: &A) -> R<Option<Value>> {
         "get_or_create_biography" => {
             let uid = a.str("user_id")?;
             let birth = dt_or_now(a.get("birth"))?;
-            exec(c, "INSERT OR IGNORE INTO biography (user_id, birth, updated_at) VALUES (?,?,?)", vec![sv(&uid), sv(&birth), sv(&birth)])?;
+            exec_ignore(c, "INSERT OR IGNORE INTO biography (user_id, birth, updated_at) VALUES (?,?,?)", vec![sv(&uid), sv(&birth), sv(&birth)])?;
             get_biography(c, &uid)?
         }
         "bump_biography_counter" => {
@@ -340,7 +340,7 @@ pub fn dispatch(c: &Connection, name: &str, a: &A) -> R<Option<Value>> {
         "get_inner_state" => get_inner_state(c, &a.str("user_id")?)?,
         "get_or_create_inner_state" => {
             let uid = a.str("user_id")?;
-            exec(c, "INSERT OR IGNORE INTO inner_state (user_id, updated_at) VALUES (?,?)", vec![sv(&uid), sv(&dt_or_now(a.get("updated_at"))?)])?;
+            exec_ignore(c, "INSERT OR IGNORE INTO inner_state (user_id, updated_at) VALUES (?,?)", vec![sv(&uid), sv(&dt_or_now(a.get("updated_at"))?)])?;
             get_inner_state(c, &uid)?
         }
         "update_inner_state" => {

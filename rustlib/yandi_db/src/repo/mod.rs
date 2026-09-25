@@ -12,6 +12,7 @@ use serde_json::{Map, Value};
 pub mod epistemic;
 pub mod beliefs;
 pub mod field_protection;
+pub mod ledger;
 pub mod memory;
 pub mod relationship;
 pub mod evidence;
@@ -56,6 +57,14 @@ pub(crate) fn row(c: &Connection, sql: &str, args: Vec<Sql>) -> R<Option<Row>> {
 pub(crate) fn exec(c: &Connection, sql: &str, args: Vec<Sql>) -> R<(usize, i64)> {
     let n = c.prepare(sql).map_err(err)?.execute(params_from_iter(args)).map_err(err)?;
     Ok((n, c.last_insert_rowid()))
+}
+
+/// `INSERT IGNORE` MySQL: дубликат И нарушение внешнего ключа молча пропускаются (0 строк); у SQLite `OR IGNORE` внешние ключи не глушит — глушим сами.
+pub(crate) fn exec_ignore(c: &Connection, sql: &str, args: Vec<Sql>) -> R<(usize, i64)> {
+    match exec(c, sql, args) {
+        Err(e) if e.contains("FOREIGN KEY constraint failed") => Ok((0, 0)),
+        other => other,
+    }
 }
 
 // ---------------------------------------------------------------- значения
@@ -320,6 +329,9 @@ pub fn call(c: &Connection, name: &str, args: &Value) -> R<Value> {
         return Ok(v);
     }
     if let Some(v) = memory::dispatch(c, name, &a)? {
+        return Ok(v);
+    }
+    if let Some(v) = ledger::dispatch(c, name, &a)? {
         return Ok(v);
     }
     Err(format!("неизвестная функция {name}"))

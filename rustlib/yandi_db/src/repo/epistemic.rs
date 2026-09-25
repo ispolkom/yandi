@@ -115,7 +115,7 @@ pub fn record_answer_assessment(c: &Connection, a: &A) -> R<Value> {
 
 pub fn get_or_create_claim_family(c: &Connection, a: &A) -> R<Value> {
     let created_at = dt_or_now(a.get("created_at"))?;
-    exec(
+    exec_ignore(
         c,
         "INSERT OR IGNORE INTO claim_family (family_id, domain, canonical_text, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
         vec![sv(&a.str("family_id")?), sv(&a.str("domain")?), sv(&a.str("canonical_text")?), sv(&created_at), sv(&created_at)],
@@ -125,7 +125,7 @@ pub fn get_or_create_claim_family(c: &Connection, a: &A) -> R<Value> {
 
 pub fn link_family_member(c: &Connection, a: &A) -> R<Value> {
     let linked_at = dt_or_now(a.get("linked_at"))?;
-    exec(c, "INSERT OR IGNORE INTO family_member (family_id, claim_id, linked_at) VALUES (?, ?, ?)", vec![sv(&a.str("family_id")?), sv(&a.str("claim_id")?), sv(&linked_at)])?;
+    exec_ignore(c, "INSERT OR IGNORE INTO family_member (family_id, claim_id, linked_at) VALUES (?, ?, ?)", vec![sv(&a.str("family_id")?), sv(&a.str("claim_id")?), sv(&linked_at)])?;
     Ok(Value::Null)
 }
 
