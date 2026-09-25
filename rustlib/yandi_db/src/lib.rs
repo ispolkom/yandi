@@ -9,6 +9,11 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection};
 
 /// Версия схемы, из которой сгенерированы `schema_sqlite.sql` / `triggers_sqlite.sql`.
+pub mod repo;
+
+#[cfg(feature = "python")]
+mod bridge;
+
 pub const SCHEMA_VERSION: i64 = 20;
 
 const SCHEMA_SQL: &str = include_str!("schema_sqlite.sql");

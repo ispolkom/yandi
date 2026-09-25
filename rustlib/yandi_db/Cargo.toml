@@ -5,7 +5,20 @@ edition = "2021"
 description = "Родной слой базы данных YANDI: встроенная SQLite (по умолчанию), схема и триггеры неизменяемости генерируются из Python-схемы MySQL. Без Python и без внешнего сервера."
 license = "MIT"
 
+[lib]
+name = "yandi_db"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `python` — мост PyO3 только для дифференциальных тестов против Python-репозиториев (`agent/db/sql/repositories.py`); узел собирает без него
+default = ["python"]
+python = ["dep:pyo3"]
+
 [dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
 # SQLite прямо в бинарнике (bundled) — база = один файл в каталоге данных пользователя, переживает удаление программы
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
+sha2 = "0.10"
+# Python-точные примитивы (нормализация текста утверждений) — из ядра переноса
+yandi_rs = { path = "../yandi_rs", default-features = false }
