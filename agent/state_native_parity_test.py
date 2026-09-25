@@ -112,7 +112,10 @@ def main() -> int:
                 # полный обход: курсор 0 и то же множество ключей (Redis может вернуть курсор != 0 при большом объёме — здесь ключей мало)
                 return a[0] == b[0] == b"0" and sorted(a[1]) == sorted(b[1])
             if cmd in TTLS and isinstance(a, int) and isinstance(b, int):
-                return abs(a - b) <= (60 if cmd == "PTTL" else 1) and (a < 0) == (b < 0)
+                if a < 0 or b < 0:
+                    return a == b                        # -1 (нет срока) и -2 (нет ключа) — ТОЧНО
+                # оставшееся время: допуск только на время выполнения (мс); TTL в секундах округляется как в Redis ((мс+500)/1000) — допуска нет
+                return abs(a - b) <= 60 if cmd == "PTTL" else a == b
             return a == b
 
         cur_cursor = [b"0"]
@@ -180,6 +183,12 @@ def main() -> int:
             ("KEYS", "*"), ("KEYS", "m?"), ("KEYS", "[ms]*"), ("KEYS", "[^m]*"), ("KEYS", "nomatch*"), ("KEYS", "l[0-9]"), ("KEYS"), ("DBSIZE"), ("DBSIZE", "x"),
             ("SCAN", "0"), ("SCAN", "0", "MATCH", "m*"), ("SCAN", "0", "COUNT", "100"), ("SCAN", "0", "MATCH", "m*", "COUNT", "10"), ("SCAN", "x"), ("SCAN", "0", "COUNT", "0"), ("SCAN", "0", "BOGUS"), ("SCAN"),
             ("PING"), ("PING", "hi"), ("PING", "a", "b"), ("NOSUCHCMD"), ("NOSUCHCMD", "a", "b"), ("get", "m1"), ("SeT", "case", "1"), ("gEt", "case"),
+            ("RPUSH", "li", "a", "b", "c"), ("LINSERT", "li", "BEFORE", "b", "X"), ("LRANGE", "li", "0", "-1"), ("LINSERT", "li", "AFTER", "b", "Y"), ("LRANGE", "li", "0", "-1"),
+            ("LINSERT", "li", "AFTER", "c", "Z"), ("LINSERT", "li", "BEFORE", "a", "W"), ("LRANGE", "li", "0", "-1"), ("RPUSH", "li", "a"), ("LINSERT", "li", "BEFORE", "a", "first-a"), ("LRANGE", "li", "0", "-1"),
+            ("RPUSH", "dup", "x", "y", "x", "z", "x", "x"), ("LREM", "dup", "2", "x"), ("LRANGE", "dup", "0", "-1"), ("LREM", "dup", "-1", "x"), ("LRANGE", "dup", "0", "-1"), ("LREM", "dup", "0", "x"),
+            ("LRANGE", "dup", "0", "-1"), ("RPUSH", "dup2", "x", "x", "x"), ("LREM", "dup2", "0", "x"), ("EXISTS", "dup2"), ("RPUSH", "dup3", "x", "y", "x", "y", "x"), ("LREM", "dup3", "-2", "x"),
+            ("LRANGE", "dup3", "0", "-1"), ("LREM", "dup3", "5", "y"), ("LRANGE", "dup3", "0", "-1"),
+            ("NOPE", "a" * 100, "b" * 100, "c" * 50), ("NOPE", "x" * 200), ("NOPE", *[str(i) for i in range(60)]), ("NOPE", "a\r\nb", "c\x00d"), ("N" * 200, "arg"), ("NOPE", "a" * 127, "b"), ("NOPE", "a" * 128, "b"),
             ("FLUSHDB"), ("DBSIZE"), ("SET", "\x00bin\xff", "\x00\x01"), ("GET", "\x00bin\xff"), ("SET", "", "empty-key"), ("GET", ""), ("SET", "k", ""), ("GET", "k"), ("STRLEN", "k"), ("APPEND", "k", ""),
         ]
         reset()
@@ -309,15 +318,32 @@ def main() -> int:
             b = store_holder["s"].execute(b"PUBLISH", ch, b"z")
             check("PUBLISH после отписки", a == b, f"{ch!r}: {a} vs {b}")
         ps.close()
-        # ---- D. сроки жизни в реальном времени ---------------------------------------------------------------------------------------------------
-        reset()
-        both(b"SET", b"t", b"v", b"PX", b"300")
-        both(b"SETEX", b"t2", b"100", b"v")
-        both(b"PEXPIRE", b"t2", b"300")
-        both(b"SET", b"keep", b"1")
-        time.sleep(0.5)
-        for cmd in ((b"GET", b"t"), (b"EXISTS", b"t", b"t2"), (b"TTL", b"t2"), (b"KEYS", b"*"), (b"DBSIZE"), (b"TYPE", b"t"), (b"GET", b"keep")):
-            both(*cmd)
+        # подписчик отброшен без явной отписки — Redis: закрытие соединения; здесь: Drop
+        ps2 = r.pubsub(ignore_subscribe_messages=True)
+        sub2 = store_holder["s"].pubsub()
+        ps2.subscribe(b"drop:1"); sub2.subscribe(b"drop:1")
+        ps2.psubscribe(b"dr*"); sub2.psubscribe(b"dr*")
+        time.sleep(0.2)
+        a = real(b"PUBLISH", b"drop:1", b"x"); b = store_holder["s"].execute(b"PUBLISH", b"drop:1", b"x")
+        check("PUBLISH до закрытия подписчика", a == b == 2, f"{a} {b}")
+        ps2.close()
+        del sub2
+        time.sleep(0.3)
+        a = real(b"PUBLISH", b"drop:1", b"x"); b = store_holder["s"].execute(b"PUBLISH", b"drop:1", b"x")
+        n[0] += 1
+        check("PUBLISH после закрытия/Drop подписчика", a == b == 0, f"{a} {b}")
+        # ---- D. сроки жизни в реальном времени (DBSIZE/KEYS — ПЕРВЫМИ: они сами обязаны вычистить просроченное, до ленивого удаления при обращении к ключу) ----
+        for first in ((b"DBSIZE",), (b"KEYS", b"*"), (b"SCAN", b"0"), (b"EXISTS", b"t", b"t2"), (b"TYPE", b"t"), (b"GET", b"t"), (b"TTL", b"t2")):
+            reset()
+            both(b"SET", b"t", b"v", b"PX", b"300")
+            both(b"SETEX", b"t2", b"100", b"v")
+            both(b"PEXPIRE", b"t2", b"300")
+            both(b"SET", b"keep", b"1")
+            both(b"SET", b"ttl100", b"1", b"EX", b"100")
+            time.sleep(0.7)      # 0.7 с, а не 0.5: TTL округляется ((мс+500)/1000), граница округления — ровно 0.5 с (гонка между процессами)
+            both(*first)
+            for cmd in ((b"GET", b"t"), (b"EXISTS", b"t", b"t2"), (b"TTL", b"t2"), (b"TTL", b"keep"), (b"TTL", b"ttl100"), (b"PTTL", b"ttl100"), (b"KEYS", b"*"), (b"DBSIZE"), (b"TYPE", b"t"), (b"GET", b"keep")):
+                both(*cmd)
     finally:
         try:
             proc.terminate()
