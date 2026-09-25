@@ -78,6 +78,7 @@ fn generate_speaks_openai_to_own_process_and_passes_args() {
     assert!(a.windows(2).any(|w| w == ["--host", "127.0.0.1"]));
     assert!(a.windows(2).any(|w| w == ["-c", "4096"]));
     assert!(a.windows(2).any(|w| w == ["-ngl", "999"]));
+    assert!(a.windows(2).any(|w| w == ["-np", "1"]) && a.contains(&"--no-webui".to_string()));
     assert!(!a.contains(&"--embedding".to_string()));
     // второй вызов — тот же процесс
     e.generate(&LocalTarget::Spec(spec), &msgs, &LocalParams::default()).unwrap();

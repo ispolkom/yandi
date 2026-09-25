@@ -106,6 +106,9 @@ impl ServerEngine {
         cmd.arg("-c").arg(spec.n_ctx.to_string());
         // -1 у Python = «все слои на GPU»; llama-server принимает достаточно большое число
         cmd.arg("-ngl").arg(if spec.n_gpu_layers < 0 { 999 } else { spec.n_gpu_layers }.to_string());
+        // один слот: контекст не делится между «параллельными» запросами (иначе на запрос достаётся n_ctx/слотов), а запросы и так идут по одному;
+        // встроенный веб-интерфейс llama-server не нужен и не должен торчать даже на localhost
+        cmd.arg("-np").arg("1").arg("--no-webui");
         if embedding {
             cmd.arg("--embedding");
         }
