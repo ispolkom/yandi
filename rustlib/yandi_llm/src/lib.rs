@@ -8,6 +8,7 @@
 
 pub mod client;
 pub mod engine_binary;
+pub mod intelligence;
 pub mod messages;
 pub mod pyfmt;
 pub mod remote;

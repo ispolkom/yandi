@@ -44,7 +44,8 @@ struct Proc {
 
 pub struct ServerEngine {
     cfg: ServerEngineConfig,
-    transport: ReqwestTransport,
+    /// создаётся при первом запросе: блокирующий HTTP-клиент нельзя строить внутри async-контекста узла
+    transport: std::sync::OnceLock<ReqwestTransport>,
     /// ключ: (путь GGUF, режим эмбеддингов) — llama.cpp не переключает режим у запущенного контекста
     procs: Mutex<HashMap<(String, bool), Proc>>,
     /// один запрос за раз (как `_lock` у Python-движка): контекст модели не потокобезопасен
@@ -53,7 +54,7 @@ pub struct ServerEngine {
 
 impl ServerEngine {
     pub fn new(cfg: ServerEngineConfig) -> Self {
-        ServerEngine { cfg, transport: ReqwestTransport::new(), procs: Mutex::new(HashMap::new()), gen_lock: Mutex::new(()) }
+        ServerEngine { cfg, transport: std::sync::OnceLock::new(), procs: Mutex::new(HashMap::new()), gen_lock: Mutex::new(()) }
     }
 
     /// Найден ли исполняемый файл (абсолютный/относительный путь или поиск в PATH).
@@ -131,7 +132,7 @@ impl ServerEngine {
     }
 
     fn post(&self, req: &HttpRequest, timeout: u64) -> Result<Vec<u8>, String> {
-        let resp = self.transport.post_json(req, timeout).map_err(|e| e.0)?;
+        let resp = self.transport.get_or_init(ReqwestTransport::new).post_json(req, timeout).map_err(|e| e.0)?;
         if let Some(d) = crate::remote::status_error(resp.status, &resp.reason, &req.url) {
             return Err(d);
         }

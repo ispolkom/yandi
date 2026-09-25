@@ -195,6 +195,13 @@ fn dispatch(name: &str, args: &Value) -> Result<Value, String> {
                 }
             }
         }
+        "intel_infer" => {
+            let (cfg, eng, opts) = gateway_parts(&a);
+            let t = ReqwestTransport::new();
+            let gw = Gateway { transport: &t, config: &cfg, engine: &eng, opts };
+            let (status, body) = crate::intelligence::handle_infer(&gw, &a("body"), &|_| {});
+            json!({"status": status, "body": body})
+        }
         "location_kind" => json!(client::location_kind(&a("location").as_str().map(String::from))),
         "gw_embed" => {
             let (cfg, eng, opts) = gateway_parts(&a);

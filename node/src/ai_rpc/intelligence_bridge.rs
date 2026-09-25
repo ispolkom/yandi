@@ -30,6 +30,7 @@
 //! "non-empty model" sanity check upstream), but it has no effect on
 //! which backend answers.
 
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use reqwest::Client;
@@ -66,9 +67,47 @@ struct BridgeInferResponse {
     error: Option<String>,
 }
 
+/// Собственный движок узла, общий на весь процесс: RpcServer и локальный клиент НЕ должны поднимать по своему `llama-server` (две копии модели в памяти).
+static NATIVE: OnceLock<Arc<NativeIntelligence>> = OnceLock::new();
+
+/// Родной «мост интеллекта» внутри процесса узла (`yandi_llm`): настройки владельца из хранилища → собственный движок (вшитый `llama-server`).
+/// HTTP-моста на Python не нужно. Блокирующие вызовы выполняются в `spawn_blocking`.
+pub struct NativeIntelligence {
+    engine: yandi_llm::server_engine::ServerEngine,
+}
+
+impl NativeIntelligence {
+    fn shared() -> Arc<NativeIntelligence> {
+        NATIVE
+            .get_or_init(|| Arc::new(NativeIntelligence { engine: yandi_llm::server_engine::ServerEngine::new(yandi_llm::server_engine::ServerEngineConfig::new(vec![])) }))
+            .clone()
+    }
+
+    /// Один запрос (блокирующий): `(статус, тело)` в форме Python-моста.
+    fn infer_blocking(&self, body: &serde_json::Value) -> (u16, serde_json::Value) {
+        use yandi_llm::client::{Gateway, GatewayOptions, SecureStoreConfig};
+        // блокирующий HTTP-клиент создаётся ТОЛЬКО в потоке spawn_blocking (в async-контексте он паникует)
+        static TRANSPORT: OnceLock<yandi_llm::transport::ReqwestTransport> = OnceLock::new();
+        let transport = TRANSPORT.get_or_init(yandi_llm::transport::ReqwestTransport::new);
+        let gw = Gateway { transport, config: &SecureStoreConfig, engine: &self.engine, opts: GatewayOptions::from_env() };
+        yandi_llm::intelligence::handle_infer(&gw, body, &|m| eprintln!("{m}"))
+    }
+}
+
+/// Какой мост использовать: `YANDI_INTELLIGENCE_ENGINE=native|python`; по умолчанию — родной, если в бинарник вшит движок
+/// (`YANDI_EMBED_LLAMA_SERVER` при сборке), иначе прежний Python-мост.
+pub fn use_native() -> bool {
+    match std::env::var("YANDI_INTELLIGENCE_ENGINE").ok().as_deref() {
+        Some("native") => true,
+        Some("python") => false,
+        _ => yandi_llm::engine_binary::has_embedded(),
+    }
+}
+
 pub struct IntelligenceBridgeClient {
     base_url: String,
     client: Client,
+    native: Option<Arc<NativeIntelligence>>,
 }
 
 impl IntelligenceBridgeClient {
@@ -91,7 +130,8 @@ impl IntelligenceBridgeClient {
             .no_proxy()
             .build()
             .map_err(|e| format!("failed to build intelligence bridge client: {e}"))?;
-        Ok(Self { base_url: base_url.to_string(), client })
+        let native = if use_native() { Some(NativeIntelligence::shared()) } else { None };
+        Ok(Self { base_url: base_url.to_string(), client, native })
     }
 
     /// Run one inference request through the local `llm_gateway` bridge.
@@ -109,6 +149,21 @@ impl IntelligenceBridgeClient {
             max_tokens: req.max_tokens,
             temperature: req.temperature,
         };
+
+        if let Some(native) = &self.native {
+            let body = serde_json::to_value(&body).map_err(|e| RpcError::BackendError(format!("bad request: {e}")))?;
+            let native = native.clone();
+            let (status, out) = tokio::task::spawn_blocking(move || native.infer_blocking(&body))
+                .await
+                .map_err(|e| RpcError::BackendError(format!("native intelligence task failed: {e}")))?;
+            if status != 200 || out["success"] != serde_json::json!(true) {
+                return Err(RpcError::BackendError(out["error"].as_str().unwrap_or("backend_error").to_string()));
+            }
+            return Ok(AiInferResponse {
+                content: out["text"].as_str().unwrap_or_default().to_string(),
+                tokens_used: out["tokens_used"].as_u64().map(|n| n as u32),
+            });
+        }
 
         let resp = self
             .client
@@ -136,6 +191,10 @@ impl IntelligenceBridgeClient {
     }
 
     pub async fn is_reachable(&self) -> bool {
+        if let Some(native) = &self.native {
+            use yandi_llm::client::LocalEngine;
+            return native.engine.registry_error().is_none();
+        }
         // A cheap reachability probe that never invokes a backend: an
         // intentionally malformed request (no messages) is rejected by
         // the bridge with HTTP 400 before it ever calls llm_gateway —
