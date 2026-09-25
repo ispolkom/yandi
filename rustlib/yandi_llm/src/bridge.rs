@@ -8,9 +8,59 @@ use crate::ollama::{self, OllamaParams};
 use crate::remote::{self, GenerateParams};
 use crate::transport::ReqwestTransport;
 use crate::secure_store as store;
+use crate::client::{self, ConfigSource, CompleteParams, Gateway, GatewayOptions, ModelSpec, UnavailableEngine};
 use crate::semantic::*;
 use crate::types::*;
 use crate::vector_space::*;
+
+/// Настройки для тестов: карта «имя → запись»; запись `{"__raise__": "текст"}` имитирует исключение хранилища.
+struct MockConfig(Map<String, Value>);
+
+impl ConfigSource for MockConfig {
+    fn get_model_entry(&self, model: &str) -> Result<Option<Value>, String> {
+        match self.0.get(model) {
+            None => Ok(None),
+            Some(Value::Object(o)) if o.contains_key("__raise__") => Err(o["__raise__"].as_str().unwrap_or("").to_string()),
+            Some(v) => Ok(Some(v.clone())),
+        }
+    }
+}
+
+fn gateway_parts(a: &dyn Fn(&str) -> Value) -> (MockConfig, UnavailableEngine, GatewayOptions) {
+    let cfg = MockConfig(match a("config") {
+        Value::Object(o) => o,
+        _ => Map::new(),
+    });
+    let mut eng = UnavailableEngine::new(a("engine_reason").as_str().unwrap_or("No module named 'llama_cpp'"));
+    if let Value::Object(reg) = a("registry") {
+        for (name, path) in reg {
+            eng.registry.push((name, ModelSpec { path: path.as_str().unwrap_or("").to_string(), n_ctx: 8192, n_gpu_layers: -1 }));
+        }
+    }
+    let opts = GatewayOptions { default_base_url: a("default_base_url").as_str().unwrap_or(client::DEFAULT_BASE_URL).to_string(), local_enabled: a("local_enabled").as_bool().unwrap_or(false) };
+    (cfg, eng, opts)
+}
+
+fn complete_params(a: &dyn Fn(&str) -> Value) -> CompleteParams {
+    CompleteParams {
+        temperature: a("temperature").as_f64(),
+        max_tokens: a("max_tokens").as_i64(),
+        timeout: a("timeout").as_u64().unwrap_or(client::DEFAULT_TIMEOUT),
+        strip_think: a("strip_think").as_bool().unwrap_or(true),
+        extra_options: match a("extra_options") {
+            Value::Object(o) => Some(o),
+            _ => None,
+        },
+        response_format: match a("response_format") {
+            Value::Null => None,
+            v => Some(v),
+        },
+        stop: match a("stop") {
+            Value::Array(x) => Some(x.iter().filter_map(|v| v.as_str().map(String::from)).collect()),
+            _ => None,
+        },
+    }
+}
 
 fn system_arg(v: &Value) -> SystemArg {
     match v {
@@ -142,6 +192,53 @@ fn dispatch(name: &str, args: &Value) -> Result<Value, String> {
             Ok(m) => json!({"ok": m}),
             Err(e) => json!({"error": {"kind": e.kind(), "msg": e.message()}}),
         },
+        "gw_complete" | "gw_complete_meta" | "gw_complete_semantic" => {
+            let (cfg, eng, opts) = gateway_parts(&a);
+            let t = ReqwestTransport::new();
+            let gw = Gateway { transport: &t, config: &cfg, engine: &eng, opts };
+            let msgs: Option<Vec<Value>> = match a("messages") {
+                Value::Array(m) => Some(m),
+                _ => None,
+            };
+            let prompt = a("prompt");
+            let model = a("model");
+            let base = a("base_url");
+            let sys = system_arg(&a("system"));
+            let p = complete_params(&a);
+            let err = |class: &str, msg: String| json!({"error": {"class": class, "msg": msg}});
+            match name {
+                "gw_complete" => match gw.complete_with_raw(prompt.as_str(), model.as_str().unwrap_or(""), &sys, msgs.as_deref(), base.as_str().unwrap_or(""), &p) {
+                    Ok((text, raw)) => json!({"ok": {"text": text, "raw": raw}}),
+                    Err(e) => err("LLMError", e.0),
+                },
+                "gw_complete_meta" => match gw.complete_with_meta(prompt.as_str(), model.as_str().unwrap_or(""), &sys, msgs.as_deref(), base.as_str().unwrap_or(""), &p) {
+                    Ok((text, truncated, count)) => json!({"ok": {"text": text, "truncated": truncated, "token_count": count}}),
+                    Err(e) => err("LLMError", e.0),
+                },
+                _ => {
+                    let req: SemanticOutputRequirement = serde_json::from_value(a("requirement")).map_err(|e| e.to_string())?;
+                    match gw.complete_semantic(prompt.as_str(), model.as_str().unwrap_or(""), &req, &sys, msgs.as_deref(), base.as_str().unwrap_or(""), &p) {
+                        Ok(r) => json!({"ok": serde_json::to_value(r).map_err(|e| e.to_string())?}),
+                        Err(e) => err("LLMError", e.0),
+                    }
+                }
+            }
+        }
+        "location_kind" => json!(client::location_kind(&a("location").as_str().map(String::from))),
+        "gw_embed" => {
+            let (cfg, eng, opts) = gateway_parts(&a);
+            let t = ReqwestTransport::new();
+            let gw = Gateway { transport: &t, config: &cfg, engine: &eng, opts };
+            let texts: Vec<String> = match a("texts") {
+                Value::Array(x) => x.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+                Value::String(s) => vec![s],
+                _ => vec![],
+            };
+            match gw.embed(&texts, a("model").as_str().unwrap_or(""), a("base_url").as_str().unwrap_or(""), a("timeout").as_u64().unwrap_or(client::DEFAULT_TIMEOUT)) {
+                Ok(r) => json!({"ok": {"vectors": r.vectors, "space": r.space.to_dict()}}),
+                Err(e) => json!({"error": {"class": "EmbedError", "msg": e.0}}),
+            }
+        }
         "remote_embed" => {
             let texts: Vec<String> = match a("texts") {
                 Value::Array(x) => x.iter().filter_map(|v| v.as_str().map(String::from)).collect(),

@@ -62,8 +62,9 @@ fn send(t: &dyn Transport, req: &HttpRequest, timeout: u64, model: &str, base_ur
     Ok(resp)
 }
 
-fn parse_json(body: &[u8]) -> Result<Value, String> {
-    serde_json::from_slice::<Value>(body).map_err(|e| e.to_string())
+/// `resp.json()`: текст ошибки — как у Python (`Expecting value: line 1 column 1 (char 0)`), значения — `serde_json`.
+pub(crate) fn parse_json(body: &[u8]) -> Result<Value, String> {
+    crate::semantic::loads(&String::from_utf8_lossy(body))
 }
 
 // ---------------------------------------------------------------- OpenAI chat completions

@@ -55,7 +55,7 @@ pub fn generate_request(messages: &[Value], model: &str, base_url: &str, p: &Oll
 
 pub fn generate_parse(body: &[u8], model: &str) -> Result<(String, Value), OllamaBackendError> {
     let bad = |d: String| OllamaBackendError(format!("{model}: неожиданный формат ответа: {d}"));
-    let raw: Value = serde_json::from_slice(body).map_err(|e| bad(e.to_string()))?;
+    let raw: Value = crate::remote::parse_json(body).map_err(bad)?;
     let content = raw.get("message").and_then(|m| m.get("content")).ok_or_else(|| bad("нет message.content".into()))?;
     match content {
         Value::String(s) => Ok((s.clone(), raw.clone())),

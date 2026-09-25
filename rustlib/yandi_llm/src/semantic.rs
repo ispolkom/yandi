@@ -38,6 +38,11 @@ pub fn strip_think_blocks(text: &str) -> String {
     THINK_BLOCK.replace_all(text, "").replace("<think>", "").replace("</think>", "")
 }
 
+/// `_THINK_TAG_RE.sub("", text)` — ТОЛЬКО закрытые блоки (без зачистки одиночных тегов, в отличие от `strip_think_blocks`).
+pub fn strip_think_closed(text: &str) -> String {
+    THINK_BLOCK.replace_all(text, "").into_owned()
+}
+
 /// `_contract_from_response_format`
 pub fn contract_from_response_format(response_format: Option<&Value>) -> OutputContract {
     let is_json = matches!(response_format, Some(Value::String(s)) if s == "json");
@@ -134,7 +139,7 @@ pub fn semantic_contract_from_target(req: &SemanticOutputRequirement, caps: &Bac
 }
 
 /// Разбор JSON как `json.loads`: Ok(значение) либо Err(точный текст ошибки Python).
-fn loads(text: &str) -> Result<Value, String> {
+pub(crate) fn loads(text: &str) -> Result<Value, String> {
     match py_json::loads(text) {
         Ok(pj) => Ok(serde_json::from_str::<Value>(text).unwrap_or_else(|_| pyjson_to_value(&pj))),
         Err(LoadsError::Decode(m)) => Err(m),

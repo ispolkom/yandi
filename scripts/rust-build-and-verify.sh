@@ -30,7 +30,7 @@ export VIRTUAL_ENV="$(dirname "$VENV_BIN")"
 say "3/4 проверка параллельности с Python (все *_rust_parity_test + массовый Unicode-фаззинг)"
 export YANDI_TEST_MODE=1
 fail=0; n=0
-for f in $(ls agent/*_rust_parity_test.py pet/*_rust_parity_test.py 2>/dev/null) agent/rust_unicode_fuzz_parity_test.py agent/rust_python_text_semantics_parity_test.py llm_gateway/native_parity_test.py llm_gateway/native_remote_parity_test.py llm_gateway/native_secure_store_parity_test.py; do
+for f in $(ls agent/*_rust_parity_test.py pet/*_rust_parity_test.py 2>/dev/null) agent/rust_unicode_fuzz_parity_test.py agent/rust_python_text_semantics_parity_test.py llm_gateway/native_parity_test.py llm_gateway/native_remote_parity_test.py llm_gateway/native_secure_store_parity_test.py llm_gateway/native_client_parity_test.py; do
   m="$(echo "${f%.py}" | tr '/' '.')"
   n=$((n+1))
   if "$PY" -m "$m" >/dev/null 2>&1; then echo "  ok    $m"; else echo "  ПРОВАЛ $m"; fail=$((fail+1)); fi
