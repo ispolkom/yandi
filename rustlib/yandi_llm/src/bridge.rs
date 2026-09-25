@@ -115,7 +115,7 @@ fn dispatch(name: &str, args: &Value) -> Result<Value, String> {
                 timeout: a("timeout").as_u64().unwrap_or(0),
             };
             let t = ReqwestTransport::new();
-            match remote::generate(&t, &msgs, a("base_url").as_str().unwrap_or(""), a("protocol").as_str().unwrap_or(""), a("model").as_str().unwrap_or(""), a("api_key_env").as_str(), &p) {
+            match remote::generate(&t, &msgs, a("base_url").as_str().unwrap_or(""), a("protocol").as_str().unwrap_or(""), a("model").as_str().unwrap_or(""), a("api_key_env").as_str(), a("api_key").as_str(), &p) {
                 Ok((text, meta)) => json!({"ok": {"text": text, "meta": meta}}),
                 Err(e) => json!({"error": e.0}),
             }
@@ -156,7 +156,7 @@ fn dispatch(name: &str, args: &Value) -> Result<Value, String> {
                 _ => vec![],
             };
             let t = ReqwestTransport::new();
-            match remote::embed(&t, &texts, a("base_url").as_str().unwrap_or(""), a("protocol").as_str().unwrap_or(""), a("model").as_str().unwrap_or(""), a("api_key_env").as_str(), a("timeout").as_u64().unwrap_or(0)) {
+            match remote::embed(&t, &texts, a("base_url").as_str().unwrap_or(""), a("protocol").as_str().unwrap_or(""), a("model").as_str().unwrap_or(""), a("api_key_env").as_str(), a("api_key").as_str(), a("timeout").as_u64().unwrap_or(0)) {
                 Ok((vectors, meta)) => json!({"ok": {"vectors": vectors, "meta": meta}}),
                 Err(e) => json!({"error": e.0}),
             }

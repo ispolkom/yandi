@@ -264,15 +264,19 @@ pub fn openai_embed_parse(body: &[u8], model: &str, base_url: &str) -> Result<(V
 
 // ---------------------------------------------------------------- точки входа
 
-fn api_key_from_env(api_key_env: Option<&str>) -> Option<String> {
-    api_key_env.and_then(|name| std::env::var(name).ok())
+/// Ключ API: явный (хранится в зашифрованном хранилище узла, `api_key` в настройке модели) сильнее переменной окружения (`api_key_env`, как у Python-версии).
+fn api_key_from_env(api_key_env: Option<&str>, api_key: Option<&str>) -> Option<String> {
+    match api_key {
+        Some(k) if !k.is_empty() => Some(k.to_string()),
+        _ => api_key_env.and_then(|name| std::env::var(name).ok()),
+    }
 }
 
 /// `generate`: единая точка входа для обоих протоколов; `messages` — уже готовый wire-формат (`build_messages`).
 pub fn generate(
-    t: &dyn Transport, messages: &[Value], base_url: &str, protocol: &str, model: &str, api_key_env: Option<&str>, p: &GenerateParams,
+    t: &dyn Transport, messages: &[Value], base_url: &str, protocol: &str, model: &str, api_key_env: Option<&str>, api_key_literal: Option<&str>, p: &GenerateParams,
 ) -> Result<(String, Map<String, Value>), RemoteBackendError> {
-    let api_key = api_key_from_env(api_key_env);
+    let api_key = api_key_from_env(api_key_env, api_key_literal);
     let timeout = if p.timeout == 0 { DEFAULT_TIMEOUT } else { p.timeout };
     match protocol {
         "openai" => {
@@ -291,9 +295,9 @@ pub fn generate(
 
 /// `embed`: пока только OpenAI-совместимый протокол (у Anthropic нативных embeddings нет — не притворяемся).
 pub fn embed(
-    t: &dyn Transport, texts: &[String], base_url: &str, protocol: &str, model: &str, api_key_env: Option<&str>, timeout: u64,
+    t: &dyn Transport, texts: &[String], base_url: &str, protocol: &str, model: &str, api_key_env: Option<&str>, api_key_literal: Option<&str>, timeout: u64,
 ) -> Result<(Vec<Value>, Map<String, Value>), RemoteBackendError> {
-    let api_key = api_key_from_env(api_key_env);
+    let api_key = api_key_from_env(api_key_env, api_key_literal);
     let timeout = if timeout == 0 { DEFAULT_TIMEOUT } else { timeout };
     match protocol {
         "openai" => {
@@ -328,6 +332,17 @@ mod tests {
         assert_eq!(r.body["system"], "a\n\nb");
         assert_eq!(r.body["messages"].as_array().unwrap().len(), 1);
         assert_eq!(r.body["max_tokens"], 4096);
+    }
+
+    #[test]
+    fn literal_key_beats_env_and_empty_literal_falls_back() {
+        std::env::set_var("YANDI_TEST_KEY_X", "from-env");
+        assert_eq!(api_key_from_env(Some("YANDI_TEST_KEY_X"), Some("literal")).as_deref(), Some("literal"));
+        assert_eq!(api_key_from_env(Some("YANDI_TEST_KEY_X"), None).as_deref(), Some("from-env"));
+        assert_eq!(api_key_from_env(Some("YANDI_TEST_KEY_X"), Some("")).as_deref(), Some("from-env"));
+        assert_eq!(api_key_from_env(None, Some("k")).as_deref(), Some("k"));
+        assert_eq!(api_key_from_env(None, None), None);
+        assert_eq!(api_key_from_env(Some("YANDI_NO_SUCH_VAR_Q"), None), None);
     }
 
     #[test]

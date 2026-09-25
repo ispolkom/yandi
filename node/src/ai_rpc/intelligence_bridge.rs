@@ -115,6 +115,12 @@ pub async fn gateway_call(name: String, args: serde_json::Value) -> (u16, serde_
     }
 }
 
+/// Готов ли собственный движок (бинарник `llama-server` найден): `None` — готов, иначе причина простым языком.
+pub fn engine_problem() -> Option<String> {
+    use yandi_llm::client::LocalEngine;
+    NativeIntelligence::shared().engine.registry_error()
+}
+
 /// Какой мост использовать: `YANDI_INTELLIGENCE_ENGINE=native|python`; по умолчанию — родной, если в бинарник вшит движок
 /// (`YANDI_EMBED_LLAMA_SERVER` при сборке), иначе прежний Python-мост.
 pub fn use_native() -> bool {

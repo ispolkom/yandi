@@ -168,7 +168,7 @@ impl Adapter {
 
 #[derive(Debug, Clone)]
 pub enum TargetData {
-    Remote { base_url: String, api_key_env: Option<String> },
+    Remote { base_url: String, api_key_env: Option<String>, api_key: Option<String> },
     Local(LocalTarget),
 }
 
@@ -216,7 +216,7 @@ fn explicit_url_target(model: &str, base_url: &str, attempt: u32) -> ResolvedTar
         provider: Some("openai_compatible"),
         config_ref: Some("explicit_base_url".to_string()),
         fallback_reason: None,
-        target: TargetData::Remote { base_url: base_url.to_string(), api_key_env: None },
+        target: TargetData::Remote { base_url: base_url.to_string(), api_key_env: None, api_key: None },
     }
 }
 
@@ -290,7 +290,7 @@ impl<'a> Gateway<'a> {
                         provider: Some(if is_anth { "anthropic" } else { "openai_compatible" }),
                         config_ref: Some(format!("secure_store:{model}")),
                         fallback_reason: None,
-                        target: TargetData::Remote { base_url: base, api_key_env },
+                        target: TargetData::Remote { base_url: base, api_key_env, api_key: match obj.get("api_key") { Some(Value::String(k)) if !k.is_empty() => Some(k.clone()), _ => None } },
                     });
                 }
                 _ => {
@@ -403,7 +403,7 @@ impl<'a> Gateway<'a> {
         let wire = build_messages(prompt, system, messages);
         let model = target.resolved_model.as_str();
         match (&target.adapter, &target.target) {
-            (Adapter::OpenAiCompat, TargetData::Remote { base_url, api_key_env }) | (Adapter::Anthropic, TargetData::Remote { base_url, api_key_env }) => {
+            (Adapter::OpenAiCompat, TargetData::Remote { base_url, api_key_env, api_key }) | (Adapter::Anthropic, TargetData::Remote { base_url, api_key_env, api_key }) => {
                 let protocol = if target.adapter == Adapter::Anthropic { "anthropic" } else { "openai" };
                 let gp = GenerateParams {
                     temperature: p.temperature,
@@ -415,7 +415,7 @@ impl<'a> Gateway<'a> {
                     stop: p.stop.clone(),
                     timeout: p.timeout,
                 };
-                remote::generate(self.transport, &wire, base_url, protocol, model, api_key_env.as_deref(), &gp)
+                remote::generate(self.transport, &wire, base_url, protocol, model, api_key_env.as_deref(), api_key.as_deref(), &gp)
                     .map_err(|e| AttemptError { class: "RemoteBackendError", message: e.0 })
             }
             (Adapter::LlamaCpp, TargetData::Local(lt)) => {
@@ -595,7 +595,7 @@ impl<'a> Gateway<'a> {
                     Some(Value::String(s)) => Some(s.clone()),
                     _ => None,
                 };
-                let (v, m) = remote::embed(self.transport, texts, &base, &protocol_name, &real_model, api_key_env.as_deref(), remote::DEFAULT_TIMEOUT).map_err(|e| e.0)?;
+                let (v, m) = remote::embed(self.transport, texts, &base, &protocol_name, &real_model, api_key_env.as_deref(), match entry.get("api_key") { Some(Value::String(k)) if !k.is_empty() => Some(k.as_str()), _ => None }, remote::DEFAULT_TIMEOUT).map_err(|e| e.0)?;
                 (v, m, "remote".to_string(), format!("remote-{protocol_name}-embeddings"), real_model)
             }
             _ => {

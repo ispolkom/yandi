@@ -384,6 +384,8 @@ impl WebServer {
         Router::new()
             // HTML pages (protected)
             .route("/", get(index_handler))
+            .route("/ai", get(ai_handler))
+            .merge(crate::web::ai_api::router())
             .route("/contacts", get(contacts_handler))
             .route("/gateways", get(gateways_handler))
             .route("/settings", get(settings_handler))
@@ -743,6 +745,10 @@ async fn api_auth_recover(
 
 async fn index_handler() -> Html<&'static str> {
     Html(include_str!("ui/index.html"))
+}
+
+async fn ai_handler() -> Html<&'static str> {
+    Html(include_str!("ui/ai.html"))
 }
 
 async fn contacts_handler() -> Html<&'static str> {

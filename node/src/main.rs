@@ -242,6 +242,12 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(unix)]
     let managed_core = yandi::managed_core::start_from_env(&auth_state);
 
+    // 7c. Единая база данных (встроенная SQLite, файл в каталоге данных пользователя): открывается здесь, дальше её берут ядро и PET.
+    match yandi::storage::init() {
+        Ok(p) => println!("🗄  База данных: {} (создана или найдена, данные переживают удаление программы)", p.display()),
+        Err(e) => eprintln!("🗄  {e} — узел продолжает работу без базы"),
+    }
+
     let identity_for_transport = identity.clone(); // Клон для транспортов
     let identity_for_web = identity.clone(); // Clone for Web UI/mDNS
     let identity_for_socks5 = identity.clone(); // Clone for SOCKS5 auto-start

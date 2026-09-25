@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YANDI — ИИ</title>
+    <link rel="stylesheet" href="/style.css">
+    <style>
+        .ai-grid { display: grid; grid-template-columns: minmax(280px, 340px) 1fr; gap: 1rem; align-items: start; }
+        @media (max-width: 860px) { .ai-grid { grid-template-columns: 1fr; } }
+        .model-row { display: flex; align-items: center; gap: .5rem; padding: .5rem; border: 1px solid var(--border-color); border-radius: var(--border-radius); margin-bottom: .5rem; background: var(--bg-primary); }
+        .model-row.default { border-color: var(--primary-color); background: var(--icq-active); }
+        .model-row .grow { flex: 1; min-width: 0; }
+        .model-name { font-weight: bold; }
+        .model-sub { font-size: .8rem; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .problem { color: var(--danger-color); font-size: .8rem; }
+        .note { font-size: .85rem; color: var(--text-muted); margin: .5rem 0; }
+        .banner { padding: .6rem .8rem; border-radius: var(--border-radius); margin-bottom: 1rem; background: #fff3cd; border: 1px solid #e0c060; color: #5a4300; }
+        .chat-box { height: 52vh; overflow-y: auto; border: 1px solid var(--border-color); border-radius: var(--border-radius); padding: .6rem; background: var(--icq-message-bg); }
+        .msg { margin: .4rem 0; padding: .5rem .7rem; border-radius: var(--border-radius); white-space: pre-wrap; word-wrap: break-word; max-width: 92%; }
+        .msg.user { background: var(--icq-message-sent); margin-left: auto; }
+        .msg.assistant { background: #f4f4f4; border: 1px solid var(--icq-message-border); }
+        .msg.error { background: #fdecea; color: var(--danger-color); }
+        .msg.wait { color: var(--text-muted); font-style: italic; }
+        .composer { display: flex; gap: .5rem; margin-top: .6rem; }
+        .composer textarea { flex: 1; min-height: 3rem; resize: vertical; }
+        .modal { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; align-items: center; justify-content: center; z-index: 50; }
+        .modal.open { display: flex; }
+        .modal-card { background: var(--bg-primary); border-radius: 6px; padding: 1rem; width: min(560px, 94vw); max-height: 90vh; overflow-y: auto; }
+        .tabs { display: flex; gap: .4rem; margin-bottom: .8rem; flex-wrap: wrap; }
+        .tabs button.active { background: var(--primary-color); color: #fff; }
+        .browse-list { max-height: 260px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: var(--border-radius); }
+        .browse-item { padding: .35rem .6rem; cursor: pointer; display: flex; justify-content: space-between; }
+        .browse-item:hover { background: var(--icq-active); }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <h1 class="logo"><img src="/media/logo.png" alt="YANDI" style="height:42px;width:auto;display:block;"></h1>
+                <nav class="nav">
+                    <a href="/" class="nav-link">Главная</a>
+                    <a href="/chat" class="nav-link">Чат</a>
+                    <a href="/ai" class="nav-link active">ИИ</a>
+                    <a href="/groups" class="nav-link">Группы</a>
+                    <a href="/gateways" class="nav-link">Шлюзы</a>
+                    <a href="/relay" class="nav-link">Relay</a>
+                    <a href="/settings" class="nav-link">Настройки</a>
+                </nav>
+                <div><a href="/api/auth/logout" class="btn btn-sm btn-secondary" style="text-decoration:none;">Выйти</a></div>
+            </div>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="container">
+            <div id="engineBanner" class="banner hidden"></div>
+            <div class="ai-grid">
+                <div class="card">
+                    <div class="card-header"><h2 class="card-title">Модели</h2></div>
+                    <div class="card-body">
+                        <div id="modelList"></div>
+                        <p class="note" id="emptyNote">Пока нет ни одной модели. Добавьте свою — файл на этом компьютере, свой сервер или сервис с ключом.</p>
+                        <button class="btn btn-primary" id="addBtn">＋ Добавить модель</button>
+                        <p class="note">Выбранная модель («Голос») отвечает в разговоре справа. Файлы и ключи хранятся только у вас, в зашифрованном виде.</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">Разговор с ИИ</h2>
+                        <span id="currentModel" class="note"></span>
+                    </div>
+                    <div class="card-body">
+                        <div id="chat" class="chat-box"></div>
+                        <div class="composer">
+                            <textarea id="input" class="form-input" placeholder="Напишите вопрос…  (Ctrl+Enter — отправить)"></textarea>
+                            <div style="display:flex;flex-direction:column;gap:.4rem;">
+                                <button class="btn btn-primary" id="sendBtn">Отправить</button>
+                                <button class="btn btn-secondary btn-sm" id="clearBtn">Очистить</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <div class="modal" id="modal">
+        <div class="modal-card">
+            <h3 style="margin-bottom:.6rem;">Добавить модель</h3>
+            <div class="tabs" id="kindTabs">
+                <button class="btn btn-secondary btn-sm active" data-kind="local">Файл на компьютере</button>
+                <button class="btn btn-secondary btn-sm" data-kind="remote">Свой сервер</button>
+                <button class="btn btn-secondary btn-sm" data-kind="service">Сервис с ключом</button>
+            </div>
+            <div class="form-group"><label>Название (как будет в списке)</label><input class="form-input" id="fName" maxlength="64"></div>
+
+            <div data-for="local">
+                <div class="form-group"><label>Файл модели (.gguf)</label>
+                    <div style="display:flex;gap:.4rem;"><input class="form-input" id="fPath" placeholder="/путь/к/модели.gguf"><button class="btn btn-secondary btn-sm" id="browseBtn">Обзор…</button></div>
+                    <div class="form-help">Любой диск и папка. Модель запускается прямо в YANDI, ничего ставить не нужно.</div>
+                </div>
+                <div id="browser" class="hidden">
+                    <div class="note" id="browsePath"></div>
+                    <div class="browse-list" id="browseList"></div>
+                </div>
+            </div>
+            <div data-for="remote" class="hidden">
+                <div class="form-group"><label>Адрес сервера</label><input class="form-input" id="fBase" placeholder="http://192.168.1.10:8080/v1"></div>
+                <div class="form-group"><label>Название модели на сервере</label><input class="form-input" id="fModelR"></div>
+                <div class="form-group"><label>Ключ доступа (если нужен)</label><input class="form-input" id="fKeyR" type="password" autocomplete="off"></div>
+            </div>
+            <div data-for="service" class="hidden">
+                <div class="form-group"><label>Сервис</label>
+                    <select class="form-input" id="fService">
+                        <option value="openai">OpenAI</option><option value="anthropic">Anthropic (Claude)</option>
+                        <option value="deepseek">DeepSeek</option><option value="openrouter">OpenRouter</option>
+                    </select></div>
+                <div class="form-group"><label>Название модели</label><input class="form-input" id="fModelS" placeholder="например gpt-4o-mini"></div>
+                <div class="form-group"><label>Ключ доступа</label><input class="form-input" id="fKeyS" type="password" autocomplete="off"><div class="form-help">Ключ шифруется и остаётся на этом компьютере. Запросы уходят только к выбранному сервису.</div></div>
+            </div>
+
+            <div id="modalMsg" class="note"></div>
+            <div style="display:flex;gap:.5rem;justify-content:flex-end;margin-top:.6rem;">
+                <button class="btn btn-secondary" id="cancelBtn">Отмена</button>
+                <button class="btn btn-primary" id="saveBtn">Сохранить</button>
+            </div>
+        </div>
+    </div>
+
+<script>
+(function () {
+    const $ = (id) => document.getElementById(id);
+    let state = { models: [], default: null, engine: { ready: true } };
+    let kind = 'local';
+    let history = [];   // [{role, content}]
+    try { history = JSON.parse(localStorage.getItem('yandi_ai_history') || '[]'); } catch (e) { history = []; }
+
+    async function api(path, opts) {
+        const r = await fetch(path, opts);
+        let body = null;
+        try { body = await r.json(); } catch (e) { /* пустой ответ */ }
+        if (r.status === 401 || (r.redirected && r.url.includes('/login'))) { location.href = '/login'; throw new Error('login'); }
+        if (!r.ok) throw new Error((body && body.error) || ('Ошибка ' + r.status));
+        return body;
+    }
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    async function refresh() {
+        try { state = await api('/api/ai/state'); } catch (e) { $('modelList').innerHTML = '<p class="problem">' + esc(e.message) + '</p>'; return; }
+        const b = $('engineBanner');
+        if (!state.engine.ready) { b.textContent = 'Свою модель с диска в этой сборке запустить нельзя: ' + (state.engine.problem || 'движок не найден') + '. Сервер или сервис с ключом работают.'; b.classList.remove('hidden'); }
+        else b.classList.add('hidden');
+        $('emptyNote').classList.toggle('hidden', state.models.length > 0);
+        $('modelList').innerHTML = state.models.map((m) => (
+            '<div class="model-row' + (m.is_default ? ' default' : '') + '" data-name="' + esc(m.name) + '">' +
+            '<div class="grow"><div class="model-name">' + esc(m.name) + (m.is_default ? ' · Голос' : '') + '</div>' +
+            '<div class="model-sub" title="' + esc(m.summary) + '">' + ({ local: '💾 ', remote: '🖧 ', service: '☁ ' }[m.kind] || '') + esc(m.summary) + '</div>' +
+            (m.problem ? '<div class="problem">' + esc(m.problem) + '</div>' : '') + '<div class="note check-msg"></div></div>' +
+            '<div style="display:flex;flex-direction:column;gap:.25rem;">' +
+            (m.is_default ? '' : '<button class="btn btn-secondary btn-sm act" data-act="default">Голос</button>') +
+            '<button class="btn btn-secondary btn-sm act" data-act="check">Проверить</button>' +
+            '<button class="btn btn-danger btn-sm act" data-act="delete">Удалить</button></div></div>'
+        )).join('');
+        $('currentModel').textContent = state.default ? 'Голос: ' + state.default : 'модель не выбрана';
+    }
+
+    $('modelList').addEventListener('click', async (ev) => {
+        const btn = ev.target.closest('button.act'); if (!btn) return;
+        const row = btn.closest('.model-row'); const name = row.dataset.name; const msg = row.querySelector('.check-msg');
+        try {
+            if (btn.dataset.act === 'default') { await api('/api/ai/default', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }); await refresh(); }
+            else if (btn.dataset.act === 'delete') { if (confirm('Удалить модель «' + name + '» из списка? Файл модели не удаляется.')) { await api('/api/ai/models/' + encodeURIComponent(name), { method: 'DELETE' }); await refresh(); } }
+            else if (btn.dataset.act === 'check') {
+                msg.textContent = 'Проверяю…';
+                let r = await api('/api/ai/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, deep: false }) });
+                msg.textContent = (r.ok ? '✔ ' : '✖ ') + r.message;
+                if (r.ok && /Проверить ответом/.test(r.message) && confirm('Задать модели пробный вопрос? Первый запуск локальной модели может занять минуту-две.')) {
+                    msg.textContent = 'Жду ответ модели…';
+                    r = await api('/api/ai/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, deep: true }) });
+                    msg.textContent = (r.ok ? '✔ ' : '✖ ') + r.message;
+                }
+            }
+        } catch (e) { msg.textContent = '✖ ' + e.message; }
+    });
+
+    // ---- добавление модели ----
+    function setKind(k) {
+        kind = k;
+        document.querySelectorAll('#kindTabs button').forEach((b) => b.classList.toggle('active', b.dataset.kind === k));
+        document.querySelectorAll('[data-for]').forEach((d) => d.classList.toggle('hidden', d.dataset.for !== k));
+        $('modalMsg').textContent = '';
+    }
+    $('kindTabs').addEventListener('click', (ev) => { const b = ev.target.closest('button'); if (b) setKind(b.dataset.kind); });
+    $('addBtn').onclick = () => { ['fName', 'fPath', 'fBase', 'fModelR', 'fKeyR', 'fModelS', 'fKeyS'].forEach((i) => $(i).value = ''); $('browser').classList.add('hidden'); setKind('local'); $('modal').classList.add('open'); };
+    $('cancelBtn').onclick = () => $('modal').classList.remove('open');
+    $('saveBtn').onclick = async () => {
+        const body = { name: $('fName').value, kind };
+        if (kind === 'local') body.path = $('fPath').value;
+        else if (kind === 'remote') { body.base_url = $('fBase').value; body.model = $('fModelR').value; body.api_key = $('fKeyR').value; }
+        else { body.service = $('fService').value; body.model = $('fModelS').value; body.api_key = $('fKeyS').value; }
+        try {
+            await api('/api/ai/models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+            const first = state.models.length === 0;
+            $('modal').classList.remove('open'); await refresh();
+            if (first) await api('/api/ai/default', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: body.name.trim() }) }).then(refresh);
+        } catch (e) { $('modalMsg').innerHTML = '<span class="problem">' + esc(e.message) + '</span>'; }
+    };
+
+    // ---- обзор файлов ----
+    async function browse(path) {
+        try {
+            const r = await api('/api/ai/browse?path=' + encodeURIComponent(path || ''));
+            $('browsePath').textContent = r.path || 'Диски';
+            let html = '';
+            if (r.parent) html += '<div class="browse-item" data-dir="' + esc(r.parent) + '"><span>⬆ Наверх</span></div>';
+            html += r.entries.map((e) => e.kind === 'dir'
+                ? '<div class="browse-item" data-dir="' + esc((r.path && !/[\\/]$/.test(r.path) ? r.path + (r.path.includes('\\') ? '\\' : '/') : r.path) + e.name) + '"><span>📁 ' + esc(e.name) + '</span></div>'
+                : '<div class="browse-item" data-file="' + esc(r.path + (r.path.includes('\\') ? '\\' : '/') + e.name) + '"><span>📄 ' + esc(e.name) + '</span><span class="note">' + (e.size / 1073741824).toFixed(2) + ' ГБ</span></div>').join('');
+            $('browseList').innerHTML = html || '<div class="note" style="padding:.5rem">Здесь нет папок и файлов .gguf</div>';
+            $('browser').classList.remove('hidden');
+        } catch (e) { $('modalMsg').innerHTML = '<span class="problem">' + esc(e.message) + '</span>'; }
+    }
+    $('browseBtn').onclick = () => browse($('fPath').value.replace(/[\\/][^\\/]*$/, '') || '');
+    $('browseList').addEventListener('click', (ev) => {
+        const it = ev.target.closest('.browse-item'); if (!it) return;
+        if (it.dataset.dir !== undefined) browse(it.dataset.dir);
+        else if (it.dataset.file) { $('fPath').value = it.dataset.file; if (!$('fName').value) $('fName').value = it.dataset.file.split(/[\\/]/).pop().replace(/\.gguf$/i, ''); $('browser').classList.add('hidden'); }
+    });
+
+    // ---- разговор ----
+    function paint() {
+        $('chat').innerHTML = history.map((m) => '<div class="msg ' + (m.error ? 'error' : m.role) + '">' + esc(m.content) + '</div>').join('');
+        $('chat').scrollTop = $('chat').scrollHeight;
+    }
+    async function send() {
+        const text = $('input').value.trim(); if (!text) return;
+        if (!state.default) { history.push({ role: 'assistant', error: true, content: 'Сначала добавьте модель и выберите её «Голосом».' }); paint(); return; }
+        history.push({ role: 'user', content: text }); $('input').value = ''; paint();
+        const wait = document.createElement('div'); wait.className = 'msg wait'; wait.textContent = 'Модель думает…'; $('chat').appendChild(wait); $('chat').scrollTop = $('chat').scrollHeight;
+        $('sendBtn').disabled = true;
+        try {
+            const r = await api('/api/ai/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: history.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content })) }) });
+            history.push({ role: 'assistant', content: r.text });
+        } catch (e) { history.push({ role: 'assistant', error: true, content: e.message }); }
+        $('sendBtn').disabled = false;
+        try { localStorage.setItem('yandi_ai_history', JSON.stringify(history.slice(-200))); } catch (e) { /* хранилище недоступно */ }
+        paint();
+    }
+    $('sendBtn').onclick = send;
+    $('input').addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); send(); } });
+    $('clearBtn').onclick = () => { if (confirm('Очистить разговор на этом экране?')) { history = []; try { localStorage.removeItem('yandi_ai_history'); } catch (e) { /* пусто */ } paint(); } };
+
+    paint(); refresh();
+})();
+</script>
+</body>
+</html>
