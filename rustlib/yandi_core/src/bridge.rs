@@ -243,6 +243,144 @@ fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
             let l = |k: &str| a.get(k).and_then(|v| v.as_array()).cloned().unwrap_or_default();
             json!(pf::fold(&l("facts"), &l("events")))
         }
+        "query_exec" => {
+            cx.conn.execute_batch(&a_str(a, "sql").unwrap_or_default()).map_err(|e| e.to_string())?;
+            Value::Null
+        }
+        "pm_recall" => {
+            let in_ctx: Vec<String> = a.get("in_context_texts").and_then(|v| v.as_array()).map(|x| x.iter().map(|t| t.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+            json!(crate::personal_memory::recall(cx, &uid, &a_str(a, "current_text").unwrap_or_default(), a_str(a, "current_turn_id").as_deref(), &in_ctx)?)
+        }
+        "ct_relationship_context" => json!(crate::chat_turn::relationship_context(cx, &uid, &a_str(a, "current_text").unwrap_or_default())),
+        "ct_turn" => {
+            use crate::chat_turn as ct;
+            use std::cell::RefCell;
+            let queue: RefCell<Vec<String>> = RefCell::new(a.get("responses").and_then(|v| v.as_array()).map(|x| x.iter().map(|s| s.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default());
+            let prompts: RefCell<Vec<Value>> = RefCell::new(vec![]);
+            let llm = |msgs: &[(String, String)]| -> Result<String, String> {
+                prompts.borrow_mut().push(json!(msgs.iter().map(|(r, c)| json!({"role": r, "content": c})).collect::<Vec<_>>()));
+                let r = if queue.borrow().is_empty() { String::new() } else { queue.borrow_mut().remove(0) };
+                match r.strip_prefix("__raise__:") {
+                    Some(name) => Err(name.to_string()),
+                    None => Ok(r),
+                }
+            };
+            let sem = a.get("semantic").cloned().unwrap_or(Value::Null);
+            let sem_calls: RefCell<Vec<Value>> = RefCell::new(vec![]);
+            let semantic = |system: &[Option<String>], messages: &[Value], temperature: f64| -> Result<ct::Semantic, String> {
+                sem_calls.borrow_mut().push(json!({"system": system, "messages": messages, "temperature": temperature}));
+                if sem.get("raise").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    return Err("SemanticError".into());
+                }
+                Ok(ct::Semantic { reply: sem["reply"].as_str().unwrap_or("").to_string(), reply_ok: sem.get("reply_ok").and_then(|v| v.as_bool()).unwrap_or(true), trace: sem.get("trace").and_then(|v| v.as_array()).cloned().unwrap_or_default() })
+            };
+            let models = ct::Models { extract: &llm, verify: &llm, semantic: &semantic };
+            let messages: Vec<Value> = a.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let stid = ct::valid_turn_id(a.get("turn_id"));
+            let character = a.get("character").filter(|v| !v.is_null()).cloned();
+            let verified = a.get("verified").filter(|v| !v.is_null()).cloned();
+            let inp = ct::TurnInput { model: &a_str(a, "model").unwrap_or_default(), messages: &messages, temperature: a_f(a, "temperature"), source_turn_id: stid.as_deref(), verified: verified.as_ref(), character: character.as_ref() };
+            let out = ct::respond_with_character(cx, &inp, &models)?;
+            json!({"reply": out.reply, "persisted": out.persisted, "prompts": prompts.into_inner(), "semantic": sem_calls.into_inner(), "ids_left": cx.ids_left()})
+        }
+        name if name.starts_with("sm_") => {
+            use crate::self_model as sm;
+            let st = |k: &str| a_str(a, k).unwrap_or_default();
+            let lim = |d: i64| a.get("limit").and_then(|v| v.as_i64()).unwrap_or(d);
+            let field = |k: &str| -> R<Value> { sm::row(cx)?.get(k).cloned().ok_or_else(|| "KeyError".to_string()) };
+            match &name[3..] {
+                "init" => {
+                    sm::init(cx)?;
+                    Value::Null
+                }
+                "declare_character_trait" => sm::declare_character_trait(cx, a.get("traits").and_then(|v| v.as_object()).ok_or("TypeError")?)?,
+                "add_event" => json!(sm::add_event(cx, &st("event_type"), &st("description"), a.get("details").cloned().unwrap_or(Value::Null), a.get("importance").cloned().unwrap_or(json!(0.5)))?),
+                "add_decision" => {
+                    sm::add_decision(cx, a.get("decision").ok_or("KeyError")?)?;
+                    Value::Null
+                }
+                "add_learning" => {
+                    sm::add_learning(cx, &st("lesson"), &st("context"), a.get("importance").cloned().unwrap_or(json!(0.6)))?;
+                    Value::Null
+                }
+                "add_reflection" => {
+                    sm::add_reflection(cx, a.get("reflection").ok_or("KeyError")?)?;
+                    Value::Null
+                }
+                "add_error" => {
+                    sm::add_error(cx, &st("error"), a.get("context").unwrap_or(&Value::Null), a.get("severity").cloned().unwrap_or(json!(0.7)))?;
+                    Value::Null
+                }
+                "add_belief_update" => {
+                    sm::add_belief_update(cx, &st("topic"), a.get("old_confidence").cloned().unwrap_or(Value::Null), a.get("new_confidence").cloned().unwrap_or(Value::Null), &st("reason"))?;
+                    Value::Null
+                }
+                "add_change" => {
+                    sm::add_change(cx, &st("what_changed"), a.get("before").unwrap_or(&Value::Null), a.get("after").unwrap_or(&Value::Null), &st("reason"))?;
+                    Value::Null
+                }
+                "add_capability" => {
+                    sm::add_capability(cx, &st("capability"))?;
+                    Value::Null
+                }
+                "add_limitation" => {
+                    sm::add_limitation(cx, &st("limitation"))?;
+                    Value::Null
+                }
+                "add_uncertainty" => {
+                    sm::add_uncertainty(cx, &st("uncertainty"))?;
+                    Value::Null
+                }
+                "remove_uncertainty" => {
+                    sm::remove_uncertainty(cx, &st("uncertainty"))?;
+                    Value::Null
+                }
+                "increment_cycle" => {
+                    sm::increment_cycle(cx)?;
+                    Value::Null
+                }
+                "increment_queries" => {
+                    sm::increment_queries(cx)?;
+                    Value::Null
+                }
+                "increment_errors" => {
+                    sm::increment_errors(cx)?;
+                    Value::Null
+                }
+                "increment_reflections" => {
+                    sm::increment_reflections(cx)?;
+                    Value::Null
+                }
+                "get_identity" => field("identity")?,
+                "get_age" => field("total_cycles")?,
+                "get_metadata" => sm::get_metadata(cx)?,
+                "set_metadata_value" => {
+                    sm::set_metadata_value(cx, &st("key"), a.get("value").cloned().unwrap_or(Value::Null))?;
+                    Value::Null
+                }
+                "get_goals" => sm::get_goals(cx)?,
+                "get_capabilities" => field("capabilities")?,
+                "get_limitations" => field("limitations")?,
+                "get_uncertainties" => field("current_uncertainties")?,
+                "get_recent_decisions" => sm::events_details(cx, "decision", lim(10))?,
+                "get_lessons" => sm::events_details(cx, "learning", lim(10))?,
+                "get_belief_history" => sm::events_details(cx, "belief_update", lim(10))?,
+                "set_goals" => {
+                    sm::set_goals(cx, a.get("goals").cloned().unwrap_or(Value::Null))?;
+                    Value::Null
+                }
+                "add_goal" => {
+                    sm::add_goal(cx, &st("goal"))?;
+                    Value::Null
+                }
+                "reflect" => sm::reflect(cx)?,
+                "check_health" => sm::check_health(cx)?,
+                "get_timeline" => sm::get_timeline(cx, lim(20))?,
+                "summary" => json!(sm::summary(cx)?),
+                "repr" => json!(sm::repr(cx)?),
+                other => return Err(format!("нет метода {other}")),
+            }
+        }
         other => yandi_db::repo::call(cx.conn, other, a)?,
     })
 }

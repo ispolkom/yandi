@@ -25,7 +25,7 @@ fn ui_state_path() -> PathBuf {
     yandi_db::data_dir().join("ai_ui.json")
 }
 
-fn read_default() -> Option<String> {
+pub(crate) fn read_default() -> Option<String> {
     let t = std::fs::read_to_string(ui_state_path()).ok()?;
     serde_json::from_str::<Value>(&t).ok()?.get("default")?.as_str().map(String::from)
 }

@@ -18,6 +18,7 @@ yandi_rs = { path = "../rustlib/yandi_rs", default-features = false }
 yandi_llm = { path = "../rustlib/yandi_llm", default-features = false }
 yandi_state = { path = "../rustlib/yandi_state", default-features = false }
 yandi_db = { path = "../rustlib/yandi_db", default-features = false }
+yandi_core = { path = "../rustlib/yandi_core", default-features = false }
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
 

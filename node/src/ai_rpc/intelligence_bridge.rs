@@ -105,6 +105,11 @@ impl NativeIntelligence {
     }
 }
 
+/// Блокирующий вызов шлюза (для кода, который уже работает в потоке `spawn_blocking`, например ход чата): те же настройки владельца и тот же движок.
+pub fn gateway_call_blocking(name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    NativeIntelligence::shared().call_blocking(name, args)
+}
+
 /// Для локального HTTP узла (`POST /api/gateway/call`): `(HTTP-статус, тело)`. Тело — `{"ok": …}` / `{"error": {"class", "msg"}}` как у `yandi_llm::api`.
 pub async fn gateway_call(name: String, args: serde_json::Value) -> (u16, serde_json::Value) {
     let native = NativeIntelligence::shared();

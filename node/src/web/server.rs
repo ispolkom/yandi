@@ -386,6 +386,7 @@ impl WebServer {
             .route("/", get(index_handler))
             .route("/ai", get(ai_handler))
             .merge(crate::web::ai_api::router())
+            .merge(crate::web::pet_chat::router())
             .route("/contacts", get(contacts_handler))
             .route("/gateways", get(gateways_handler))
             .route("/settings", get(settings_handler))

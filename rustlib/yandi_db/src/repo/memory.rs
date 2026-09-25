@@ -145,7 +145,7 @@ pub fn dispatch(c: &Connection, name: &str, a: &A) -> R<Option<Value>> {
         // ---- события себя ----
         "record_self_event" => {
             let created_at = dt_or_now(a.get("created_at"))?;
-            exec(c, "INSERT INTO self_event (event_id, event_type, description, details, importance, created_at) VALUES (?,?,?,?,?,?)", vec![sv(&a.str("event_id")?), sv(&a.str("event_type")?), sv(&a.str("description")?), jv(a.get("details")), fv(Some(a.opt_f64("importance")?.unwrap_or(0.5))), sv(&created_at)])?;
+            exec(c, "INSERT INTO self_event (event_id, event_type, description, details, importance, created_at) VALUES (?,?,?,?,?,?)", vec![sv(&a.str("event_id")?), sv(&a.str("event_type")?), sv(&a.str("description")?), jv(a.get("details")), if matches!(a.get("importance"), Some(Value::Null)) { Sql::Null } else { fv(Some(a.opt_f64("importance")?.unwrap_or(0.5))) }, sv(&created_at)])?;
             Value::Null
         }
         "get_self_events_by_type" => list(c, "SELECT * FROM self_event WHERE event_type=? ORDER BY created_at DESC, rowid DESC LIMIT ?", vec![sv(&a.str("event_type")?), iv(limit(10)?)], &["details"], false)?,

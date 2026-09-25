@@ -2,14 +2,17 @@
 //! (агент на Python + MySQL против ядра на Rust + SQLite). Время и случайные идентификаторы подаются через `Ctx`, поэтому поведение воспроизводимо в тестах.
 pub mod causal_events;
 pub mod chat_prompts;
+pub mod chat_turn;
 pub mod commitment_verification;
 pub mod event_extraction;
 pub mod fact_extraction;
 pub mod ctx;
 pub mod personal_facts;
+pub mod personal_memory;
 pub mod relationship_commitments;
 pub mod relationship_memory;
 pub mod relationship_state;
+pub mod self_model;
 
 #[cfg(feature = "python")]
 mod bridge;

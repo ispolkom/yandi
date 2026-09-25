@@ -29,6 +29,11 @@ impl<'a> Ctx<'a> {
         self
     }
 
+    /// Сколько заданных идентификаторов ещё не израсходовано (для сверки расхода с Python).
+    pub fn ids_left(&self) -> usize {
+        self.ids.borrow().len()
+    }
+
     pub fn now_secs(&self) -> f64 {
         self.fixed_now.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64())
     }
