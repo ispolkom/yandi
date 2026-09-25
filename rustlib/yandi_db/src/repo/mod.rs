@@ -12,6 +12,7 @@ use serde_json::{Map, Value};
 pub mod epistemic;
 pub mod beliefs;
 pub mod field_protection;
+pub mod memory;
 pub mod relationship;
 pub mod evidence;
 pub mod views;
@@ -318,6 +319,9 @@ pub fn call(c: &Connection, name: &str, args: &Value) -> R<Value> {
     if let Some(v) = relationship::dispatch(c, name, &a)? {
         return Ok(v);
     }
+    if let Some(v) = memory::dispatch(c, name, &a)? {
+        return Ok(v);
+    }
     Err(format!("неизвестная функция {name}"))
 }
 
@@ -395,4 +399,22 @@ pub(crate) fn dt_opt(v: Option<&Value>) -> R<Option<String>> {
         None | Some(Value::Null) => None,
         other => Some(dt_or_now(other)?),
     })
+}
+
+/// Python `datetime.isoformat()` для метки, пришедшей числом Unix (микросекунды выводятся, если не нулевые) или «сейчас» при None.
+pub(crate) fn isoformat_of(v: Option<&Value>) -> R<String> {
+    let t = match v {
+        None | Some(Value::Null) => std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64(),
+        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+        Some(_) => return Err("AttributeError: 'str' object has no attribute 'isoformat'".into()),
+    };
+    let secs = t.floor();
+    let mut micro = ((t - secs) * 1_000_000.0).round_ties_even() as i64;
+    let mut s = secs as i64;
+    if micro >= 1_000_000 {
+        micro -= 1_000_000;
+        s += 1;
+    }
+    let base = fmt_epoch_secs(s).replacen(' ', "T", 1);
+    Ok(if micro == 0 { base } else { format!("{base}.{micro:06}") })
 }
