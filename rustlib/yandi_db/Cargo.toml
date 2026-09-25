@@ -20,5 +20,7 @@ pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
 # Python-точные примитивы (нормализация текста утверждений) — из ядра переноса
 yandi_rs = { path = "../yandi_rs", default-features = false }

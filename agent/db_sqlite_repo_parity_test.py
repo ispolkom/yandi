@@ -64,6 +64,7 @@ def main() -> int:
     import pymysql
 
     import agent.db.sql.repositories as repo
+    from agent.db.sql import field_protection as fp
     import agent.db.sql.schema as S
     from agent.db.sql.security_triggers import immutability_triggers
 
@@ -100,6 +101,10 @@ def main() -> int:
         for t in tables:
             cur.execute(f"TRUNCATE TABLE {t}")  # TRUNCATE не вызывает триггеры и сбрасывает AUTO_INCREMENT
         cur.execute("SET FOREIGN_KEY_CHECKS=1")
+        fp.clear_key()
+        fp.forget_mode()
+        yandi_db.fp_clear_key()
+        yandi_db.fp_forget_mode()
         if state["h"] is not None:
             yandi_db.close(state["h"])
         state["h"] = yandi_db.open_memory()
@@ -151,8 +156,9 @@ def main() -> int:
         for i, (func, kwargs) in enumerate(calls):
             p, r = py_call(func, kwargs), rs_call(func, kwargs)
             if "error" in p or "error" in r:
-                ok = ("error" in p) == ("error" in r) and (p.get("error") == "ValueError") == str(r.get("error", "")).startswith("ValueError") \
-                    and (p.get("error") != "AssertionError" or r.get("error") == "AssertionError")
+                rc = str(r.get("error", "")).split(":")[0]
+                known = {"ValueError", "AssertionError", "StorageLocked", "StorageTampered", "StorageProtectionError", "KeyError"}
+                ok = ("error" in p) == ("error" in r) and (p.get("error") not in known or p.get("error") == rc)
             else:
                 ok = canon(p["ok"]) == canon(r["ok"])
             check(f"{label} · вызов {i} {func}", ok, f"\n args={json.dumps(kwargs, ensure_ascii=False)[:300]}\n py={json.dumps(p, ensure_ascii=False)[:2500]}\n rs={json.dumps(r, ensure_ascii=False)[:2500]}")
@@ -348,6 +354,163 @@ def main() -> int:
         ("compare_runs", dict(run_id_a="r1", run_id_b="r3")),
     ]
     scenario("F1 API чтения локальной памяти", views)
+
+    grv = [
+        ("record_grievance", dict(grievance_id="g1", user_id="u1", event_type="insult", description="Ты сказал мне что-то обидное вчера вечером", severity=0.6, context={"turn": "t1", "текст": "привет 🌍"}, created_at=T0)),
+        ("record_grievance", dict(grievance_id="g2", user_id="u1", event_type="rude", description="yp1:похоже на запечатанное", severity=0.3, created_at=T1)),
+        ("record_grievance", dict(grievance_id="g3", user_id="u1", event_type="rude", description="yp0:ещё хитрее", severity=0.2, context=None, created_at=T2)),
+        ("record_grievance", dict(grievance_id="g4", user_id="u2", event_type="x", description="Другой человек", severity=0.9, context=[1, 2], created_at=T0)),
+        ("get_grievance", dict(grievance_id="g1")),
+        ("get_grievance", dict(grievance_id="g2")),
+        ("get_grievance", dict(grievance_id="g3")),
+        ("get_grievance", dict(grievance_id="zz")),
+        ("find_similar_open_grievance", dict(user_id="u1", description="Ты сказал мне что-то обидное ЕЩЁ РАЗ")),
+        ("find_similar_open_grievance", dict(user_id="u1", description="совсем другое")),
+        ("find_similar_open_grievance", dict(user_id="u3", description="Ты сказал мне что-то обидное")),
+        ("update_grievance_status", dict(grievance_id="g1", status="healing", apology_sincerity=0.8, apology_at=T1, timestamp=T1)),
+        ("update_grievance_status", dict(grievance_id="g1", status="understood", understood_at=T2, timestamp=T2)),
+        ("get_grievance", dict(grievance_id="g1")),
+        ("bump_grievance", dict(grievance_id="g1", new_severity=0.75, timestamp=T2)),
+        ("get_grievance", dict(grievance_id="g1")),
+        ("update_grievance_status", dict(grievance_id="g2", status="forgiven", forgiven_at=T2, timestamp=T2)),
+        ("update_grievance_status", dict(grievance_id="g3", status="unforgiven", timestamp="2026-03-01 10:02:00")),
+        ("find_similar_open_grievance", dict(user_id="u1", description="yp1:похоже на запечатанное")),
+        ("list_active_grievances", dict(user_id="u1")),
+        ("list_active_grievances", dict(user_id="u2")),
+        ("list_recent_resolved_grievances", dict(user_id="u1")),
+        ("list_recent_resolved_grievances", dict(user_id="u1", limit=1)),
+        ("count_grievances_by_status", dict(user_id="u1", status="registered")),
+        ("count_grievances_by_status", dict(user_id="u1", status="forgiven")),
+        ("count_grievances_by_status", dict(user_id="nobody", status="forgiven")),
+        ("get_forgiveness_capacity", dict(user_id="u1")),
+        ("set_forgiveness_capacity", dict(user_id="u1", capacity=42.5, last_forgiveness=T1, timestamp=T1)),
+        ("set_forgiveness_capacity", dict(user_id="u1", capacity=44.0, last_forgiveness=None, timestamp=T2)),
+        ("set_forgiveness_capacity", dict(user_id="u2", capacity=10.0, timestamp=T2)),
+        ("get_forgiveness_capacity", dict(user_id="u1")),
+        ("get_forgiveness_capacity", dict(user_id="u2")),
+    ]
+    scenario("G1 обиды и ёмкость прощения (защита выключена)", grv)
+    pers = [
+        ("get_personality", dict()),
+        ("get_or_create_personality", dict(name="Янди", version="1", traits=["добрая"], goals=["помогать"], principles=["не лгать"], limitations=[], preferences={"стиль": "тёплый", "n": 1}, created_at=T0)),
+        ("get_or_create_personality", dict(name="Другая", version="2", traits=[], goals=[], principles=[], limitations=[], preferences={}, created_at=T2)),
+        ("update_personality_lists", dict(traits=["добрая", "честная"], goals=None, updated_at=T1)),
+        ("update_personality_lists", dict(updated_at=T2)),
+        ("update_personality_lists", dict(principles=[], limitations=["x"], updated_at=T2)),
+        ("increment_personality_counter", dict(counter="total_cycles", updated_at=T1)),
+        ("increment_personality_counter", dict(counter="total_cycles", updated_at=T2)),
+        ("increment_personality_counter", dict(counter="total_decisions", updated_at=T2)),
+        ("increment_personality_counter", dict(counter="evil'; DROP TABLE personality; --", updated_at=T2)),
+        ("get_personality", dict()),
+        ("record_personality_change", dict(what_changed="traits", reason="опыт", created_at=T1)),
+        ("record_personality_change", dict(what_changed="goals", reason=None, created_at=T2)),
+        ("count_personality_changes", dict()),
+    ]
+    scenario("G2 личность", pers)
+
+    # ---- защита полей ВКЛЮЧЕНА: значения запечатаны, запись без ключа отвергается, чужой ключ — подделка ----
+    core_key = bytes(range(1, 33))
+    def enable_protection(mode, key=core_key, proof_key_from=core_key):
+        fp.install_key(proof_key_from)
+        m, nonce, proof = fp.new_mode_record(mode)
+        fp.clear_key()
+        cur.execute("INSERT INTO storage_protection_event (mode, nonce, proof, created_at) VALUES (%s,%s,%s,%s)", (m, nonce, proof, T0))
+        yandi_db.exec_sql(state["h"], "INSERT INTO storage_protection_event (mode, nonce, proof, created_at) VALUES (?,?,?,?)", json.dumps([m, nonce, {"hex": proof.hex()}, T0]))
+        fp.forget_mode(); yandi_db.fp_forget_mode()
+
+    def with_key(k):
+        fp.install_key(k)
+        yandi_db.fp_install_key(k.hex())
+
+    def scenario_protected(label, mode, calls_before_key, calls_with_key, key=core_key):
+        nonlocal n
+        reset()
+        n += 1
+        enable_protection(mode)
+        seq = [(f, kw, False) for f, kw in calls_before_key] + [(f, kw, True) for f, kw in calls_with_key]
+        keyed = False
+        for i, (func, kwargs, need_key) in enumerate(seq):
+            if need_key and not keyed:
+                with_key(key)
+                keyed = True
+            p, r = py_call(func, kwargs), rs_call(func, kwargs)
+            if "error" in p or "error" in r:
+                rc = str(r.get("error", "")).split(":")[0]
+                ok = ("error" in p) == ("error" in r) and p.get("error") == rc
+            else:
+                ok = canon(p["ok"]) == canon(r["ok"])
+            check(f"{label} · вызов {i} {func}", ok, f"\n args={json.dumps(kwargs, ensure_ascii=False)[:200]}\n py={json.dumps(p, ensure_ascii=False)[:500]}\n rs={json.dumps(r, ensure_ascii=False)[:500]}")
+        # перекрёстная проверка: то, что запечатал Rust, открывает Python и наоборот (значения на диске у каждой стороны свои, шум nonce)
+        for t, col, keyc in (("grievance", "description", "id"),):
+            cur.execute(f"SELECT {keyc} AS k, {col} AS v FROM {t}")
+            pv = {r["k"]: r["v"] for r in cur.fetchall()}
+            rv = {r["k"]: r["v"] for r in json.loads(yandi_db.query(state["h"], f"SELECT {keyc} AS k, {col} AS v FROM {t}"))}
+            for k, v in rv.items():
+                if isinstance(v, str) and v.startswith("yp1:") and k in pv:
+                    try:
+                        opened = fp.open_with(fp.storage_key(), t, col, {keyc: k}, v)
+                        expected = fp.open_with(fp.storage_key(), t, col, {keyc: k}, pv[k])
+                        check(f"{label} · перекрёстное открытие {t}.{col}[{k}]", opened == expected, f"{opened!r} != {expected!r}")
+                    except Exception as e:  # noqa: BLE001
+                        check(f"{label} · перекрёстное открытие {t}.{col}[{k}]", False, repr(e))
+        fp.clear_key(); yandi_db.fp_clear_key()
+
+    sealed_calls = [
+        ("record_grievance", dict(grievance_id="g1", user_id="u1", event_type="insult", description="Секретное слово человека", severity=0.5, context={"a": "б"}, created_at=T0)),
+        ("record_grievance", dict(grievance_id="g2", user_id="u1", event_type="insult", description="yp1:подделка-под-запечатанное", severity=0.5, created_at=T1)),
+        ("get_grievance", dict(grievance_id="g1")),
+        ("get_grievance", dict(grievance_id="g2")),
+        ("find_similar_open_grievance", dict(user_id="u1", description="Секретное слово человека!")),
+        ("list_active_grievances", dict(user_id="u1")),
+        ("update_grievance_status", dict(grievance_id="g1", status="forgiven", forgiven_at=T2, timestamp=T2)),
+        ("list_recent_resolved_grievances", dict(user_id="u1")),
+    ]
+    scenario_protected("H1 защита ВКЛЮЧЕНА, ключ есть", "on", [], sealed_calls)
+    scenario_protected("H2 защита ВКЛЮЧЕНА, ключа нет: запись отвергается", "on", [
+        ("record_grievance", dict(grievance_id="g1", user_id="u1", event_type="insult", description="слова", severity=0.5, created_at=T0)),
+        ("get_grievance", dict(grievance_id="g1")),
+        ("list_active_grievances", dict(user_id="u1")),
+    ], [])
+    scenario_protected("H3 миграция: запись запечатана, чтение принимает оба вида", "migrating", [], sealed_calls[:4])
+    # открытое значение при включённой защите = подделка мимо приложения; запечатанное без ключа = заперто
+    nonlocal_n = n
+    reset()
+    n += 1
+    enable_protection("on")
+    for stmt, params in (("INSERT INTO grievance (id, user_id, event_type, description, severity, status, created_at, updated_at) VALUES (%s,%s,%s,%s,%s,'registered',%s,%s)", ("gx", "u1", "e", "открытый текст мимо защиты", 0.1, T0, T0)),):
+        cur.execute(stmt, params)
+        yandi_db.exec_sql(state["h"], stmt.replace("%s", "?"), json.dumps(list(params)))
+    with_key(core_key)
+    for i, (func, kwargs) in enumerate([("get_grievance", dict(grievance_id="gx")), ("list_active_grievances", dict(user_id="u1"))]):
+        p, r = py_call(func, kwargs), rs_call(func, kwargs)
+        rc = str(r.get("error", "")).split(":")[0]
+        check(f"H4 подделка мимо защиты · {func}", p.get("error") == "StorageTampered" and rc == "StorageTampered", f"py={p} rs={r}")
+    fp.clear_key(); yandi_db.fp_clear_key()
+    # неверный ключ и неверная запись режима
+    reset()
+    n += 1
+    enable_protection("on")
+    with_key(core_key)
+    for func, kwargs in (("record_grievance", dict(grievance_id="g1", user_id="u1", event_type="e", description="слова", severity=0.1, created_at=T0)),):
+        py_call(func, kwargs), rs_call(func, kwargs)
+    fp.clear_key(); yandi_db.fp_clear_key()
+    with_key(bytes(range(50, 82)))  # другой ключ: запись режима не проверяется
+    for func, kwargs in (("get_grievance", dict(grievance_id="g1")),):
+        p, r = py_call(func, kwargs), rs_call(func, kwargs)
+        rc = str(r.get("error", "")).split(":")[0]
+        check(f"H5 чужой ключ · {func}", p.get("error") == "StorageTampered" and rc == "StorageTampered", f"py={p} rs={r}")
+    fp.clear_key(); yandi_db.fp_clear_key()
+    with_key(core_key)
+    cur.execute("INSERT INTO storage_protection_event (mode, nonce, proof, created_at) VALUES ('on', 'ab', UNHEX(REPEAT('00',32)), %s)", (T2,)); yandi_db.exec_sql(state["h"], "INSERT INTO storage_protection_event (mode, nonce, proof, created_at) VALUES ('on', 'ab', ?, ?)", json.dumps([{"hex": "00" * 32}, T2]))
+    fp.forget_mode(); yandi_db.fp_forget_mode()
+    ins = "INSERT INTO grievance (id, user_id, event_type, description, severity, status, created_at, updated_at) VALUES (%s,%s,%s,%s,%s,'registered',%s,%s)"
+    plain = ("gy", "u1", "e", "открытый текст", 0.1, T0, T0)
+    cur.execute(ins, plain); yandi_db.exec_sql(state["h"], ins.replace("%s", "?"), json.dumps(list(plain)))
+    for func, kwargs in (("get_grievance", dict(grievance_id="gy")),):
+        p, r = py_call(func, kwargs), rs_call(func, kwargs)
+        rc = str(r.get("error", "")).split(":")[0]
+        check(f"H6 подделанная запись режима · {func}", p.get("error") == "StorageTampered" and rc == "StorageTampered", f"py={p} rs={r}")
+    fp.clear_key(); yandi_db.fp_clear_key()
 
     print(f"\n(сценариев: {n}; успешных проверок: {_OK} из {_OK + len(FAILURES)})")
     print("=" * 72)

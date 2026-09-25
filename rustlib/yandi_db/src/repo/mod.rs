@@ -11,6 +11,8 @@ use serde_json::{Map, Value};
 
 pub mod epistemic;
 pub mod beliefs;
+pub mod field_protection;
+pub mod relationship;
 pub mod evidence;
 pub mod views;
 
@@ -313,6 +315,9 @@ pub fn call(c: &Connection, name: &str, args: &Value) -> R<Value> {
     if let Some(v) = views::dispatch(c, name, &a)? {
         return Ok(v);
     }
+    if let Some(v) = relationship::dispatch(c, name, &a)? {
+        return Ok(v);
+    }
     Err(format!("неизвестная функция {name}"))
 }
 
@@ -324,4 +329,70 @@ pub fn rows_pub(c: &Connection, sql: &str) -> R<Vec<Row>> {
 /// Первые `n` символов (Python-срез `s[:n]` работает по символам, не по байтам).
 pub(crate) fn cut_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
+}
+
+/// `json.dumps(x)` Python (ensure_ascii=True, разделители `, ` и `: `, порядок ключей как вставлен) — для TEXT-столбцов, где Python хранит JSON строкой.
+pub(crate) fn pydumps(v: &Value) -> String {
+    fn go(v: &Value, out: &mut String) {
+        match v {
+            Value::Null => out.push_str("null"),
+            Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Value::Number(n) => out.push_str(&n.to_string()),
+            Value::String(s) => {
+                out.push('"');
+                for ch in s.chars() {
+                    match ch {
+                        '"' => out.push_str("\\\""),
+                        '\\' => out.push_str("\\\\"),
+                        '\n' => out.push_str("\\n"),
+                        '\r' => out.push_str("\\r"),
+                        '\t' => out.push_str("\\t"),
+                        '\u{8}' => out.push_str("\\b"),
+                        '\u{c}' => out.push_str("\\f"),
+                        c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
+                            let mut b = [0u16; 2];
+                            for u in c.encode_utf16(&mut b) {
+                                out.push_str(&format!("\\u{:04x}", u));
+                            }
+                        }
+                        c => out.push(c),
+                    }
+                }
+                out.push('"');
+            }
+            Value::Array(a) => {
+                out.push('[');
+                for (i, x) in a.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    go(x, out);
+                }
+                out.push(']');
+            }
+            Value::Object(m) => {
+                out.push('{');
+                for (i, (k, x)) in m.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    go(&Value::String(k.clone()), out);
+                    out.push_str(": ");
+                    go(x, out);
+                }
+                out.push('}');
+            }
+        }
+    }
+    let mut s = String::new();
+    go(v, &mut s);
+    s
+}
+
+/// `_coerce_datetime(x)` без подстановки «сейчас»: None остаётся None.
+pub(crate) fn dt_opt(v: Option<&Value>) -> R<Option<String>> {
+    Ok(match v {
+        None | Some(Value::Null) => None,
+        other => Some(dt_or_now(other)?),
+    })
 }
