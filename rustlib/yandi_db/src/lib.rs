@@ -6,6 +6,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub use rusqlite;
 use rusqlite::{params, Connection};
 
 /// Версия схемы, из которой сгенерированы `schema_sqlite.sql` / `triggers_sqlite.sql`.

@@ -241,7 +241,7 @@ pub fn normalize_dt_string(s: &str) -> String {
     fmt_epoch_secs(days * 86_400 + h * 3600 + mi * 60 + se + 1)
 }
 
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
     let yoe = y.rem_euclid(400);
@@ -429,4 +429,16 @@ pub(crate) fn isoformat_of(v: Option<&Value>) -> R<String> {
     }
     let base = fmt_epoch_secs(s).replacen(' ', "T", 1);
     Ok(if micro == 0 { base } else { format!("{base}.{micro:06}") })
+}
+
+/// `YYYY-MM-DD HH:MM:SS[.дробь]` (или с `T`) → секунды Unix (UTC) с дробной частью; None — не похоже на время.
+pub fn parse_dt_secs(s: &str) -> Option<f64> {
+    let b = s.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || !(b[10] == b' ' || b[10] == b'T') || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    let n = |a: usize, z: usize| s.get(a..z)?.parse::<i64>().ok();
+    let (y, mo, d, h, mi, se) = (n(0, 4)?, n(5, 7)?, n(8, 10)?, n(11, 13)?, n(14, 16)?, n(17, 19)?);
+    let frac = if b.len() > 20 && b[19] == b'.' { s.get(19..)?.parse::<f64>().ok().unwrap_or(0.0) } else { 0.0 };
+    Some((days_from_civil(y, mo as u32, d as u32) * 86_400 + h * 3600 + mi * 60 + se) as f64 + frac)
 }

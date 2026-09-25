@@ -1,0 +1,21 @@
+[package]
+name = "yandi_core"
+version = "0.1.0"
+edition = "2021"
+description = "Ядро YANDI на Rust: перенос agent/ (отношения, память, конвейер проверки) поверх yandi_db. Без Python; мост PyO3 — только для сверки с оригиналом."
+license = "MIT"
+
+[lib]
+name = "yandi_core"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["python"]
+python = ["dep:pyo3"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+rand = "0.8"
+yandi_db = { path = "../yandi_db", default-features = false }
+yandi_rs = { path = "../yandi_rs", default-features = false }

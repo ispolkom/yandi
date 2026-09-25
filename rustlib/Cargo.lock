@@ -2086,6 +2086,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
+name = "yandi_core"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
+ "rand",
+ "serde_json",
+ "yandi_db",
+ "yandi_rs",
+]
+
+[[package]]
 name = "yandi_db"
 version = "0.1.0"
 dependencies = [
