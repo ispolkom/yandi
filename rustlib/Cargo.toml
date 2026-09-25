@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["yandi_rs", "yandi_llm"]
+members = ["yandi_rs", "yandi_llm", "yandi_state"]
 
 # Отдельное Rust-рабочее пространство для переноса Python-логики (agent/, pet/) на Rust,
 # кусок за куском — по договорённости с владельцем: маленькими шагами, без спешки, никогда

@@ -1,0 +1,17 @@
+[package]
+name = "yandi_state"
+version = "0.1.0"
+edition = "2021"
+description = "Встроенное хранилище состояния YANDI (замена внешнему Redis): строки с TTL, списки, множества, ключи по шаблону, публикация/подписка — с семантикой Redis для реально используемого подмножества команд. Без внешнего сервера; Python-мост — только для дифференциальных тестов против настоящего Redis."
+license = "MIT"
+
+[lib]
+name = "yandi_state"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["python"]
+python = ["dep:pyo3"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
