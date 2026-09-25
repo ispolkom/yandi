@@ -131,6 +131,33 @@ fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
         "rc_record_fulfillment_claim" => rc::record_fulfillment_claim(cx, &uid, a_str(a, "commitment_id").as_deref(), &a_str(a, "evidence").unwrap_or_default(), a_str(a, "source_turn_id").as_deref(), a_span(a))?,
         "rc_record_verification" => rc::record_verification(cx, &uid, a_str(a, "commitment_id").as_deref(), a.get("kept").and_then(|v| v.as_bool()).unwrap_or(false), &a_str(a, "source").unwrap_or_default(), a_str(a, "evidence").as_deref())?,
         "rc_record_direct_fulfilment" => rc::record_direct_fulfilment(cx, &uid, a_str(a, "commitment_id").as_deref(), &a_str(a, "evidence").unwrap_or_default(), a_str(a, "source_turn_id").as_deref(), a_span(a))?,
+        "ee_extract" => {
+            use crate::event_extraction as ee;
+            use std::cell::{Cell, RefCell};
+            let responses: Vec<String> = a.get("responses").and_then(|v| v.as_array()).map(|x| x.iter().map(|s| s.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+            let idx = Cell::new(0usize);
+            let prompts: RefCell<Vec<Value>> = RefCell::new(vec![]);
+            let llm = |msgs: &[(String, String)]| -> Result<String, String> {
+                prompts.borrow_mut().push(json!(msgs.iter().map(|(r, c)| json!({"role": r, "content": c})).collect::<Vec<_>>()));
+                let i = idx.get();
+                idx.set(i + 1);
+                let r = responses.get(i).cloned().unwrap_or_default();
+                match r.strip_prefix("__raise__:") {
+                    Some(name) => Err(name.to_string()),
+                    None => Ok(r),
+                }
+            };
+            let res = ee::extract_relational_events(&a_str(a, "message").unwrap_or_default(), &llm)?;
+            json!({"result": res.to_json(), "intensity": ee::to_intensity(&res).to_json(), "prompts": prompts.into_inner()})
+        }
+        "ee_to_intensity" => {
+            use crate::event_extraction as ee;
+            let events: Vec<ee::ExtractedEvent> = a.get("events").and_then(|v| v.as_array()).map(|x| x.iter().map(|e| ee::ExtractedEvent {
+                kind: e["type"].as_str().unwrap_or("").to_string(), evidence: e["evidence"].as_str().unwrap_or("").to_string(),
+                start: e["start"].as_u64().unwrap_or(0) as usize, end: e["end"].as_u64().unwrap_or(0) as usize,
+                severity: e["severity"].as_f64().unwrap_or(0.0), sincerity: e["sincerity"].as_f64().unwrap_or(0.0)}).collect()).unwrap_or_default();
+            ee::to_intensity(&ee::ExtractionResult { events, ..Default::default() }).to_json()
+        }
         "pf_list_facts" => json!(pf::list_facts(cx, &uid)?),
         "pf_record_turn_facts" => {
             let facts: Vec<pf::ExtractedFact> = a.get("facts").and_then(|v| v.as_array()).map(|x| x.iter().map(pf::ExtractedFact::from_json).collect()).unwrap_or_default();
