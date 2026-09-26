@@ -612,6 +612,22 @@ fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
                 other => return Err(format!("нет метода {other}")),
             }
         }
+        "rg_call" => {
+            use crate::relationship_gate as rg;
+            let gate = rg::RelationshipGate::new(a.get("context").unwrap_or(&Value::Null))?;
+            match a_str(a, "method").as_deref().unwrap_or("") {
+                "decide" => {
+                    let (d, c, r, m) = gate.decide(a.get("is_self_query").and_then(|v| v.as_bool()).unwrap_or(false))?;
+                    json!([d, c, r, m])
+                }
+                "apply" => {
+                    let idx = a.get("pick").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let (t, m, arch) = gate.get_gate_response(&a_str(a, "decision").unwrap_or_default(), &a_str(a, "answer").unwrap_or_default(), a.get("has_archive").and_then(|v| v.as_bool()).unwrap_or(false), &mut |_| idx);
+                    json!({"text": t, "meta": m, "archive": arch})
+                }
+                other => return Err(format!("нет метода {other}")),
+            }
+        }
         "hb_call" => {
             use crate::hypothesis_builder as hb;
             let texts: Vec<String> = a.get("texts").and_then(|v| v.as_array()).map(|x| x.iter().map(|t| t.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
