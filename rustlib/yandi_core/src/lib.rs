@@ -6,6 +6,7 @@ pub mod chat_prompts;
 pub mod chat_turn;
 pub mod commitment_verification;
 pub mod curiosity;
+pub mod hypothesis_builder;
 pub mod core_loop;
 pub mod event_extraction;
 pub mod fact_extraction;

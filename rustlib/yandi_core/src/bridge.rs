@@ -612,6 +612,23 @@ fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
                 other => return Err(format!("нет метода {other}")),
             }
         }
+        "hb_call" => {
+            use crate::hypothesis_builder as hb;
+            let texts: Vec<String> = a.get("texts").and_then(|v| v.as_array()).map(|x| x.iter().map(|t| t.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+            let q = a_str(a, "question").unwrap_or_default();
+            match a_str(a, "method").as_deref().unwrap_or("") {
+                "extract_observations" => json!(hb::extract_observations(cx, &a_str(a, "text").unwrap_or_default(), &a_str(a, "source_ref").unwrap_or_else(|| "unknown".into()), &q)),
+                "build_inferences" => json!(hb::build_inferences(cx, a.get("observations").and_then(|v| v.as_array()).map(|v| v.as_slice()).unwrap_or(&[]), &q)),
+                "classify_hypothesis" => json!(hb::classify_hypothesis(&a_str(a, "text").unwrap_or_default())),
+                "extract_hypotheses" => json!(hb::extract_hypotheses_from_texts(cx, &texts, &q)),
+                "extract_traditions" => json!(hb::extract_traditions_from_texts(cx, &texts)),
+                "build" => {
+                    let refs: Option<Vec<String>> = a.get("source_refs").and_then(|v| v.as_array()).map(|x| x.iter().map(|t| t.as_str().unwrap_or("").to_string()).collect());
+                    hb::build_hypothesis_graph(cx, &q, &texts, refs.as_deref())
+                }
+                other => return Err(format!("нет метода {other}")),
+            }
+        }
         // любопытство: список неизвестных (состояние экземпляра) проходит через вызовы явно
         "cu_call" => {
             use crate::curiosity as cu;
