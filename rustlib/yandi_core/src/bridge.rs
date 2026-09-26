@@ -612,6 +612,39 @@ fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
                 other => return Err(format!("нет метода {other}")),
             }
         }
+        "pc_call" => {
+            use crate::personality_core as pc;
+            let item = a.get("item").cloned().unwrap_or(Value::Null);
+            match a_str(a, "method").as_deref().unwrap_or("") {
+                "init" => {
+                    pc::init(cx)?;
+                    Value::Null
+                }
+                "get_name" => pc::get_name(cx)?,
+                m @ ("get_traits" | "get_goals" | "get_principles") => pc::get_list(cx, &m[4..])?,
+                m @ ("add_trait" | "add_goal" | "add_principle" | "add_limitation") => {
+                    let key = match m {
+                        "add_trait" => "traits",
+                        "add_goal" => "goals",
+                        "add_principle" => "principles",
+                        _ => "limitations",
+                    };
+                    pc::add_to_list(cx, key, &item)?;
+                    Value::Null
+                }
+                "record_change" => {
+                    pc::record_change(cx, &a_str(a, "what_changed").unwrap_or_default(), &a_str(a, "reason").unwrap_or_default())?;
+                    Value::Null
+                }
+                m @ ("increment_cycles" | "increment_decisions" | "increment_learnings") => {
+                    pc::increment(cx, &format!("total_{}", &m[10..]))?;
+                    Value::Null
+                }
+                "get_summary" => pc::get_summary(cx)?,
+                "summary" => json!(pc::summary(cx)?),
+                other => return Err(format!("нет метода {other}")),
+            }
+        }
         "de_call" => {
             use crate::disagreement_engine as de;
             match a_str(a, "method").as_deref().unwrap_or("") {
