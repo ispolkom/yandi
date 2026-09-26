@@ -612,6 +612,31 @@ fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
                 other => return Err(format!("нет метода {other}")),
             }
         }
+        "de_call" => {
+            use crate::disagreement_engine as de;
+            match a_str(a, "method").as_deref().unwrap_or("") {
+                "init" => {
+                    crate::belief_manager::apply_decay(cx)?;
+                    Value::Null
+                }
+                "challenge" => {
+                    let rel = a_str(a, "related_belief_id");
+                    let s = |k: &str| a_str(a, k).unwrap_or_default();
+                    de::challenge(
+                        cx,
+                        &de::Challenge {
+                            topic: &s("topic"), old_position: &s("old_position"), challenge: &s("challenge"), analysis: &s("analysis"), new_position: &s("new_position"),
+                            confidence_before: a_f(a, "confidence_before"), confidence_after: a_f(a, "confidence_after"), related_belief_id: rel.as_deref(),
+                        },
+                    )?
+                }
+                "get_recent" => json!(de::get_recent(cx, a.get("limit").and_then(|v| v.as_i64()).unwrap_or(5))?),
+                "get_by_topic" => json!(de::get_by_topic(cx, &a_str(a, "topic").unwrap_or_default())?),
+                "get_stats" => de::get_stats(cx)?,
+                "summary" => json!(de::summary(cx)?),
+                other => return Err(format!("нет метода {other}")),
+            }
+        }
         "rg_call" => {
             use crate::relationship_gate as rg;
             let gate = rg::RelationshipGate::new(a.get("context").unwrap_or(&Value::Null))?;

@@ -6,6 +6,7 @@ pub mod chat_prompts;
 pub mod chat_turn;
 pub mod commitment_verification;
 pub mod curiosity;
+pub mod disagreement_engine;
 pub mod hypothesis_builder;
 pub mod relationship_gate;
 pub mod core_loop;
