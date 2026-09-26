@@ -545,6 +545,112 @@ fn dispatch(cx: &Ctx, name: &str, a: &Value) -> R<Value> {
             };
             json!({"out": out, "state": lp.to_json()})
         }
+        // внутреннее состояние личности (состояние — только в базе)
+        name if name.starts_with("is_") => {
+            use crate::inner_state as ist;
+            let uid = a_str(a, "user_id").unwrap_or_default();
+            match &name[3..] {
+                "init" => {
+                    ist::init(cx, &uid)?;
+                    Value::Null
+                }
+                "add_event" => ist::add_event(cx, &uid, &a_str(a, "event_type").unwrap_or_default(), &a_str(a, "description").unwrap_or_default(), a.get("sincerity").and_then(|v| v.as_f64()).unwrap_or(0.5))?,
+                "get_summary" => ist::get_summary(cx, &uid)?,
+                "get_response_context" => ist::get_response_context(cx, &uid)?,
+                "get_inner_monologue" => json!(ist::get_inner_monologue(cx, &uid)?),
+                "get_history" => json!(ist::get_history(cx, &uid)?),
+                other => return Err(format!("нет метода {other}")),
+            }
+        }
+        // граф личности
+        name if name.starts_with("pg_") => {
+            use crate::personality_graph as pg;
+            let st = |k: &str| a_str(a, k).unwrap_or_default();
+            let fl = |k: &str, d: f64| a.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+            match &name[3..] {
+                "init" => {
+                    pg::init(cx)?;
+                    Value::Null
+                }
+                "get_traits" => pg::get_traits(cx)?,
+                "get_trait_value" => json!(pg::get_trait_value(cx, &st("name"))?),
+                "get_trait_description" => json!(pg::get_trait_description(cx, &st("name"))?),
+                "get_all_traits_data" => pg::get_all_traits_data(cx)?,
+                "get_high_traits" => json!(pg::get_high_traits(cx, fl("threshold", 0.7))?),
+                "get_low_traits" => json!(pg::get_low_traits(cx, fl("threshold", 0.3))?),
+                "get_evolving_traits" => json!(pg::get_evolving_traits(cx)?),
+                "get_edges" => pg::get_edges(cx)?,
+                "get_edge_weight" => json!(pg::get_edge_weight(cx, &st("source"), &st("target"))?),
+                "get_edges_for_node" => pg::get_edges_for_node(cx, &st("node"))?,
+                "get_conflicts" => json!(pg::get_conflicts(cx)?),
+                "get_internal_questions" => json!(pg::get_internal_questions(cx)?),
+                "get_evolution" => pg::get_evolution(cx, fl("days", 7.0))?,
+                "set_trait" => {
+                    pg::set_trait(cx, &st("name"), fl("value", 0.0))?;
+                    Value::Null
+                }
+                "change_trait" => {
+                    pg::change_trait(cx, &st("name"), fl("delta", 0.0), a.get("source").and_then(|v| v.as_str()))?;
+                    Value::Null
+                }
+                "set_edge_weight" => {
+                    pg::set_edge_weight(cx, &st("source"), &st("target"), fl("weight", 0.0))?;
+                    Value::Null
+                }
+                "learn_edge" => {
+                    pg::learn_edge(cx, &st("source"), &st("target"), a.get("success").and_then(|v| v.as_bool()).unwrap_or(false))?;
+                    Value::Null
+                }
+                "reflect" => {
+                    pg::reflect(cx, &st("event"), fl("intensity", 0.05))?;
+                    Value::Null
+                }
+                "answer_internal_question" => {
+                    pg::answer_internal_question(cx, a.get("question_idx").and_then(|v| v.as_i64()).unwrap_or(0), &st("answer"))?;
+                    Value::Null
+                }
+                other => return Err(format!("нет метода {other}")),
+            }
+        }
+        // любопытство: список неизвестных (состояние экземпляра) проходит через вызовы явно
+        "cu_call" => {
+            use crate::curiosity as cu;
+            let mut e = match a.get("state").filter(|v| !v.is_null()) {
+                None => cu::CuriosityEngine::default(),
+                Some(s) => cu::CuriosityEngine::from_json(s),
+            };
+            let args = a.get("args").cloned().unwrap_or(json!({}));
+            let ul = |v: Vec<cu::Unknown>| json!(v.iter().map(|u| u.to_json()).collect::<Vec<_>>());
+            let refs = |v: Vec<&cu::Unknown>| json!(v.iter().map(|u| u.to_json()).collect::<Vec<_>>());
+            let out = match a_str(a, "method").as_deref().unwrap_or("") {
+                "init" => Value::Null,
+                "analyze_beliefs" => ul(e.analyze_beliefs(cx)?),
+                "analyze_response" => ul(e.analyze_response(
+                    cx,
+                    args.get("query").and_then(|v| v.as_str()).unwrap_or(""),
+                    args.get("epistemic").ok_or("KeyError")?,
+                    args.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    args.get("evidence_count").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    args.get("trust").and_then(|v| v.as_str()).unwrap_or(""),
+                )?),
+                "get_next_question" => match e.get_next_question() {
+                    Some(u) => u.to_json(),
+                    None => Value::Null,
+                },
+                "mark_resolved" => {
+                    e.mark_resolved(args.get("unknown_id").and_then(|v| v.as_str()).unwrap_or(""));
+                    Value::Null
+                }
+                "get_pending" => refs(e.get_pending()),
+                "get_exploring" => refs(e.get_exploring()),
+                "get_by_topic" => refs(e.get_by_topic(args.get("topic").unwrap_or(&Value::Null))),
+                "unknowns" => json!(e.unknowns.iter().map(|u| u.to_json()).collect::<Vec<_>>()),
+                "get_summary" => e.get_summary(),
+                "to_dict" => e.to_dict(),
+                other => return Err(format!("нет метода {other}")),
+            };
+            json!({"out": out, "state": e.to_json()})
+        }
         other => yandi_db::repo::call(cx.conn, other, a)?,
     })
 }
